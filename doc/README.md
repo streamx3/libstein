@@ -9,7 +9,8 @@ Reading order:
 
 | File | What |
 |---|---|
-| [`00-vision.md`](00-vision.md) | The brief: why, hard requirements R1–R12, non-goals, open questions |
+| [`00-vision.md`](00-vision.md) | The brief: why, hard requirements R1–R12 (R5a–f, R8a added after review), non-goals, open questions |
+| [`DECISIONS.md`](DECISIONS.md) | Numbered decision log (D1–D15): C++23, no exceptions, no QtCore, UTF-8, minimal templates, … |
 | [`research/01-gnome-disks.md`](research/01-gnome-disks.md) | GNOME Disks survey: UDisks2/D-Bus chain, imaging limits, Rust port, borrowable ideas |
 | [`research/02-kpmcore-partitionmanager.md`](research/02-kpmcore-partitionmanager.md) | kpmcore / KDE Partition Manager: class hierarchy, tool table, sfdisk backend, privilege helper, Operation/Job/Report; the GPT-backup finding |
 | [`research/03-gparted.md`](research/03-gparted.md) | GParted: `FS` capability struct, tool table, libparted usage, CopyBlocks, OperationDetail |
@@ -23,6 +24,7 @@ Reading order:
 | [`design/15-userspace-fs.md`](design/15-userspace-fs.md) | Reader/Writer interfaces, per-fs plan, mount backends per OS |
 | [`design/16-platform.md`](design/16-platform.md) | Platform layer interfaces, per-OS API mapping, privilege model |
 | [`design/17-capability-matrix.md`](design/17-capability-matrix.md) | What is planned at which level in which milestone |
+| [`design/18-structure-layouts.md`](design/18-structure-layouts.md) | Format manifests, generated layout classes, the hexinator-style `LayoutTree` |
 | [`20-roadmap.md`](20-roadmap.md) | Milestones M0–M4, risks |
 | [`reports/`](reports/) | Dated progress reports |
 

@@ -138,11 +138,32 @@ Rule of thumb: **inherit for "is a kind of", compose for "can do".**
 
 ## 5. Error handling, ownership, threading conventions
 
-- No exceptions across library boundaries. Public API returns
-  `stein::Expected<T>` (= `std::expected<T, stein::Error>` on C++23, a small
-  polyfill otherwise). `Error` carries a category, an OS error code, a
+- **No exceptions, anywhere in our code.** Public and internal functions
+  return `stein::Expected<T>` (an alias of `std::expected<T, stein::Error>`;
+  C++23 is the baseline). `Error` carries a category, an OS error code, a
   message, and an optional "report node" (see `design/13-operations.md`).
-  Exceptions may be used *inside* a module.
+  Consequences: constructors that can fail do not exist — every such type
+  has a `static Expected<T> open(...)`/`create(...)` factory; we never write
+  `throw`; we compile with exceptions *enabled* only because the standard
+  library and third-party code need them, and the few places that can
+  observe one (thread entry points, the RPC boundary, callbacks into
+  third-party libraries) `catch (...)` and convert to `Error::Internal`.
+  `std::bad_alloc` is treated as fatal.
+- **Templates are kept to the minimum a C++ programmer meets every day.**
+  Allowed: `std::expected`, `std::span`, `std::vector`, `std::optional`,
+  `std::function`, `std::unique_ptr/shared_ptr`, and small one-liner helpers
+  in `stein::util` (`contains(range, value)`, `split`, `join`,
+  `starts_with`…). Not allowed: template metaprogramming, CRTP, SFINAE,
+  `enable_if`, variadic template wizardry, concepts in public headers,
+  policy-template class designs. "C with classes" readability is the bar; if
+  a template cannot be stepped through in a debugger by its author, it is
+  rewritten as a plain class or function. The one internal exception is
+  the copy engine's byte-source/sink abstraction, which is a virtual
+  interface, not a template, precisely for this reason.
+- **No QtCore either** — argued in `DECISIONS.md` D3. The readability Qt
+  gives (`.contains()`, `.split()`, `.startsWith()`) is largely in C++23
+  now (`std::string::contains`, `std::ranges::contains`, `std::format`,
+  `std::expected`), and the rest is a 200-line `stein::util` header.
 - Ownership: entities are owned by the object that discovered them (a
   `Partition` by its `PartitionTable` snapshot, a `FileSystem` by its probe
   result). Returned capability pointers are non-owning and valid only while
@@ -152,19 +173,25 @@ Rule of thumb: **inherit for "is a kind of", compose for "can do".**
 - Threading: entities are not thread-safe; a `Job` runs on one worker thread
   and talks back via `Progress&` (thread-safe sink). Cancellation is
   cooperative via a `CancelToken` passed with `Progress`.
-- Strings: UTF-8 `std::string` for names/labels; `std::u16string` only
-  inside NTFS/FAT/exFAT/HFS+ parsers; conversion helpers in `stein::core`.
+- Strings: **UTF-8 `std::string` everywhere** — API, labels, paths (with
+  platform conversion at the OS boundary), logs, reports. `std::u16string`
+  appears only *inside* the NTFS/FAT/exFAT/HFS+/GPT-name parsers where the
+  on-disk format is UTF-16; conversion helpers live in `stein::core`.
 - No RTTI dependence in the public API (we still compile with RTTI on).
 - ABI: not stable before 1.0; but public headers avoid STL containers in
   virtual signatures where a span/view works, to keep that option open.
 
 ## 6. Alternatives considered
 
-- **C++20 concepts / templates instead of virtual bases.** Rejected for the
-  entity layer: the set of filesystems is decided at run time (probe result),
-  and UIs in other languages need a vtable to call through. Concepts *are*
-  used internally (e.g. `template<ByteSource S>` in the copy engine).
-- **Pure C API with opaque handles.** Deferred: a C shim (`stein_c`) for
-  bindings is planned on top of the C++ API, not instead of it.
-- **Qt-style signals/slots for progress.** No Qt. Progress is a plain
-  interface; a UI adapts it to whatever event loop it has.
+- **C++20 concepts / templates instead of virtual bases.** Rejected
+  outright (owner's decision, and the author agrees): the set of filesystems
+  is decided at run time, debuggability matters more than the last
+  nanosecond, and front-ends need a vtable to call through. No concepts in
+  the codebase; the copy engine uses virtual `ByteSource`/`ByteSink`.
+- **Pure C API with opaque handles.** Dropped from the plan. The front-ends
+  are C++ and link the C++ API directly. If a Swift/C# binding is ever
+  wanted, a C shim can be generated then; nothing in the design depends on it.
+- **Qt-style signals/slots for progress.** No Qt anywhere in the libraries.
+  Progress is a plain virtual interface (`Progress`); a UI adapts it to its
+  own event loop (GLib idle, `dispatch_async`, `PostMessage`, or Qt's if a
+  Qt UI is ever written on top).

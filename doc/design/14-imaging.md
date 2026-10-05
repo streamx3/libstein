@@ -18,7 +18,8 @@ maintainers declined; it is also the core of the dr_stein use case.
 | DMG (UDIF: UDZO/ULFO/UDRO, with `koly` trailer, plist XML) | macOS interchange; `hdiutil attach` for native mounting | v2 | — | |
 | partclone / Clonezilla | migration from popular tools | v3 | — | GPL tools; read their *format* (documented) in our own code |
 
-Design point: `ImageFormat` exposes an `ImageDevice : BlockDevice`, so every
+Design point (R5d — the requirement that has bothered the owner for years):
+`ImageFormat` exposes an `ImageDevice : BlockDevice`, so every
 other library (probe, pt, fs, container, volume, mount) works on images with
 no special cases. "Mount ext4 inside LUKS inside a `.stein` image on Windows"
 is the same code path as a physical disk.
@@ -44,6 +45,57 @@ single segment; resume after a crash (last valid chunk is known); restore a
 single partition out of a whole-disk image (chunk range from the table
 snapshot); "incremental" = new image whose manifest references unchanged
 chunks in a parent image (by chunk hash).
+
+## 2a. Pieces: backing up and restoring individual regions (R5a)
+
+Everything the probe tree knows about is a `Region{device, offset, length,
+kind, identity}`; `stein_layout` (`18-structure-layouts.md`) tells us where
+the *metadata* regions of each format are. So the image layer can address,
+independently:
+
+| Piece | Region(s) | Why you want it alone |
+|---|---|---|
+| Partition table (GPT) | LBA 0 (PMBR), LBA 1 + entry array, backup array + backup header at the end | "my table got wiped, the data is intact" — restore 34+33 sectors, not 1 TB |
+| Partition table (MBR) | LBA 0 + every EBR sector in the chain | same |
+| APM | block 0 (DDM) + the map blocks | same |
+| Filesystem header | ext: superblock + group descriptors (+ backup superblocks); FAT: reserved sectors + FATs; NTFS: boot sector + `$MFT`/`$MFTMirr` extents; HFS+: volume header + alternate; btrfs: all superblock copies | metadata-only snapshot before a risky operation; restore from a backup copy |
+| LUKS header | first 16 MiB (LUKS2) / up to 2 MiB (LUKS1) | the one piece whose loss is unrecoverable |
+| LVM metadata | PV label + metadata areas | same |
+| One partition | its extent | classic |
+| Whole disk | everything | classic |
+
+A `.stein` image whose manifest lists several pieces from the same source is
+a **piece set**; `RestoreImage` can restore any subset, and `DumpTable`/
+`RestoreTable` are the small special cases. Each piece carries its own
+hashes, so a 1 TB image can be verified "table only" in milliseconds.
+
+## 2b. Encryption as a layer (R5b, R5e)
+
+Two independent mechanisms, because they answer different questions:
+
+1. **Payload encryption inside `.stein`**: each chunk is encrypted with
+   AES-256-GCM or XChaCha20-Poly1305 under a data key; the data key is
+   wrapped by one or more key slots (passphrase via argon2id, keyfile, raw
+   key) in the manifest — LUKS2's keyslot idea applied to an image. Chunk
+   hashes are computed on the **plaintext** (so verification with the key
+   compares content) and the segment index is also hashed over the
+   **ciphertext** (so verification without the key still detects corruption
+   or truncation). Streaming: read → hash → compress → encrypt → write, one
+   pass, bounded memory. A 1 TB source never needs a 1 TB staging copy.
+2. **Any `BlockDevice` as the sink**: because a decrypted LUKS/VeraCrypt
+   container is itself a `BlockDevice`, an image can be written *into* an
+   encrypted container file or partition (`CreateImage` with
+   `sink = container.unlock(key)`), and read back the same way. This gives
+   compatibility with tools that already understand LUKS at zero extra
+   cost.
+
+Hashing through layers is then automatic: `Hasher::hash(BlockDevice&,
+Region)` does not care whether the device is a raw disk, a
+`DecryptedDevice`, an `ImageDevice` over a compressed segment, or a slice of
+any of those. MD5 is supported for interoperability; SHA-256 and BLAKE3 are
+the defaults; xxh3-128 is the fast per-chunk hash. Per-piece hashes are
+stored alongside per-chunk hashes so "verify this partition inside this
+encrypted image" is one bounded read.
 
 ## 3. Copy engine
 

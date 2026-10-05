@@ -1,6 +1,7 @@
 # libstein — Vision and Requirements
 
-*Status: living document. Captured from the project owner's brief on 2026-10-05.
+*Status: living document. Captured from the project owner's brief on 2026-10-05,
+revised after the owner's review the same day (see `DECISIONS.md`).
 Everything in later design documents must trace back to a line here.*
 
 ## 1. What we are building
@@ -35,8 +36,10 @@ on-disk logic.** They are all thin UIs over an OS-specific stack
 
 ## 3. Hard requirements (v1 design scope)
 
-- **R1. Pure C++** (C++20), standard library only in the core. No Qt, no glib,
-  no GTK, no Boost in public headers.
+- **R1. Pure C++23**, standard library only in the core. No Qt (not even
+  QtCore), no glib, no GTK, no Boost. UTF-8 `std::string` is the library-wide
+  string standard; other encodings appear only where an on-disk format
+  enforces them. No exceptions, minimal templates (`DECISIONS.md` D2–D5).
 - **R2. Cross-platform core.** Linux, macOS, Windows. Platform specifics are
   isolated in one "platform" library behind abstract interfaces.
 - **R3. Modular, inheritance-based design.** Every "kind of thing" has an
@@ -56,24 +59,61 @@ on-disk logic.** They are all thin UIs over an OS-specific stack
     targets; **VeraCrypt** compatibility is a stated long-term goal; mdraid,
     BitLocker, FileVault/CoreStorage, APFS containers, Windows dynamic disks
     (LDM) are to be at least recognisable.
-- **R5. Disk imaging that GNOME Disks refuses to do:** create/restore raw
-  images, **split images into pieces**, **compress** them, checksum them,
-  describe them with metadata, and **mount filesystems from inside image
-  files** on any OS.
-- **R6. GPT robustness:** read and repair from the backup header, verify CRCs,
-  relocate backup header after disk resize, detect hybrid/protective MBR
-  mismatches — explicitly, with diagnostics, the way `gdisk`'s recovery menu
-  does; none of the three GUI tools surveyed does this themselves.
+- **R5. Imaging, done properly.** GNOME Disks restores raw images of drives
+  and partitions well enough; everything around that is missing. We require:
+  - **R5a. Every piece is individually addressable.** Whole disk, one
+    partition, the partition table alone (GPT primary + backup + protective
+    MBR; MBR + its EBR chain; APM map), a filesystem's header region
+    (superblock(s)/boot sector/MFT mirror), a LUKS header, LVM metadata areas
+    — each is a `Region` with an identity, and each can be **dumped and
+    restored on its own**. "Restore only the partition table" and "restore
+    only the ext4 superblock from the backup copy in the image" are
+    first-class operations.
+  - **R5b. Transparent layers over any piece:** compression and **encryption**
+    are streaming wrappers applied while the data flows, never a second pass
+    over a second copy (a 1 TB image must not need another 1 TB to be
+    encrypted).
+  - **R5c. Self-describing images:** where it was taken from (device identity,
+    offset, size, sector size, the partition-table snapshot, the probe tree),
+    when, by what, with what hashes — so that a **one-click restore** needs
+    nothing but the image.
+  - **R5d. Images are devices.** An image file (raw, split, compressed,
+    encrypted, or any supported foreign format) opens like a disk: browse its
+    partition table, probe its filesystems, **mount one partition from inside
+    the image**, on any OS, without restoring anything anywhere. This is the
+    single most important imaging requirement.
+  - **R5e. Hash any piece, through any layer.** A checksum (MD5 for
+    compatibility, SHA-256/BLAKE3 by default) of a region can be computed on
+    the raw bytes *or* on the content seen through a decryption or
+    decompression layer, piece by piece, without unpacking to disk.
+  - **R5f. Split** images into fixed-size parts, **resume** interrupted
+    operations, **verify** without the key (ciphertext hashes) or with it.
+- **R6. GPT robustness and drive verification:** read and repair from the
+  backup header, verify CRCs, relocate backup header after disk resize,
+  detect hybrid/protective MBR mismatches — explicitly, with diagnostics, the
+  way `gdisk`'s recovery menu does; none of the three GUI tools surveyed does
+  this themselves. The same "verify" posture applies to native drives in
+  general: checksums of filesystem metadata, a read surface scan, and a
+  **capacity truth test** (is the drive really as big as its controller
+  claims — the fake-flash check `f3`/`h2testw` do).
 - **R7. Userspace filesystem access.** Long-term: *read and write* foreign
   filesystems in-process (e.g. open an ext4-inside-LUKS partition on Windows
   or macOS and write to it). Design the `FileSystem` interface so that a
   full userspace driver fits in it from the first attempt; detection-only and
   read-only implementations are just lower capability levels of the same
   interface.
-- **R8. No reliance on external binaries in the core.** Shelling out to
-  `mkfs.xxx`/`fsck.xxx` is allowed only as an *optional, clearly separated
-  backend* (so that early versions can be useful on Linux), never as the
-  architecture. GPL tools may be used by the **test-suite as oracles**.
+- **R8. The architecture never depends on external binaries; the early
+  implementation may.** If an existing library does half of what a module
+  needs, wrap it behind our interface, ship it, and keep it until the native
+  implementation is ready; the interface does not change when the backend
+  does. Shelling out to `mkfs.xxx`/`fsck.xxx` is an optional, clearly
+  separated backend, never the architecture. GPL tools are used by the
+  **test-suite as oracles and fixture generators**.
+- **R8a. Synthetic tests from day one.** Every module ships tests that run
+  without real devices and without privileges: small images generated by the
+  Linux tools in CI (and checked in, compressed) are the fixtures; coverage
+  of our own code is the goal; the oracle tools confirm our parsers agree
+  with the reference implementations.
 - **R9. Licensing.** The project is MIT. We may link LGPL libraries
   dynamically, absorb BSD/MIT/Apache/ISC code with attribution, and only
   *read* GPL code for ideas. See `research/05-library-ecosystem.md`.
@@ -89,22 +129,32 @@ on-disk logic.** They are all thin UIs over an OS-specific stack
 
 ## 4. Non-goals (for now)
 
-- Replacing the OS kernel drivers for *booting* or for everyday mounting on
+- Replacing OS kernel drivers for *booting* or for everyday mounting on
   the native OS. Native mounting goes through the OS; our userspace drivers
-  are for *foreign* filesystems and *images*.
-- A plugin ABI stable across versions. Plugins are compile-time modules first.
+  are for *foreign* filesystems and *images*. **In scope** on native drives:
+  verifying, repairing, formatting, partitioning, imaging — everything Disk
+  Utility does offline.
+- A stable *binary* interface for separately compiled plugins across
+  versions. (API = the C++ headers you program against; ABI = class layouts,
+  vtables, mangled symbol names that a compiled `.so`/`.dll` depends on. We
+  keep the API stable once at 1.0; we do not promise that a plugin built
+  against 1.0 loads into 1.1 without a rebuild — all modules are built
+  together from one tree.)
 - Reimplementing RAID resync, btrfs balance, zfs scrub, etc. Those are
   "recognise, mount via OS, hand off" at most.
 
 ## 5. Open questions (to be resolved in design docs)
 
-- OQ1. Single library vs. a chain: decided in `design/10-architecture.md`
-  (chain; see the dependency DAG there).
-- OQ2. "Interfaces" in C++: abstract base classes with virtual inheritance vs.
-  capability objects vs. concepts — argued in `design/11-cpp-interfaces.md`.
+- OQ1. Single library vs. a chain: a chain of modules during development,
+  shared libraries for now; a `STEIN_MONOLITHIC` build option folds them
+  into one `libstein` for deployment later (`design/10-architecture.md` §5).
+- OQ2. "Interfaces" in C++: decided — abstract bases + capability objects
+  (`design/11-cpp-interfaces.md`), confirmed by the owner.
 - OQ3. Which third-party libraries to *link* in v1 (if any) vs. write ourselves
   — `research/05-library-ecosystem.md`.
 - OQ4. Image container format: adopt an existing one (EWF/E01, qcow2, VHDX)
   or define our own (`design/14-imaging.md`).
 - OQ5. The mounting story per OS (FUSE / WinFsp / local NFS-SMB bridge) —
   `design/15-userspace-fs.md`.
+- OQ6. Structure visualisation and format manifests (hexinator-style tree of
+  every header field) — `design/18-structure-layouts.md`.

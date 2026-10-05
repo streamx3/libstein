@@ -7,9 +7,9 @@ dr_stein-style app exists long before the fancy filesystem drivers do.
 ## M0 — Research and design (this milestone, 2026-10-05)
 
 Done: reference surveys (`research/01..05`), vision (`00-vision.md`),
-architecture and design notes (`design/10..17`). Open: review by the project
-owner; decisions on OQ1–OQ5 in `00-vision.md` (recommendations are already
-stated in the design docs).
+architecture and design notes (`design/10..18`), owner review round 1 and
+the resulting decision log (`DECISIONS.md` D1–D15). Open: OQ3/OQ4/OQ5
+(owner still reading).
 
 ## M1 — Skeleton + core + block + platform (read-only) + probe (L0) + imaging v1
 
@@ -17,10 +17,14 @@ Deliverable: `stein` CLI that on all three OSes can `list` disks with
 identity and geometry, `probe` any disk or image and print the Topology tree
 with diagnostics (GPT/MBR/APM, nested BSD, LUKS/LVM/md detection, all L0
 filesystems), `image create/restore/verify` raw, split-raw and `.stein`
-(chunked, zstd, hashed, sparse-aware, resumable), and `gpt verify/repair`.
+(chunked, zstd, hashed, sparse-aware, resumable, optionally encrypted),
+`dump`/`restore` of individual pieces (tables, fs headers, LUKS headers),
+`inspect` printing the `LayoutTree` of any header, `gpt verify/repair`, and
+`open` an image to browse and mount its partitions (Linux FUSE first).
 
-- `stein_core`, `stein_block`, `stein_platform` (enumerate/open/geometry/
-  lock/reread/loop-attach; SMART read), `stein_pt` (GPT/MBR/EBR/APM/BSD/LDM
+- `stein_core`, `stein_layout` (manifest generator + `LayoutTree`; GPT, MBR,
+  APM, ext, FAT, NTFS, LUKS, LVM manifests), `stein_block`, `stein_platform`
+  (enumerate/open/geometry/lock/reread/loop-attach; SMART read), `stein_pt` (GPT/MBR/EBR/APM/BSD/LDM
   read, GPT/MBR write + GPT repair), `stein_fs` L0 for every type in the
   matrix, `stein_container` and `stein_volume` detect-only, `stein_probe`,
   `stein_image` (raw/split/stein + copy engine), `stein_ops` (stack, runner,
