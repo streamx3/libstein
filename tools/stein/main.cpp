@@ -18,6 +18,7 @@
 #include "stein/core/strings.hpp"
 #include "stein/core/units.hpp"
 #include "stein/fs/filesystem.hpp"
+#include "stein/app/scenario.hpp"
 #include "stein/image/operations.hpp"
 #include "stein/ops/stack.hpp"
 #include "stein/pt/gpt_table.hpp"
@@ -61,7 +62,12 @@ int usage() {
                "  stein fs dump <image> <piece.sparse> [--part N]   save the filesystem's metadata regions alone\n"
                "  stein fs restore <piece.sparse> <image>\n"
                "  <image> may be a file, a .stein image, a split raw set (disk.img.000 ...) or a block device\n"
-               "  stein types [gpt|mbr]\n",
+               "  stein types [gpt|mbr]\n"
+               "  stein app init    <profile.json> <device> <image.stein>   write a profile for a disk (identity from the OS)\n"
+               "  stein app status  <profile.json> [--unlock]\n"
+               "  stein app backup  <profile.json> [--unlock] [--dry-run]\n"
+               "  stein app restore <profile.json> [--unlock] [--dry-run]\n"
+               "  stein app verify  <profile.json>\n",
                stderr);
     return 64;
 }
@@ -73,7 +79,7 @@ int die(const Error& e) {
 
 struct Args {
     std::vector<std::string> positional;
-    bool doc = false, dryRun = false, noVerify = false, force = false, noWipe = false;
+    bool doc = false, dryRun = false, noVerify = false, force = false, noWipe = false, unlock = false;
     int level = 0;
     std::string compress, split, chunk;
     std::string start, size, end, type, name, index;
@@ -100,6 +106,7 @@ Args parse(int argc, char** argv) {
         else if (s == "--name" && i + 1 < argc) a.name = argv[++i];
         else if ((s == "--index" || s == "--part") && i + 1 < argc) a.index = argv[++i];
         else if (s == "--no-wipe") a.noWipe = true;
+        else if (s == "--unlock") a.unlock = true;
         else a.positional.push_back(s);
     }
     return a;
@@ -632,6 +639,65 @@ int cmdFs(const Args& a) {
     return 0;
 }
 
+// ---- profiles (stein_app) ---------------------------------------------------
+
+int cmdApp(const Args& a) {
+    if (a.positional.size() < 3) return usage();
+    const std::string& sub = a.positional[1];
+    const std::string& profilePath = a.positional[2];
+    if (sub == "init") {
+        if (a.positional.size() < 5) return usage();
+        app::Profile p;
+        p.name = std::filesystem::path(profilePath).stem().string();
+        p.image.path = a.positional[4];
+        const std::string& dev = a.positional[3];
+        std::error_code ec;
+        if (std::filesystem::is_regular_file(dev, ec)) {
+            p.target.osPath = dev;
+            p.target.allowVirtual = true;
+            p.description = "regular file target (testing)";
+        } else {
+            auto d = platform::current().describe(dev);
+            if (!d) return die(d.error());
+            p.target.serial = d->serial;
+            p.target.wwn = d->wwn;
+            p.target.model = d->model;
+            p.target.sizeBytes = d->geometry.sizeBytes;
+            p.target.sizeTolerance = 0.02;
+            p.target.osPath = d->osPath;
+            p.target.allowRemovable = d->removable;
+            p.target.allowVirtual = d->isVirtual;
+            p.policy.requireElevated = true;
+            p.description = d->model + (d->serial.empty() ? "" : " sn:" + d->serial) + ", " + formatSize(d->geometry.sizeBytes) + " at " + d->osPath;
+        }
+        if (auto v = p.validate(); !v) return die(v.error());
+        if (auto w = p.save(profilePath); !w) return die(w.error());
+        std::printf("wrote %s\n%s", profilePath.c_str(), p.toJson().dump(2).c_str());
+        std::puts("");
+        return 0;
+    }
+    auto profile = app::Profile::load(profilePath);
+    if (!profile) return die(profile.error());
+    app::RunOptions o;
+    o.unlock = a.unlock;
+    o.dryRun = a.dryRun;
+    if (sub == "status") {
+        auto st = app::status(*profile, o);
+        std::fputs(app::describe(*profile, st).c_str(), stdout);
+        return st.target ? 0 : 1;
+    }
+    TtyProgress tty;
+    Progress progress(tty);
+    Expected<app::ScenarioResult> r = fail(ErrorCategory::InvalidArgument, "unknown app command: " + sub);
+    if (sub == "backup") r = app::backup(*profile, o, progress);
+    else if (sub == "restore") r = app::restore(*profile, o, progress);
+    else if (sub == "verify") r = app::verify(*profile, o, progress);
+    else return usage();
+    if (!r) return die(r.error());
+    std::fputs(r->report.toText().c_str(), stdout);
+    return r->ok ? 0 : 1;
+}
+
 int cmdTypes(const Args& a) {
     const std::string filter = a.positional.size() > 1 ? a.positional[1] : "";
     for (const auto& info : pt::types::all()) {
@@ -658,5 +724,6 @@ int main(int argc, char** argv) {
     if (cmd == "image") return cmdImage(a);
     if (cmd == "fs") return cmdFs(a);
     if (cmd == "types") return cmdTypes(a);
+    if (cmd == "app") return cmdApp(a);
     return usage();
 }
