@@ -17,7 +17,7 @@ namespace stein::fs::detail {
 namespace gen = layout::gen;
 
 namespace {
-constexpr std::uint8_t kAttrReadOnly = 0x01, kAttrHidden = 0x02, kAttrSystem = 0x04, kAttrVolumeId = 0x08, kAttrDirectory = 0x10, kAttrLfn = 0x0F;
+constexpr std::uint8_t kAttrReadOnly = 0x01, kAttrVolumeId = 0x08, kAttrDirectory = 0x10, kAttrLfn = 0x0F;
 
 std::int64_t dosTime(std::uint16_t date, std::uint16_t time) {
     if (date == 0) return 0;
