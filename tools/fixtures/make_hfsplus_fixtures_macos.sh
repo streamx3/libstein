@@ -69,7 +69,7 @@ PY
 make_one() { # name fs-type label
   local name=$1 fstype=$2 label=$3
   local img="$WORK/$name"
-  hdiutil create -size 64m -fs "$fstype" -volname "$label" -layout NONE -format UDRW -ov "$img" >/dev/null
+  hdiutil create -size 64m -fs "$fstype" -volname "$label" -layout NONE -ov "$img" >/dev/null
   local mnt="$WORK/mnt_$name"; mkdir -p "$mnt"
   hdiutil attach -nobrowse -noverify -noautofsck -mountpoint "$mnt" "$img.dmg" >/dev/null
   touch "$mnt/.metadata_never_index"
