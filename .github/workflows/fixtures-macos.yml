@@ -1,14 +1,16 @@
 name: Fixtures (macOS)
 
-# Builds, on dispatch or when its inputs change, the HFS+ family of reader
-# fixtures and the DMG container fixtures with hdiutil, which only macOS has,
-# and commits them under tests/fixtures/{hfsfs,dmg} on the same branch.
+# Builds, on dispatch or when its inputs change, the HFS+ family and APFS
+# reader fixtures and the DMG container fixtures with hdiutil, which only
+# macOS has, and commits them under tests/fixtures/{hfsfs,apfs,dmg} on the
+# same branch.
 on:
   workflow_dispatch:
   push:
     paths:
       - tools/fixtures/make_hfsplus_fixtures_macos.sh
       - tools/fixtures/make_dmg_fixtures_macos.sh
+      - tools/fixtures/make_apfs_fixtures_macos.sh
       - tools/fixtures/oracle.py
       - .github/workflows/fixtures-macos.yml
 
@@ -26,6 +28,9 @@ jobs:
       - name: Build HFS+ fixtures
         if: ${{ hashFiles('tests/fixtures/hfsfs/hfsplus.sparse') == '' }}
         run: tools/fixtures/make_hfsplus_fixtures_macos.sh tests/fixtures/hfsfs
+      - name: Build APFS fixtures
+        if: ${{ hashFiles('tests/fixtures/apfs/apfs.sparse') == '' }}
+        run: tools/fixtures/make_apfs_fixtures_macos.sh tests/fixtures/apfs
       - name: Build DMG fixtures (the script keeps variants that already exist)
         run: tools/fixtures/make_dmg_fixtures_macos.sh tests/fixtures/dmg
       - uses: actions/upload-artifact@v4
@@ -33,14 +38,15 @@ jobs:
           name: hfsfs-fixtures
           path: |
             tests/fixtures/hfsfs
+            tests/fixtures/apfs
             tests/fixtures/dmg
           if-no-files-found: ignore
       - name: Commit fixtures to the branch
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add tests/fixtures/hfsfs tests/fixtures/dmg
+          git add tests/fixtures/hfsfs tests/fixtures/apfs tests/fixtures/dmg
           if git diff --cached --quiet; then echo "fixtures unchanged"; exit 0; fi
-          git commit -m "fixtures: HFS+/HFSX/journaled and DMG fixtures generated on macOS"
+          git commit -m "fixtures: HFS+/APFS/DMG fixtures generated on macOS"
           git pull --rebase origin "${GITHUB_REF_NAME}"
           git push origin "HEAD:${GITHUB_REF_NAME}"
