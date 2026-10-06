@@ -13,7 +13,8 @@ stein_add_module(core
     src/strings.cpp
     src/log.cpp
     src/json.cpp
-    src/lz4.cpp)
+    src/lz4.cpp
+    src/crypto.cpp)
 
 # The hardware kernels are compiled with their ISA extension enabled; they run
 # only after cpuFeatures() confirms the CPU has it.
@@ -27,6 +28,10 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   endif()
 endif()
 
+if(WIN32)
+  target_link_libraries(stein_core PRIVATE bcrypt)
+endif()
+
 stein_add_test(test_core
-  SOURCES tests/test_main.cpp tests/test_core.cpp tests/test_json_lz4.cpp
+  SOURCES tests/test_main.cpp tests/test_core.cpp tests/test_json_lz4.cpp tests/test_crypto.cpp
   DEPS stein::core)
