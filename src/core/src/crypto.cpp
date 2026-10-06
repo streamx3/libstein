@@ -489,14 +489,15 @@ void le32push(std::vector<std::byte>& v, std::uint32_t x) {
 
 } // namespace
 
-Expected<void> argon2id(std::span<const std::byte> password, std::span<const std::byte> salt, std::uint32_t passes, std::uint32_t memoryKiB,
-                        std::uint32_t parallelism, std::span<std::uint8_t> out, std::span<const std::byte> secret, std::span<const std::byte> ad) {
+Expected<void> argon2(Argon2Type type, std::span<const std::byte> password, std::span<const std::byte> salt, std::uint32_t passes, std::uint32_t memoryKiB,
+                      std::uint32_t parallelism, std::span<std::uint8_t> out, std::span<const std::byte> secret, std::span<const std::byte> ad) {
     if (parallelism == 0 || parallelism > 0xFFFFFF) return fail(ErrorCategory::InvalidArgument, "argon2: bad parallelism");
     if (passes == 0) return fail(ErrorCategory::InvalidArgument, "argon2: passes must be >= 1");
     if (memoryKiB < 8 * parallelism) return fail(ErrorCategory::InvalidArgument, "argon2: memory must be at least 8 KiB per lane");
     if (out.size() < 4) return fail(ErrorCategory::InvalidArgument, "argon2: output too short");
     if (salt.size() < 8) return fail(ErrorCategory::InvalidArgument, "argon2: salt must be at least 8 bytes");
-    constexpr std::uint32_t kVersion = 0x13, kTypeId = 2;
+    constexpr std::uint32_t kVersion = 0x13;
+    const std::uint32_t kTypeId = static_cast<std::uint32_t>(type);
     // H0
     std::vector<std::byte> h0in;
     le32push(h0in, parallelism);
@@ -541,7 +542,8 @@ Expected<void> argon2id(std::span<const std::byte> password, std::span<const std
     for (std::uint32_t pass = 0; pass < passes; ++pass) {
         for (std::uint32_t slice = 0; slice < 4; ++slice) {
             for (std::uint32_t lane = 0; lane < lanes; ++lane) {
-                const bool independent = pass == 0 && slice < 2;   // Argon2id: data-independent addressing for the first half of pass 0
+                // Argon2i: always data-independent; Argon2d: never; Argon2id: first half of pass 0.
+                const bool independent = type == Argon2Type::I || (type == Argon2Type::Id && pass == 0 && slice < 2);
                 ArgonBlock addr{}, inputBlock{};
                 std::memset(inputBlock.v, 0, sizeof inputBlock.v);
                 inputBlock.v[0] = pass;

@@ -1,0 +1,27 @@
+LUKS header information for /tmp/tmp.oBgQsCeI9R/luks1_sha1.img
+
+Version:       	1
+Cipher name:   	aes
+Cipher mode:   	xts-plain64
+Hash spec:     	sha1
+Payload offset:	4096
+MK bits:       	512
+MK digest:     	12 d2 a4 0d 0c 1e 0b f2 66 9b 38 36 a1 99 03 73 17 0d 4a d4 
+MK salt:       	e7 eb 63 0e 54 00 53 14 e6 0c db 8a ee 3e d0 82 
+               	5d 5b 74 21 38 84 a9 ed 77 bd 1d de ea 04 a3 4d 
+MK iterations: 	1000
+UUID:          	b3df1ba6-358a-4b53-b09b-50f62eb42c83
+
+Key Slot 0: ENABLED
+	Iterations:         	1000
+	Salt:               	a7 c8 a8 d0 02 d1 4d 7e fe 38 cf 53 81 52 57 2a 
+	                      	11 16 f7 39 db 32 94 fe 14 b8 bb a7 53 7a f7 97 
+	Key material offset:	8
+	AF stripes:            	4000
+Key Slot 1: DISABLED
+Key Slot 2: DISABLED
+Key Slot 3: DISABLED
+Key Slot 4: DISABLED
+Key Slot 5: DISABLED
+Key Slot 6: DISABLED
+Key Slot 7: DISABLED

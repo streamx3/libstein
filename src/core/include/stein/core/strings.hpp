@@ -46,6 +46,9 @@ bool iequals(std::string_view a, std::string_view b);
 std::string toHex(std::span<const std::byte> bytes, bool upper = false);
 // Inverse of toHex; nullopt on odd length or non-hex characters.
 std::optional<std::vector<std::byte>> fromHex(std::string_view hex);
+// Standard base64 (RFC 4648, with or without padding); nullopt on bad input.
+std::optional<std::vector<std::byte>> fromBase64(std::string_view text);
+std::string toBase64(std::span<const std::byte> bytes);
 std::string toHex(std::uint64_t value, int minDigits = 0);   // "0x1A2B"
 // Multi-line "offset: hex  ascii" dump, 16 bytes per line, `base` added to offsets.
 std::string hexDump(std::span<const std::byte> bytes, std::uint64_t base = 0);

@@ -218,3 +218,24 @@ TEST_CASE("aes-xts: plain64 sector tweak vectors and round trips") {
     std::vector<std::byte> odd(20), o(20);
     CHECK_FALSE(xts->encrypt(0, odd, o));
 }
+
+TEST_CASE("sha1 vectors and base64 round trips") {
+    CHECK(Hasher::hex(Hasher::digest(HashAlgorithm::Sha1, {})) == "da39a3ee5e6b4b0d3255bfef95601890afd80709");
+    CHECK(Hasher::hex(Hasher::digest(HashAlgorithm::Sha1, test::bytesOf("abc"))) == "a9993e364706816aba3e25717850c26c9cd0d89d");
+    CHECK(Hasher::hex(Hasher::digest(HashAlgorithm::Sha1, test::bytesOf("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"))) == "84983e441c3bd26ebaae4aa1f95129e5e54670f1");
+    std::string million(1000000, 'a');
+    CHECK(Hasher::hex(Hasher::digest(HashAlgorithm::Sha1, test::bytesOf(million))) == "34aa973cd4c4daa4f61eeb2bdbad27316534016f");
+    for (std::size_t n = 0; n < 70; ++n) {
+        std::vector<std::byte> b(n);
+        for (std::size_t i = 0; i < n; ++i) b[i] = static_cast<std::byte>(i * 37 + n);
+        const auto text = toBase64(b);
+        CHECK(text.size() == (n + 2) / 3 * 4);
+        auto back = fromBase64(text);
+        REQUIRE(back);
+        CHECK(*back == b);
+    }
+    CHECK(toBase64(test::bytesOf("Man")) == "TWFu");
+    CHECK(toBase64(test::bytesOf("Ma")) == "TWE=");
+    CHECK(fromBase64("TWE").value() == std::vector<std::byte>{std::byte{'M'}, std::byte{'a'}});
+    CHECK_FALSE(fromBase64("T*E="));
+}

@@ -1,0 +1,6 @@
+passphrase=luks test passphrase
+master_key=0cfd3f71e660da3a6fb707bcfde19734f85df0c175ac75dd635f5b79c94b4e45155d993cd5ccae018ab8a2de1a71eaf6603feb4c344ae45c763cd5baba6d5271
+payload_offset=2097152
+sector_size=512
+plain_size=262144
+label=inside_luks

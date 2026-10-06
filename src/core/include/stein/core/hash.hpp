@@ -14,7 +14,7 @@
 
 namespace stein {
 
-enum class HashAlgorithm : std::uint8_t { Md5, Sha256 };
+enum class HashAlgorithm : std::uint8_t { Md5, Sha1, Sha256 };
 
 std::string_view toString(HashAlgorithm a);
 
@@ -46,6 +46,23 @@ public:
 private:
     void transform(const std::uint8_t block[64]);
     std::array<std::uint32_t, 4> m_state{};
+    std::uint64_t m_bits = 0;
+    std::array<std::uint8_t, 64> m_buffer{};
+    std::size_t m_bufferLen = 0;
+};
+
+class Sha1 final : public Hasher {
+public:
+    Sha1() { reset(); }
+    HashAlgorithm algorithm() const override { return HashAlgorithm::Sha1; }
+    std::size_t digestSize() const override { return 20; }
+    void update(std::span<const std::byte> data) override;
+    std::vector<std::uint8_t> finish() override;
+    void reset() override;
+
+private:
+    void transform(const std::uint8_t block[64]);
+    std::array<std::uint32_t, 5> m_state{};
     std::uint64_t m_bits = 0;
     std::array<std::uint8_t, 64> m_buffer{};
     std::size_t m_bufferLen = 0;

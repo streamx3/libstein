@@ -35,9 +35,14 @@ void pbkdf2Sha256(std::span<const std::byte> password, std::span<const std::byte
 // BLAKE2b (RFC 7693): 1..64 byte digest, optional key up to 64 bytes.
 void blake2b(std::span<std::uint8_t> out, std::span<const std::byte> message, std::span<const std::byte> key = {});
 
-// Argon2id (RFC 9106, version 0x13). memoryKiB >= 8 * parallelism; passes >= 1.
-Expected<void> argon2id(std::span<const std::byte> password, std::span<const std::byte> salt, std::uint32_t passes, std::uint32_t memoryKiB,
-                        std::uint32_t parallelism, std::span<std::uint8_t> out, std::span<const std::byte> secret = {}, std::span<const std::byte> ad = {});
+// Argon2 (RFC 9106, version 0x13). memoryKiB >= 8 * parallelism; passes >= 1.
+enum class Argon2Type : std::uint8_t { D = 0, I = 1, Id = 2 };
+Expected<void> argon2(Argon2Type type, std::span<const std::byte> password, std::span<const std::byte> salt, std::uint32_t passes, std::uint32_t memoryKiB,
+                      std::uint32_t parallelism, std::span<std::uint8_t> out, std::span<const std::byte> secret = {}, std::span<const std::byte> ad = {});
+inline Expected<void> argon2id(std::span<const std::byte> password, std::span<const std::byte> salt, std::uint32_t passes, std::uint32_t memoryKiB,
+                               std::uint32_t parallelism, std::span<std::uint8_t> out, std::span<const std::byte> secret = {}, std::span<const std::byte> ad = {}) {
+    return argon2(Argon2Type::Id, password, salt, passes, memoryKiB, parallelism, out, secret, ad);
+}
 
 // Cryptographically secure random bytes from the OS.
 Expected<void> randomBytes(std::span<std::uint8_t> out);

@@ -282,3 +282,60 @@ std::optional<std::vector<std::byte>> fromHex(std::string_view hex) {
     return out;
 }
 } // namespace stein
+
+namespace stein {
+namespace {
+constexpr const char kB64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+int b64Value(char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+} // namespace
+
+std::optional<std::vector<std::byte>> fromBase64(std::string_view text) {
+    std::vector<std::byte> out;
+    std::uint32_t acc = 0;
+    int bits = 0;
+    for (char c : text) {
+        if (c == '=' || c == '\n' || c == '\r' || c == ' ') continue;
+        const int v = b64Value(c);
+        if (v < 0) return std::nullopt;
+        acc = (acc << 6) | static_cast<std::uint32_t>(v);
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back(std::byte(static_cast<std::uint8_t>((acc >> bits) & 0xFF)));
+        }
+    }
+    return out;
+}
+
+std::string toBase64(std::span<const std::byte> bytes) {
+    std::string out;
+    std::size_t i = 0;
+    for (; i + 3 <= bytes.size(); i += 3) {
+        const std::uint32_t v = (std::to_integer<std::uint32_t>(bytes[i]) << 16) | (std::to_integer<std::uint32_t>(bytes[i + 1]) << 8) | std::to_integer<std::uint32_t>(bytes[i + 2]);
+        out += kB64[(v >> 18) & 63];
+        out += kB64[(v >> 12) & 63];
+        out += kB64[(v >> 6) & 63];
+        out += kB64[v & 63];
+    }
+    if (i + 1 == bytes.size()) {
+        const std::uint32_t v = std::to_integer<std::uint32_t>(bytes[i]) << 16;
+        out += kB64[(v >> 18) & 63];
+        out += kB64[(v >> 12) & 63];
+        out += "==";
+    } else if (i + 2 == bytes.size()) {
+        const std::uint32_t v = (std::to_integer<std::uint32_t>(bytes[i]) << 16) | (std::to_integer<std::uint32_t>(bytes[i + 1]) << 8);
+        out += kB64[(v >> 18) & 63];
+        out += kB64[(v >> 12) & 63];
+        out += kB64[(v >> 6) & 63];
+        out += '=';
+    }
+    return out;
+}
+} // namespace stein

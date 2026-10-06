@@ -14,6 +14,7 @@ namespace stein {
 std::string_view toString(HashAlgorithm a) {
     switch (a) {
     case HashAlgorithm::Md5: return "md5";
+    case HashAlgorithm::Sha1: return "sha1";
     case HashAlgorithm::Sha256: return "sha256";
     }
     return "?";
@@ -22,6 +23,7 @@ std::string_view toString(HashAlgorithm a) {
 std::unique_ptr<Hasher> Hasher::create(HashAlgorithm a) {
     switch (a) {
     case HashAlgorithm::Md5: return std::make_unique<Md5>();
+    case HashAlgorithm::Sha1: return std::make_unique<Sha1>();
     case HashAlgorithm::Sha256: return std::make_unique<Sha256>();
     }
     return nullptr;
@@ -264,6 +266,86 @@ std::vector<std::uint8_t> Sha256::finish() {
     std::vector<std::uint8_t> out(32);
     for (int i = 0; i < 8; ++i)
         for (int j = 0; j < 4; ++j) out[i * 4 + j] = static_cast<std::uint8_t>((m_state[i] >> (24 - 8 * j)) & 0xff);
+    return out;
+}
+
+} // namespace stein
+
+// ----------------------------------------------------------------------------- SHA-1 (FIPS 180-4)
+
+namespace stein {
+
+void Sha1::reset() {
+    m_state = {0x67452301u, 0xEFCDAB89u, 0x98BADCFEu, 0x10325476u, 0xC3D2E1F0u};
+    m_bits = 0;
+    m_bufferLen = 0;
+}
+
+void Sha1::transform(const std::uint8_t block[64]) {
+    std::uint32_t w[80];
+    for (int i = 0; i < 16; ++i)
+        w[i] = (static_cast<std::uint32_t>(block[i * 4]) << 24) | (static_cast<std::uint32_t>(block[i * 4 + 1]) << 16) |
+               (static_cast<std::uint32_t>(block[i * 4 + 2]) << 8) | static_cast<std::uint32_t>(block[i * 4 + 3]);
+    auto rotl = [](std::uint32_t x, int n) { return (x << n) | (x >> (32 - n)); };
+    for (int i = 16; i < 80; ++i) w[i] = rotl(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+    std::uint32_t a = m_state[0], b = m_state[1], c = m_state[2], d = m_state[3], e = m_state[4];
+    for (int i = 0; i < 80; ++i) {
+        std::uint32_t f, k;
+        if (i < 20) { f = (b & c) | (~b & d); k = 0x5A827999u; }
+        else if (i < 40) { f = b ^ c ^ d; k = 0x6ED9EBA1u; }
+        else if (i < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8F1BBCDCu; }
+        else { f = b ^ c ^ d; k = 0xCA62C1D6u; }
+        const std::uint32_t t = rotl(a, 5) + f + e + k + w[i];
+        e = d;
+        d = c;
+        c = rotl(b, 30);
+        b = a;
+        a = t;
+    }
+    m_state[0] += a;
+    m_state[1] += b;
+    m_state[2] += c;
+    m_state[3] += d;
+    m_state[4] += e;
+}
+
+void Sha1::update(std::span<const std::byte> data) {
+    const std::uint8_t* p = reinterpret_cast<const std::uint8_t*>(data.data());
+    std::size_t n = data.size();
+    m_bits += static_cast<std::uint64_t>(n) * 8;
+    if (m_bufferLen) {
+        std::size_t take = std::min(n, 64 - m_bufferLen);
+        std::memcpy(m_buffer.data() + m_bufferLen, p, take);
+        m_bufferLen += take;
+        p += take;
+        n -= take;
+        if (m_bufferLen == 64) {
+            transform(m_buffer.data());
+            m_bufferLen = 0;
+        }
+    }
+    while (n >= 64) {
+        transform(p);
+        p += 64;
+        n -= 64;
+    }
+    if (n) {
+        std::memcpy(m_buffer.data(), p, n);
+        m_bufferLen = n;
+    }
+}
+
+std::vector<std::uint8_t> Sha1::finish() {
+    std::uint64_t bits = m_bits;
+    const std::uint8_t pad = 0x80, zero = 0;
+    update(std::span<const std::byte>(reinterpret_cast<const std::byte*>(&pad), 1));
+    while (m_bufferLen != 56) update(std::span<const std::byte>(reinterpret_cast<const std::byte*>(&zero), 1));
+    std::uint8_t len[8];
+    for (int i = 0; i < 8; ++i) len[7 - i] = static_cast<std::uint8_t>((bits >> (8 * i)) & 0xff);
+    update(std::span<const std::byte>(reinterpret_cast<const std::byte*>(len), 8));
+    std::vector<std::uint8_t> out(20);
+    for (int i = 0; i < 5; ++i)
+        for (int j = 0; j < 4; ++j) out[static_cast<std::size_t>(i * 4 + j)] = static_cast<std::uint8_t>((m_state[static_cast<std::size_t>(i)] >> (24 - 8 * j)) & 0xff);
     return out;
 }
 
