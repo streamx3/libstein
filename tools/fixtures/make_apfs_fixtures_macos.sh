@@ -160,14 +160,16 @@ PY
   # Second volume in the same container.
   local container
   container=$(diskutil apfs list -plist | python3 -c '
-import plistlib, sys
-mnt = sys.argv[1]
+import os, plistlib, sys
+mnt = os.path.realpath(sys.argv[1])
 d = plistlib.loads(sys.stdin.buffer.read())
 for c in d["Containers"]:
     for v in c["Volumes"]:
-        if v.get("MountPoint") == mnt:
-            print(c["ContainerReference"])
+        # diskutil reports the real path (/private/var/...), and the image volume is the only rd_snap.
+        if os.path.realpath(v.get("MountPoint") or "/nonexistent") == mnt or v.get("Name") == "rd_snap":
+            print(c["ContainerReference"]); sys.exit(0)
 ' "$mnt")
+  [ -n "$container" ] || { echo "apfs_snap: container of $mnt not found"; diskutil apfs list; exit 1; }
   echo "container: $container"
   diskutil apfs addVolume "$container" APFS rd_second -nomount >/dev/null
   local second
