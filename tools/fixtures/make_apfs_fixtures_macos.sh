@@ -58,13 +58,13 @@ os.makedirs(os.path.join(m, "many"))
 for i in range(300):
     w("many/file_%03d.txt" % i, ("entry %d\n" % i).encode())
 w("xattr.txt", b"has an xattr\n")
-os.setxattr(os.path.join(m, "xattr.txt"), "user.stein", b"xattr value")
 for root, dirs, files in os.walk(m):
     for n in dirs + files:
         p = os.path.join(root, n)
         if not os.path.islink(p):
             os.utime(p, (1704164645, 1704164645))   # 2024-01-02 03:04:05 UTC
 PY
+  xattr -w user.stein "xattr value" "$m/xattr.txt"
   sync
 }
 
