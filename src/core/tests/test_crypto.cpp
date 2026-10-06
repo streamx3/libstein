@@ -8,6 +8,7 @@
 #include "stein/core/strings.hpp"
 
 #include <algorithm>
+#include <cstring>
 
 using namespace stein;
 
@@ -148,4 +149,72 @@ TEST_CASE("key area: argon2id and pbkdf2 slots side by side, JSON round trip") {
     CHECK_FALSE(Keys::create("x", KdfParams::pbkdf2(10)));
     CHECK_FALSE(Keys::create("x", KdfParams::argon2id(1, 4, 1)));
     CHECK(KdfParams().kind == KdfParams::Kind::Argon2id);
+}
+
+#include "aes_vectors.hpp"
+#include "stein/core/aes.hpp"
+
+#include "../src/aes_impl.hpp"
+
+TEST_CASE("aes: FIPS-197 and oracle block vectors, portable and hardware kernels agree") {
+    MESSAGE("aes hardware: ", crypto::aesHardwareAvailable());
+    for (const auto& v : test::vectors::kAesBlock) {
+        const auto key = hexBytes(v.key);
+        std::vector<std::uint8_t> k(key.size());
+        for (std::size_t i = 0; i < k.size(); ++i) k[i] = std::to_integer<std::uint8_t>(key[i]);
+        auto aes = crypto::Aes::create(k);
+        REQUIRE(aes);
+        const auto pt = hexBytes(v.plaintext);
+        std::uint8_t in[16], out[16], back[16];
+        for (int i = 0; i < 16; ++i) in[i] = std::to_integer<std::uint8_t>(pt[static_cast<std::size_t>(i)]);
+        aes->encryptBlock(in, out);
+        CHECK(Hasher::hex(out) == v.ciphertext);
+        aes->decryptBlock(out, back);
+        CHECK(std::memcmp(back, in, 16) == 0);
+        // Both kernels, explicitly.
+        std::uint8_t p1[16], p2[16];
+        crypto::detail::aesEncryptPortable(aes->roundKeys(), aes->rounds(), in, p1);
+        CHECK(Hasher::hex(p1) == v.ciphertext);
+        crypto::detail::aesDecryptPortable(aes->roundKeys(), aes->rounds(), p1, p2);
+        CHECK(std::memcmp(p2, in, 16) == 0);
+        if (crypto::aesHardwareAvailable()) {
+            crypto::detail::aesEncryptHardware(aes->roundKeys(), aes->rounds(), in, p1);
+            CHECK(Hasher::hex(p1) == v.ciphertext);
+            crypto::detail::aesDecryptHardware(aes->roundKeys(), aes->rounds(), p1, p2);
+            CHECK(std::memcmp(p2, in, 16) == 0);
+        }
+    }
+    CHECK_FALSE(crypto::Aes::create(std::vector<std::uint8_t>(20)));
+}
+
+TEST_CASE("aes-xts: plain64 sector tweak vectors and round trips") {
+    for (const auto& v : test::vectors::kXts) {
+        const auto key = hexBytes(v.key);
+        std::vector<std::uint8_t> k(key.size());
+        for (std::size_t i = 0; i < k.size(); ++i) k[i] = std::to_integer<std::uint8_t>(key[i]);
+        auto xts = crypto::AesXts::create(k);
+        REQUIRE(xts);
+        const auto pt = hexBytes(v.plaintext);
+        std::vector<std::byte> ct(pt.size()), back(pt.size());
+        REQUIRE(xts->encrypt(v.sector, pt, ct));
+        CHECK(hexOf(ct) == v.ciphertext);
+        REQUIRE(xts->decrypt(v.sector, ct, back));
+        CHECK(back == pt);
+        if (pt.size() % 512 == 0 && pt.size() > 512) {
+            // Per-sector helpers: sector n of the run uses tweak first+n.
+            std::vector<std::byte> ct2(pt.size());
+            REQUIRE(xts->encryptSectors(v.sector, 512, pt, ct2));
+            CHECK(std::equal(ct2.begin(), ct2.begin() + 512, ct.begin()));
+            REQUIRE(xts->decryptSectors(v.sector, 512, ct2, back));
+            CHECK(back == pt);
+        }
+    }
+    std::vector<std::uint8_t> same(64, 1);
+    CHECK_FALSE(crypto::AesXts::create(same));
+    std::vector<std::uint8_t> k(64);
+    for (std::size_t i = 0; i < 64; ++i) k[i] = static_cast<std::uint8_t>(i);
+    auto xts = crypto::AesXts::create(k);
+    REQUIRE(xts);
+    std::vector<std::byte> odd(20), o(20);
+    CHECK_FALSE(xts->encrypt(0, odd, o));
 }

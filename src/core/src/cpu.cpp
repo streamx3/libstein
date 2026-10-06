@@ -42,6 +42,7 @@ CpuFeatures detect() {
     bool ssse3 = (c >> 9) & 1, sse41 = (c >> 19) & 1;
     f.sse42 = (c >> 20) & 1;
     f.pclmul = (c >> 1) & 1;
+    f.aesni = (c >> 25) & 1;
     if (maxLeaf >= 7) {
         __cpuidex(regs, 7, 0);
         b = static_cast<unsigned>(regs[1]);
@@ -53,21 +54,25 @@ CpuFeatures detect() {
     bool ssse3 = (c >> 9) & 1, sse41 = (c >> 19) & 1;
     f.sse42 = (c >> 20) & 1;
     f.pclmul = (c >> 1) & 1;
+    f.aesni = (c >> 25) & 1;
     b = 0;
     if (maxLeaf >= 7) __get_cpuid_count(7, 0, &a, &b, &c, &d);
 #endif
     f.shaNi = ((b >> 29) & 1) && ssse3 && sse41;
 #elif defined(STEIN_ARCH_ARM64)
 #if defined(__APPLE__)
-    f.armCrc = true;    // every Apple Silicon / A-series chip since the A7 has both
+    f.armCrc = true;    // every Apple Silicon / A-series chip since the A7 has all of these
     f.armSha2 = true;
+    f.armAes = true;
 #elif defined(__linux__)
     const unsigned long hw = getauxval(AT_HWCAP);
     f.armCrc = (hw & (1ul << 7)) != 0;    // HWCAP_CRC32
     f.armSha2 = (hw & (1ul << 6)) != 0;   // HWCAP_SHA2
+    f.armAes = (hw & (1ul << 3)) != 0;    // HWCAP_AES
 #elif defined(_WIN32)
     f.armCrc = IsProcessorFeaturePresent(PF_ARM_V8_CRC32_INSTRUCTIONS_AVAILABLE) != 0;
     f.armSha2 = IsProcessorFeaturePresent(PF_ARM_V8_CRYPTO_INSTRUCTIONS_AVAILABLE) != 0;
+    f.armAes = f.armSha2;
 #endif
 #endif
     return f;
@@ -89,8 +94,10 @@ std::string CpuFeatures::summary() const {
     add(sse42, "sse4.2");
     add(pclmul, "pclmul");
     add(shaNi, "sha-ni");
+    add(aesni, "aes-ni");
     add(armCrc, "arm-crc");
     add(armSha2, "arm-sha2");
+    add(armAes, "arm-aes");
     return s.empty() ? "portable only" : s;
 }
 

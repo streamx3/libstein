@@ -15,6 +15,8 @@ stein_add_module(core
     src/json.cpp
     src/lz4.cpp
     src/crypto.cpp
+    src/aes.cpp
+    src/aes_hw.cpp
     src/keys.cpp)
 
 # The hardware kernels are compiled with their ISA extension enabled; they run
@@ -23,9 +25,11 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64|i686")
     set_source_files_properties(src/crc32_hw.cpp PROPERTIES COMPILE_OPTIONS "-msse4.2")
     set_source_files_properties(src/sha256_hw.cpp PROPERTIES COMPILE_OPTIONS "-mssse3;-msse4.1;-msha")
+    set_source_files_properties(src/aes_hw.cpp PROPERTIES COMPILE_OPTIONS "-msse2;-maes")
   elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
     set_source_files_properties(src/crc32_hw.cpp PROPERTIES COMPILE_OPTIONS "-march=armv8-a+crc")
     set_source_files_properties(src/sha256_hw.cpp PROPERTIES COMPILE_OPTIONS "-march=armv8-a+crypto")
+    set_source_files_properties(src/aes_hw.cpp PROPERTIES COMPILE_OPTIONS "-march=armv8-a+crypto")
   endif()
 endif()
 

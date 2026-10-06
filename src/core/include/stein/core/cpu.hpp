@@ -12,8 +12,10 @@ struct CpuFeatures {
     bool sse42 = false;      // x86: CRC32C instruction
     bool pclmul = false;     // x86: carry-less multiply
     bool shaNi = false;      // x86: SHA extensions (+ SSSE3/SSE4.1 required)
+    bool aesni = false;      // x86: AES-NI
     bool armCrc = false;     // aarch64: CRC32 extension
     bool armSha2 = false;    // aarch64: SHA-256 extension
+    bool armAes = false;     // aarch64: AES extension
     bool disabled = false;   // STEIN_NO_SIMD set
     std::string summary() const;
 };
