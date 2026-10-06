@@ -276,6 +276,14 @@ Expected<void> Mount::run() {
     // kernel unmounts (fusermount3 -u, umount, stop()): libfuse maps ENODEV to a normal exit.
     const int rc = fuse_loop(m_impl->fuse);
     const int err = errno;
+#if defined(_WIN32)
+    // WinFsp's fuse_unmount() frees the file system object the loop was using, so it must run
+    // after the loop has returned (stop() only signals the exit event there).
+    if (m_impl->mounted) {
+        fuse_unmount(m_impl->fuse);
+        m_impl->mounted = false;
+    }
+#endif
     m_impl->running.store(false);
     if (rc != 0 && !m_impl->stopRequested.load())
         return fail(ErrorCategory::Io, "fuse loop ended with " + std::to_string(rc) + (err ? std::string(": ") + std::strerror(err) : std::string()));
@@ -291,14 +299,16 @@ void Mount::stop() {
     // aborts the kernel connection instead; the loop's read() then fails with ENODEV and returns.
     m_impl->stopRequested.store(true);
 #if defined(_WIN32)
+    // WinFsp: fuse_exit() signals the loop's event; the loop thread stops the dispatcher and
+    // run() unmounts afterwards. Unmounting here would free the object the loop still uses.
     fuse_exit(m_impl->fuse);
 #else
     fuse_session_exit(fuse_get_session(m_impl->fuse));
-#endif
     if (m_impl->mounted) {
         fuse_unmount(m_impl->fuse);
         m_impl->mounted = false;
     }
+#endif
 }
 
 Mount::~Mount() {

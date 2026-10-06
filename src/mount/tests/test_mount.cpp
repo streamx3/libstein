@@ -96,7 +96,7 @@ TEST_CASE("mount: an ext4 fixture mounted through FUSE reads like the kernel mou
         } else if (line.rfind("link ", 0) == 0) {
             const auto arrow = line.find(" -> ");
             std::error_code ec;
-            CHECK(std::filesystem::read_symlink(base / line.substr(5, arrow - 5), ec).string() == line.substr(arrow + 4));
+            CHECK(std::filesystem::read_symlink(base / line.substr(5, arrow - 5), ec).generic_string() == line.substr(arrow + 4));
             ++links;
         } else if (line.size() > 2 && line[0] == 'd') {
             std::error_code ec;
