@@ -274,7 +274,7 @@ Expected<ErofsReader::Lcluster> ErofsReader::loadCompactLcluster(const InodeRec&
     else return fail(ErrorCategory::Unsupported, "erofs compacted index with unsupported lcluster size");
     const std::size_t packSize = vcnt << amortizedShift;
     m.nextPackOff = pos / packSize * packSize + packSize;
-    const unsigned lobits = std::max<unsigned>(lclusterBits, 12), encodeBits = ((packSize - 4) * 8) / vcnt;
+    const unsigned lobits = std::max<unsigned>(lclusterBits, 12), encodeBits = static_cast<unsigned>(((packSize - 4) * 8) / vcnt);
     const std::size_t bytes = pos & (packSize - 1);
     auto pack = readMeta(pos - bytes, packSize);
     if (!pack) return fail(pack.error());
