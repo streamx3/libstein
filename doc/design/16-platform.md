@@ -97,3 +97,25 @@ The `Channel` abstraction makes the same `PlatformDisk` class usable in all thre
 - macOS CI: `hdiutil create`/`attach` sparse images; `diskutil list -plist` as oracle; no root needed for attached images owned by the user.
 - Windows CI: `New-VHD` + `Mount-VHD`; `Get-Disk | ConvertTo-Json`, `diskpart` scripts as oracle. Requires an elevated runner.
 - Everything else (core libs) is tested on `MemoryDevice`/`FileDevice` with checked-in fixtures and needs no privileges on any OS.
+
+## 5. Implementation status (M1)
+
+The shipped interface is the flat `Platform` class in
+`stein/platform/platform.hpp` (enumerate / describe / open / mounts /
+rereadPartitionTable / attach / detach / isElevated); the split into
+`DiskEnumerator`, `VolumeControl` etc. above is the target shape once SMART
+and the helper RPC arrive.
+
+| Concern | Linux | macOS | Windows |
+|---|---|---|---|
+| Enumerate | sysfs, done | IOKit `IOMedia` whole-disk objects, device/protocol characteristics, done | `PhysicalDriveN` sweep + `STORAGE_QUERY_PROPERTY`, done (SetupAPI interface enumeration later) |
+| Open raw | `open` + BLK* ioctls, done | `/dev/rdiskN` + DKIOC*, done; aligned I/O via `AlignedDevice` | `CreateFile` + geometry/alignment ioctls, done; aligned I/O via `AlignedDevice`; volume lock/dismount before writes: M2 |
+| Mounts | `/proc/self/mountinfo`, done | `getmntinfo`, done | drive letters → disk extents, done; volume GUID paths later |
+| Re-read table | `BLKRRPART`, done | automatic on close | `IOCTL_DISK_UPDATE_PROPERTIES`, done |
+| Attach image | loop, done | `hdiutil attach` (raw), done | not available for raw images (VHD attach with the VHD reader, M3) |
+| Hot-plug events, SMART, secure erase, privilege broker | planned | planned | planned |
+
+`AlignedDevice` (`src/platform/src/aligned_device.*`) is OS-independent and
+unit-tested on Linux against a fake device that rejects unaligned I/O, so the
+bounce-buffer logic the macOS and Windows backends depend on is covered by CI
+on every platform.
