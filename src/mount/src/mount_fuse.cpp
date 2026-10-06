@@ -103,7 +103,7 @@ struct Mount::Impl {
         if (type == S_IFDIR) perm |= 0555;
         if (type == S_IFLNK) perm = 0777;
         out->st_mode = type | perm;
-        out->st_nlink = st.nlink ? st.nlink : 1;
+        out->st_nlink = static_cast<decltype(out->st_nlink)>(st.nlink ? st.nlink : 1);
         out->st_size = static_cast<OffT>(st.size);
         const fuse_context* ctx = fuse_get_context();
         out->st_uid = ctx ? ctx->uid : 0;

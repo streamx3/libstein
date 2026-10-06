@@ -305,7 +305,7 @@ TEST_CASE("inflate: stored, fixed and dynamic blocks, raw/zlib/gzip wrappers, tr
 TEST_CASE("bunzip2: single and multi-block streams, long runs, truncation and small buffers") {
     for (const auto& v : test::vectors::kBzip2) {
         CAPTURE(v.name);
-        auto comp = hexBytes(v.compressedHex);
+        std::vector<std::byte> comp(reinterpret_cast<const std::byte*>(v.data), reinterpret_cast<const std::byte*>(v.data) + v.size);
         std::vector<std::byte> out(v.plainLength);
         auto n = compress::bunzip2(comp, out);
         REQUIRE_MESSAGE(n, (n ? std::string() : n.error().toString()));
