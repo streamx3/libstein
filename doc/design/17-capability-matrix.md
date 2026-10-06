@@ -16,7 +16,7 @@ L0 detect/geometry/label/uuid · L1 used-block map · L2 offline metadata edit
 | NTFS | **done** | **done** (allocation map; used-only imaging) | v1 | v3 (x in v1) | – (x) | v2 (x in v1) | **done** (reader: MFT, INDX, reparse links) | v3 |
 | HFS+ / HFSX | **done** | **done** (allocation map; used-only imaging) | v1 | v3 | – | v2 | **done** (reader: B-trees, overflow extents, hard links, HFSX case) | v3 |
 | HFS (classic) | **done** (incl. wrapper) | – | v1 | – | – | – | – | – |
-| APFS (container + volumes) | **done** (container) | v2 | v1 (name) | – | – | – | **done** (reader: latest checkpoint, container/volume object maps, fs tree inodes/dirs/extents/symlinks; first volume; unencrypted; decmpfs refused) | – |
+| APFS (container + volumes) | **done** (container) | v2 | v1 (name) | – | – | – | **done** (reader: latest checkpoint, container/volume object maps, any volume by name or slot, snapshots via the snapshot superblock and xid-bounded omap lookups, fs tree inodes/dirs/extents/symlinks, xattrs embedded or in data streams, decmpfs zlib/lzvn/lzfse files; unencrypted only) | – |
 | XFS | **done** | v2 | v1 | x (grow) | x | x | **done** (reader: v4/v5 inodes, extents and bmbt forks, sf/block/leaf/node dirs) | – |
 | btrfs | **done** | v2 | v1 | x | x | x | **done** (reader: chunk map, fs/subvolume trees, inline/regular extents, zlib/lzo/zstd compression) | – |
 | SquashFS | **done** | – | – | – | – | – | **done** (reader: 4.0, gzip/lzo/xz/lz4/zstd/lzma, fragments, sparse blocks, basic and extended inodes) | – |

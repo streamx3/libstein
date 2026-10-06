@@ -911,6 +911,89 @@ TEST_CASE("f2fs reader: mkfs.f2fs + sload.f2fs fixtures (default features; extra
     }
 }
 
+TEST_CASE("apfs reader: a container with two volumes, a snapshot and decmpfs files (volume by name/slot, snapshot by name, zlib/lzvn/lzfse in xattr and resource fork)") {
+    const std::string base = std::string(STEIN_FIXTURE_DIR) + "/apfs/apfs_snap";
+    if (!std::filesystem::exists(base + ".sparse")) {
+        MESSAGE("fixture apfs/apfs_snap missing (built by the macOS fixture workflow); skipping");
+        return;
+    }
+    auto dev = loadSparseFixture("apfs/apfs_snap.sparse");
+    auto probed = fs::probe(dev);
+    REQUIRE(probed);
+    REQUIRE(*probed);
+    const auto subs = (*probed)->subvolumes();
+    std::size_t volumes = 0, snapshots = 0;
+    for (const auto& v : subs) (v.kind == "volume" ? volumes : snapshots)++;
+    CHECK(volumes == 2);
+    CHECK((*probed)->info().extra.find("rd_snap") != std::string::npos);
+    CHECK((*probed)->info().extra.find("rd_second") != std::string::npos);
+    auto checkTree = [&](fs::Reader& r, const ExtOracle& o) {
+        std::map<std::string, std::pair<char, std::uint64_t>> seen;
+        std::map<std::string, std::string> sha, links;
+        walk(r, *r.root(), "", seen, sha, links);
+        for (const auto& [path, ts] : o.entries) {
+            CAPTURE(path);
+            REQUIRE(seen.count(path));
+            CHECK(seen[path].first == ts.first);
+            if (ts.first == 'f') CHECK(seen[path].second == ts.second);
+        }
+        for (const auto& [path, h] : o.sha) {
+            CAPTURE(path);
+            CHECK(sha[path] == h);
+        }
+        return seen;
+    };
+    // Live tree of the first volume: deletions, rewrites and the compressed files after the snapshot.
+    fs::ReaderOptions first;
+    first.volume = "rd_snap";
+    auto live = (*probed)->openReader(first);
+    REQUIRE_MESSAGE(live, (live ? std::string() : live.error().toString()));
+    const auto liveSeen = checkTree(**live, loadExtOracle("apfs_snap", "apfs"));
+    CHECK(liveSeen.count("after_snapshot.txt"));
+    CHECK_FALSE(liveSeen.count("tiny.txt"));
+    CHECK(liveSeen.count("zlib_src_large.txt"));   // decmpfs type 4 (resource fork, several 64 KiB blocks)
+    CHECK(liveSeen.count("zlib_src_small.txt"));   // decmpfs type 3 (in the xattr)
+    // The second volume, by name and by slot.
+    fs::ReaderOptions second;
+    second.volume = "rd_second";
+    auto vol2 = (*probed)->openReader(second);
+    REQUIRE_MESSAGE(vol2, (vol2 ? std::string() : vol2.error().toString()));
+    checkTree(**vol2, loadExtOracle("apfs_snap.second", "apfs"));
+    CHECK(fs::resolvePath(**vol2, "second.txt"));
+    CHECK_FALSE(fs::resolvePath(**vol2, "hello.txt"));
+    for (const auto& v : subs)
+        if (v.kind == "volume" && v.name == "rd_second") {
+            fs::ReaderOptions bySlot;
+            bySlot.volume = std::to_string(v.id);
+            auto r = (*probed)->openReader(bySlot);
+            REQUIRE(r);
+            CHECK(fs::resolvePath(**r, "second.txt"));
+        }
+    fs::ReaderOptions bad;
+    bad.volume = "no_such_volume";
+    CHECK_FALSE((*probed)->openReader(bad));
+    // The snapshot, when the machine that built the fixture could create one.
+    if (std::filesystem::exists(base + ".snapshot.oracle.txt")) {
+        REQUIRE(snapshots >= 1);
+        std::string snapName;
+        for (const auto& v : subs)
+            if (v.kind == "snapshot" && v.parent == "rd_snap") snapName = v.name;
+        REQUIRE_FALSE(snapName.empty());
+        fs::ReaderOptions snap;
+        snap.volume = "rd_snap";
+        snap.snapshot = snapName;
+        auto old = (*probed)->openReader(snap);
+        REQUIRE_MESSAGE(old, (old ? std::string() : old.error().toString()));
+        const auto oldSeen = checkTree(**old, loadExtOracle("apfs_snap.snapshot", "apfs"));
+        CHECK(oldSeen.count("tiny.txt"));                  // deleted after the snapshot
+        CHECK_FALSE(oldSeen.count("after_snapshot.txt"));  // created after the snapshot
+        snap.snapshot = "no_such_snapshot";
+        CHECK_FALSE((*probed)->openReader(snap));
+    } else {
+        MESSAGE("apfs_snap has no snapshot oracle (the fixture was built on a machine that cannot create snapshots); snapshot checks skipped");
+    }
+}
+
 TEST_CASE("erofs reader: mkfs.erofs fixtures (plain, chunk-based, lz4 compact/legacy/big pcluster/ztailpacking/fragments+dedupe, lzma, deflate) read back exactly") {
     const char* names[] = {"erofs_plain", "erofs_chunked", "erofs_lz4", "erofs_lz4_legacy", "erofs_lz4hc_bigpcl", "erofs_lz4_ztail", "erofs_lz4_frag", "erofs_lzma", "erofs_deflate"};
     for (const char* name : names) {

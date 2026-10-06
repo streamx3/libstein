@@ -47,6 +47,7 @@ ctest --preset debug
 ./build/debug/tools/stein/stein ls backup.stein --part 2 /home              # browse ext4/NTFS/FAT/exFAT/HFS+/APFS/ISO/UDF/XFS/btrfs/squashfs/erofs inside an image, partition,
 ./build/debug/tools/stein/stein cp disk.img --passphrase ... --lv root /etc/fstab fstab   # LUKS container or LVM volume
 ./build/debug/tools/stein/stein cp backup.stein --part 2 /home/alice ./alice   # whole directory trees copied out, no mount
+./build/debug/tools/stein/stein ls mac.dmg --volume Data --snapshot com.apple.TimeMachine.2026-10-06-120000.local /Users   # APFS volume and snapshot
 ./build/debug/tools/stein/stein luks info /dev/sdb2 && ./build/debug/tools/stein/stein lvm list /dev/sdb3
 ./build/debug/tools/stein/stein tcrypt unlock vault.hc --passphrase ... --pim 0   # VeraCrypt/TrueCrypt: header found by trial decryption
 ./build/debug/tools/stein/stein mount backup.stein /mnt/old --part 2     # Linux: FUSE mount of a partition inside an image
@@ -95,7 +96,7 @@ to the OS (Linux: FUSE, Windows: WinFsp, macOS: built-in NFS loopback).
 | NTFS | ✓ | ✓ | ◐ MFT, attribute lists, sparse runs, reparse links; compressed and encrypted files refused | ✓ | – |
 | HFS+ / HFSX | ✓ | ✓ | ✓ B-trees, overflow extents, hard links, case rules | ✓ | – |
 | HFS (classic, incl. wrapper) | ✓ | – | – | – | – |
-| APFS | ✓ container and volumes | – | ◐ first volume, unencrypted; decmpfs files refused | ✓ | – |
+| APFS | ✓ container, volumes, snapshots | – | ✓ any volume, snapshots, decmpfs (zlib/lzvn/lzfse) files; unencrypted only | ✓ | – |
 | XFS (v4, v5) | ✓ | – | ✓ extents, B-tree forks, all directory forms | ✓ | – |
 | btrfs | ✓ | – | ✓ single/DUP/RAID0/1/10, subvolumes, zlib/lzo/zstd | ✓ | – |
 | SquashFS 4 | ✓ | – | ✓ gzip/lzo/xz/lz4/zstd/lzma, fragments | ✓ | – |
