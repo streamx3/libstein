@@ -1,0 +1,2 @@
+  /dev/loop0 dJqddG-Lmud-d1YA-3oEy-3mYG-TOcC-OLEJOY 1048576B  31
+  /dev/loop1 Nd8SaK-ViUw-8Ure-A6vO-k32e-IPfO-deGHuj 1048576B  31

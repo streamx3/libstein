@@ -1,0 +1,5 @@
+  filler  2097152B     0     2 /dev/loop0:16-17                  1     0B
+  frag    8388608B     0     4 /dev/loop0:12-15                  1     0B
+  frag    8388608B     4     4 /dev/loop0:18-21                  1     0B
+  linear  8388608B     0     8 /dev/loop0:0-7                    1     0B
+  striped 8388608B     0     8 /dev/loop0:8-11 /dev/loop1:0-3    2 65536B
