@@ -65,3 +65,14 @@ L0 detect/geometry/label/uuid · L1 used-block map · L2 offline metadata edit
 | VMDK | v2 | – | v2 | |
 | DMG/UDIF | v2 | – | v2 | zlib/bzip2/ADC/lzfse |
 | partclone/Clonezilla | v3 | – | v3 | |
+
+## Operations (stein_ops, M1)
+
+| Operation | Status | Notes |
+|---|---|---|
+| CreateTable GPT/MBR/APM | **done** | zeroes old signatures first; preview on overlay |
+| Add/Delete/Update partition | **done** | bounds/overlap validation from `PartitionTable`; optional signature wipe |
+| RepairTable | **done** | GPT copies rebuild/relocate |
+| WipeSignatures | **done** | regions from the probe tree |
+| Resize/move partition (data) | planned | M3 |
+| CreateImage/RestoreImage as operations | planned | currently direct functions in `stein_image` |

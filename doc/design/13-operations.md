@@ -17,6 +17,12 @@ topology* so previews are computed, not guessed.
 | `Report` | Tree: `{title, status, startedAt, duration, details (key/value), children, log lines}`. Serialisable to JSON/text. |
 | `Progress` | Thread-safe sink: `setRange`, `advance`, `setPhase`, `message`, `rateHint`; carries a `CancelToken`. Throttling and ETA live here. |
 
+**Implementation note (M1):** simulation is not a model. `OperationStack`
+holds an `OverlayDevice` (copy-on-write) over the target; `push()` runs the
+operation's jobs on the overlay and probes it for the preview, `apply()`
+commits the dirty blocks and re-probes to confirm the device matches the
+preview. See `src/ops/`.
+
 ## 2. Operation lifecycle
 
 ```
