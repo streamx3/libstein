@@ -162,7 +162,7 @@ PY
   container=$(diskutil apfs list -plist | python3 -c '
 import plistlib, sys
 mnt = sys.argv[1]
-d = plistlib.load(sys.stdin.buffer)
+d = plistlib.loads(sys.stdin.buffer.read())
 for c in d["Containers"]:
     for v in c["Volumes"]:
         if v.get("MountPoint") == mnt:
@@ -173,7 +173,7 @@ for c in d["Containers"]:
   local second
   second=$(diskutil apfs list -plist "$container" | python3 -c '
 import plistlib, sys
-d = plistlib.load(sys.stdin.buffer)
+d = plistlib.loads(sys.stdin.buffer.read())
 for c in d["Containers"]:
     for v in c["Volumes"]:
         if v.get("Name") == "rd_second":
