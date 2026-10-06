@@ -67,6 +67,9 @@ public:
     virtual Expected<std::shared_ptr<BlockDevice>> open(const std::string& osPath, OpenMode mode) = 0;
     // Mount table as the OS sees it, optionally filtered to a device and its partitions.
     virtual Expected<std::vector<MountInfo>> mounts(const std::string& osPathPrefix = {}) = 0;
+    // Unmount one entry of mounts(). Busy when files are open (force detaches anyway where the OS
+    // allows). Unsupported on Windows: there, an exclusive open locks and dismounts the volumes.
+    virtual Expected<void> unmount(const MountInfo& mount, bool force) = 0;
     // Ask the kernel to re-read a device's partition table after we wrote one.
     virtual Expected<void> rereadPartitionTable(const std::string& osPath) = 0;
     // Expose an image file as a block device (loop on Linux).

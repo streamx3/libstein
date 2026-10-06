@@ -18,6 +18,7 @@ public:
         return fail(ErrorCategory::Unsupported, "raw device access is not implemented on this platform yet: " + p);
     }
     Expected<std::vector<MountInfo>> mounts(const std::string&) override { return std::vector<MountInfo>{}; }
+    Expected<void> unmount(const MountInfo&, bool) override { return fail(ErrorCategory::Unsupported, "not implemented"); }
     Expected<void> rereadPartitionTable(const std::string&) override { return fail(ErrorCategory::Unsupported, "not implemented"); }
     Expected<AttachedImage> attach(const std::filesystem::path&, const AttachOptions&) override {
         return fail(ErrorCategory::Unsupported, "image attach is not implemented on this platform yet");

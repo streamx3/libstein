@@ -4,6 +4,7 @@
 
 #include "stein/app/scenario.hpp"
 #include "stein/block/file_device.hpp"
+#include "stein/block/memory_device.hpp"
 #include "stein/pt/partition_table.hpp"
 
 #include <algorithm>
@@ -37,6 +38,9 @@ platform::DiskInfo disk(std::string path, std::string model, std::string serial,
 class FakePlatform final : public platform::Platform {
 public:
     std::vector<platform::DiskInfo> disks;
+    std::vector<platform::MountInfo> mounted;
+    std::shared_ptr<MemoryDevice> fakeDisk;     // served by open() for disks[0].osPath
+    int unmounts = 0, rereads = 0;
     bool elevated = false;
     std::string_view name() const override { return "fake"; }
     Expected<std::vector<platform::DiskInfo>> enumerate() override { return disks; }
@@ -45,9 +49,32 @@ public:
             if (d.osPath == p) return d;
         return fail(ErrorCategory::NotFound, "no such disk " + p);
     }
-    Expected<std::shared_ptr<BlockDevice>> open(const std::string& p, platform::OpenMode) override { return fail(ErrorCategory::Unsupported, "fake: " + p); }
-    Expected<std::vector<platform::MountInfo>> mounts(const std::string&) override { return std::vector<platform::MountInfo>{}; }
-    Expected<void> rereadPartitionTable(const std::string&) override { return {}; }
+    Expected<std::shared_ptr<BlockDevice>> open(const std::string& p, platform::OpenMode mode) override {
+        if (fakeDisk && !disks.empty() && p == disks[0].osPath) {
+            if (mode == platform::OpenMode::ReadWriteExclusive && !mounts(p)->empty()) return fail(ErrorCategory::Busy, "fake: still mounted");
+            return std::shared_ptr<BlockDevice>(fakeDisk);
+        }
+        return fail(ErrorCategory::Unsupported, "fake: " + p);
+    }
+    Expected<std::vector<platform::MountInfo>> mounts(const std::string& prefix) override {
+        std::vector<platform::MountInfo> out;
+        for (const auto& m : mounted)
+            if (prefix.empty() || m.source.rfind(prefix, 0) == 0) out.push_back(m);
+        return out;
+    }
+    Expected<void> unmount(const platform::MountInfo& m, bool) override {
+        for (auto it = mounted.begin(); it != mounted.end(); ++it)
+            if (it->target == m.target) {
+                mounted.erase(it);
+                ++unmounts;
+                return {};
+            }
+        return fail(ErrorCategory::NotFound, "not mounted");
+    }
+    Expected<void> rereadPartitionTable(const std::string&) override {
+        ++rereads;
+        return {};
+    }
     Expected<platform::AttachedImage> attach(const std::filesystem::path&, const platform::AttachOptions&) override { return fail(ErrorCategory::Unsupported, "fake"); }
     Expected<void> detach(const platform::AttachedImage&) override { return {}; }
     bool isElevated() const override { return elevated; }
@@ -314,5 +341,46 @@ TEST_CASE("scenarios: used-only backup through a profile skips free space") {
     REQUIRE(w);
     CHECK(w->created->stats.freeBytesSkipped == 0);
     CHECK_FALSE(image::imageInfo(p.image.path)->manifest.has("used_blocks_only"));
+    stein::test::removeTree(dir);
+}
+
+TEST_CASE("scenarios: restore through a platform unmounts the target's volumes first") {
+    auto dir = tmpDir("stein_test_app_mounted");
+    auto src = loadSparseFixture("pt/gpt_basic.sparse");
+    FakePlatform fake;
+    fake.disks = {disk("/dev/fake", "Fake Disk", "FAKE-1", src->size())};
+    fake.fakeDisk = std::make_shared<MemoryDevice>(src->size());
+    std::copy(src->bytes().begin(), src->bytes().end(), fake.fakeDisk->bytes().begin());
+    fake.mounted = {platform::MountInfo{"/dev/fake1", "/mnt/efi", "vfat", "rw", false}, platform::MountInfo{"/dev/fake2", "/mnt/data", "ext4", "rw", false}};
+    app::Profile p;
+    p.name = "fake";
+    p.target.serial = "FAKE-1";
+    p.image.path = dir / "fake.stein";
+    p.image.chunkSize = 1 * MiB;
+    p.image.usedOnly = false;
+    app::RunOptions o;
+    o.platform = &fake;
+    NullProgressSink sink;
+    Progress progress(sink);
+    auto b = app::backup(p, o, progress);
+    REQUIRE_MESSAGE(b, (b ? std::string() : b.error().toString()));
+    CHECK(b->report.toText().find("mounted; the image may be inconsistent") != std::string::npos);
+    // Refuse while mounted when the policy says so.
+    p.policy.unmountTarget = false;
+    auto refused = app::restore(p, o, progress);
+    REQUIRE_FALSE(refused);
+    CHECK(refused.error().category() == ErrorCategory::Busy);
+    CHECK(fake.unmounts == 0);
+    // Default policy: unmount, write, re-read the table.
+    p.policy.unmountTarget = true;
+    std::fill(fake.fakeDisk->bytes().begin(), fake.fakeDisk->bytes().begin() + 1 * MiB, std::byte{0});
+    auto r = app::restore(p, o, progress);
+    REQUIRE_MESSAGE(r, (r ? std::string() : r.error().toString()));
+    CHECK(r->ok);
+    CHECK(fake.unmounts == 2);
+    CHECK(fake.mounted.empty());
+    CHECK(fake.rereads == 1);
+    CHECK(r->report.toText().find("unmounted /mnt/efi") != std::string::npos);
+    CHECK(std::equal(src->bytes().begin(), src->bytes().end(), fake.fakeDisk->bytes().begin()));
     stein::test::removeTree(dir);
 }

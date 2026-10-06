@@ -58,6 +58,7 @@ struct Policy {
     bool verifyAfterBackup = true;
     bool rereadPartitionTable = true;
     bool repairTableAfterRestore = true;   // larger target: move the GPT backup to the new end
+    bool unmountTarget = true;             // unmount the target's volumes before writing (else refuse while mounted)
 };
 
 struct Profile {

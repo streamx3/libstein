@@ -8,6 +8,7 @@
 #include <linux/fs.h>
 #include <linux/loop.h>
 #include <sys/ioctl.h>
+#include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <unistd.h>
@@ -265,6 +266,15 @@ public:
             out.push_back(std::move(m));
         }
         return out;
+    }
+
+    Expected<void> unmount(const MountInfo& m, bool force) override {
+        if (::umount2(m.target.c_str(), force ? (MNT_FORCE | MNT_DETACH) : 0) != 0) {
+            const int e = errno;
+            const ErrorCategory cat = e == EBUSY ? ErrorCategory::Busy : (e == EPERM || e == EACCES) ? ErrorCategory::Permission : ErrorCategory::Io;
+            return fail(cat, "umount " + m.target + ": " + std::strerror(e), e);
+        }
+        return {};
     }
 
     Expected<void> rereadPartitionTable(const std::string& osPath) override {

@@ -305,6 +305,13 @@ public:
         return out;
     }
 
+    Expected<void> unmount(const MountInfo& m, bool force) override {
+        int status = 0;
+        const std::string out = runCommand(std::string("diskutil unmount ") + (force ? "force " : "") + shellQuote(m.target) + " 2>&1", status);
+        if (status != 0) return fail(ErrorCategory::Busy, "diskutil unmount " + m.target + ": " + std::string(trim(out)));
+        return {};
+    }
+
     Expected<void> rereadPartitionTable(const std::string&) override {
         // The kernel re-reads the table when the last writer closes the raw device.
         return {};

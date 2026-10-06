@@ -157,6 +157,9 @@ Expected<ScenarioResult> backup(const Profile& profile, const RunOptions& option
         r.ok = true;
         return r;
     }
+    if (!t->isFile)
+        if (auto mounted = plat(options).mounts(t->disk.osPath); mounted && !mounted->empty())
+            r.report.addLine("warning: " + std::to_string(mounted->size()) + " volume(s) on the source are mounted; the image may be inconsistent (filesystems mounted read-write are copied whole)");
     auto dev = openTarget(*t, options, false);
     if (!dev) return fail(dev.error());
     image::CreateOptions co;
@@ -241,6 +244,37 @@ Expected<ScenarioResult> restore(const Profile& profile, const RunOptions& optio
         r.report.finish(ReportStatus::Info);
         r.ok = true;
         return r;
+    }
+    // Mounted volumes on the target: unmount them (policy) or refuse. On Windows the
+    // exclusive open below locks and dismounts them instead.
+    if (!t->isFile) {
+        auto mounted = plat(options).mounts(t->disk.osPath);
+        if (!mounted) return fail(mounted.error());
+        if (!mounted->empty()) {
+            auto& um = r.report.addChild("Unmount " + std::to_string(mounted->size()) + " volume(s) on the target");
+            um.start();
+            if (!profile.policy.unmountTarget) {
+                um.finish(ReportStatus::Error);
+                for (const auto& m : *mounted) um.addLine(m.source + " mounted on " + m.target);
+                r.report.finish(ReportStatus::Error);
+                return fail(ErrorCategory::Busy, "the target has mounted volumes and the profile forbids unmounting them");
+            }
+            for (const auto& m : *mounted) {
+                auto u = plat(options).unmount(m, false);
+                if (!u && u.error().category() == ErrorCategory::Unsupported) {
+                    um.addLine(m.target + ": " + u.error().message());
+                    continue;
+                }
+                if (!u) {
+                    um.finish(ReportStatus::Error);
+                    um.addLine(u.error().toString());
+                    r.report.finish(ReportStatus::Error);
+                    return fail(Error(ErrorCategory::Busy, "cannot unmount " + m.target + ": " + u.error().message()));
+                }
+                um.addLine("unmounted " + m.target);
+            }
+            um.finish(ReportStatus::Success);
+        }
     }
     auto dev = openTarget(*t, options, true);
     if (!dev) return fail(dev.error());

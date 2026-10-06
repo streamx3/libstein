@@ -188,7 +188,11 @@ public:
     WinDisk(HANDLE h, std::string path, Geometry geo, bool ro) : m_h(h), m_path(std::move(path)), m_geometry(geo), m_readOnly(ro) {}
     ~WinDisk() override {
         if (m_h != INVALID_HANDLE_VALUE) CloseHandle(m_h);
+        // Releasing the volume locks lets Windows re-mount the (rewritten) volumes.
+        for (HANDLE v : m_volumeLocks)
+            if (v != INVALID_HANDLE_VALUE) CloseHandle(v);
     }
+    void adoptVolumeLocks(std::vector<HANDLE> locks) { m_volumeLocks = std::move(locks); }
     std::string name() const override { return m_path; }
     Geometry geometry() const override { return m_geometry; }
     bool isReadOnly() const override { return m_readOnly; }
@@ -234,6 +238,7 @@ private:
     std::string m_path;
     Geometry m_geometry;
     bool m_readOnly;
+    std::vector<HANDLE> m_volumeLocks;
 };
 
 class WinPlatform final : public Platform {
@@ -283,13 +288,37 @@ public:
             geo = Geometry{};
             geo->sizeBytes = static_cast<ByteCount>(sz.QuadPart);
         }
+        std::vector<HANDLE> locks;
         if (!ro) {
-            // Windows refuses writes to sectors covered by mounted volumes unless they are
-            // locked or dismounted; locking happens per volume in stein_ops later (M2).
             DWORD got = 0;
             DeviceIoControl(h.h, FSCTL_ALLOW_EXTENDED_DASD_IO, nullptr, 0, nullptr, 0, &got, nullptr);
         }
-        return std::shared_ptr<BlockDevice>(std::make_shared<WinDisk>(h.release(), path, *geo, ro));
+        if (mode == OpenMode::ReadWriteExclusive && n) {
+            // Windows refuses writes to sectors covered by mounted volumes. Lock and dismount
+            // every volume on this disk and hold the locks for the life of the device.
+            auto vols = mounts(path);
+            if (!vols) return fail(vols.error());
+            for (const auto& v : *vols) {
+                HANDLE vh = CreateFileW(widen(v.source).c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+                if (vh == INVALID_HANDLE_VALUE) {
+                    const DWORD e = GetLastError();
+                    for (HANDLE l : locks) CloseHandle(l);
+                    return fail(winError("open volume " + v.target, e));
+                }
+                DWORD got = 0;
+                if (!DeviceIoControl(vh, FSCTL_LOCK_VOLUME, nullptr, 0, nullptr, 0, &got, nullptr)) {
+                    const DWORD e = GetLastError();
+                    CloseHandle(vh);
+                    for (HANDLE l : locks) CloseHandle(l);
+                    return fail(Error(ErrorCategory::Busy, "volume " + v.target + " is in use and cannot be locked: " + lastErrorText(e), static_cast<int>(e)));
+                }
+                DeviceIoControl(vh, FSCTL_DISMOUNT_VOLUME, nullptr, 0, nullptr, 0, &got, nullptr);
+                locks.push_back(vh);
+            }
+        }
+        auto disk = std::make_shared<WinDisk>(h.release(), path, *geo, ro);
+        disk->adoptVolumeLocks(std::move(locks));
+        return std::shared_ptr<BlockDevice>(disk);
     }
 
     Expected<std::vector<MountInfo>> mounts(const std::string& prefix) override {
@@ -331,6 +360,10 @@ public:
             out.push_back(std::move(m));
         }
         return out;
+    }
+
+    Expected<void> unmount(const MountInfo& m, bool) override {
+        return fail(ErrorCategory::Unsupported, "Windows volumes (" + m.target + ") are locked and dismounted by an exclusive open of their disk");
     }
 
     Expected<void> rereadPartitionTable(const std::string& osPath) override {
