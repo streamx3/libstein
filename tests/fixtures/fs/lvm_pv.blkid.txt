@@ -1,0 +1,5 @@
+DEVNAME=/tmp/tmp.KuVVC5TJPw/lvm_pv.img
+UUID=1ZaNjo-cfIz-0B2C-xXt1-zZ3j-5555-aaaaaa
+VERSION=LVM2\ 001
+TYPE=LVM2_member
+USAGE=raid

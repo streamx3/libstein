@@ -1,0 +1,51 @@
+# LUKS1 (cryptsetup LUKS1 on-disk format spec 1.2.3) and LUKS2 binary header (LUKS2 on-disk format spec).
+
+[luks1_phdr]
+doc = "LUKS1 partition header at offset 0 (592 bytes); 8 key slots follow at 0xD0"
+size = 208
+endian = "be"
+fields = [
+  { name = "magic",             offset = 0x00, type = "bytes", size = 6, expect = "LUKSº¾", doc = "LUKS 0xBA 0xBE" },
+  { name = "version",           offset = 0x06, type = "u16", expect = 1 },
+  { name = "cipher_name",       offset = 0x08, type = "ascii", size = 32, doc = "aes, serpent, twofish..." },
+  { name = "cipher_mode",       offset = 0x28, type = "ascii", size = 32, doc = "xts-plain64, cbc-essiv:sha256..." },
+  { name = "hash_spec",         offset = 0x48, type = "ascii", size = 32, doc = "sha256, sha1, sha512, ripemd160, whirlpool" },
+  { name = "payload_offset",    offset = 0x68, type = "u32", doc = "Start of the encrypted payload, in 512-byte sectors" },
+  { name = "key_bytes",         offset = 0x6C, type = "u32", doc = "Master key length (32 = aes-xts-256, 64 = aes-xts-512)" },
+  { name = "mk_digest",         offset = 0x70, type = "bytes", size = 20, doc = "PBKDF2 digest of the master key" },
+  { name = "mk_digest_salt",    offset = 0x84, type = "bytes", size = 32 },
+  { name = "mk_digest_iter",    offset = 0xA4, type = "u32", nonzero = true },
+  { name = "uuid",              offset = 0xA8, type = "ascii", size = 40, doc = "UUID as text" },
+]
+
+[luks1_keyslot]
+doc = "LUKS1 key slot (48 bytes each, 8 slots from offset 0xD0)"
+size = 48
+endian = "be"
+fields = [
+  { name = "active",            offset = 0x00, type = "u32", enum = { "0x0000DEAD" = "disabled", "0x00AC71F3" = "enabled" } },
+  { name = "iterations",        offset = 0x04, type = "u32" },
+  { name = "salt",              offset = 0x08, type = "bytes", size = 32 },
+  { name = "key_material_offset", offset = 0x28, type = "u32", doc = "Sector of the AF-split key material" },
+  { name = "stripes",           offset = 0x2C, type = "u32", doc = "Anti-forensic stripes (4000)" },
+]
+
+[luks2_hdr]
+doc = "LUKS2 binary header (4096 bytes); JSON area follows; second copy at hdr_size"
+size = 4096
+endian = "be"
+fields = [
+  { name = "magic",        offset = 0x000, type = "bytes", size = 6, doc = "LUKS 0xBA 0xBE (primary) or SKUL 0xBA 0xBE (secondary)" },
+  { name = "version",      offset = 0x006, type = "u16", expect = 2 },
+  { name = "hdr_size",     offset = 0x008, type = "u64", doc = "Binary header + JSON area size (16 KiB .. 4 MiB)" },
+  { name = "seqid",        offset = 0x010, type = "u64", doc = "Sequence id; the copy with the higher seqid wins" },
+  { name = "label",        offset = 0x018, type = "ascii", size = 48 },
+  { name = "csum_alg",     offset = 0x048, type = "ascii", size = 32, doc = "sha256" },
+  { name = "salt",         offset = 0x068, type = "bytes", size = 64 },
+  { name = "uuid",         offset = 0x0A8, type = "ascii", size = 40 },
+  { name = "subsystem",    offset = 0x0D0, type = "ascii", size = 48 },
+  { name = "hdr_offset",   offset = 0x100, type = "u64", doc = "Offset of this header copy from the device start" },
+  { name = "padding",      offset = 0x108, type = "bytes", size = 184 },
+  { name = "csum",         offset = 0x1C0, type = "bytes", size = 64, doc = "Checksum over binary header (csum zeroed) + JSON area" },
+  { name = "padding4096",  offset = 0x200, type = "bytes", size = 3584 },
+]

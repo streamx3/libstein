@@ -1,0 +1,92 @@
+# NTFS boot sector — from the NTFS documentation (linux-ntfs project / ntfs-3g layout.h).
+
+[ntfs_boot_sector]
+doc = "NTFS boot sector (sector 0; backup copy in the last sector of the volume)"
+size = 84
+endian = "le"
+fields = [
+  { name = "jump",                 offset = 0x00, type = "bytes", size = 3 },
+  { name = "oem_id",               offset = 0x03, type = "ascii", size = 8, expect = "NTFS    ", pad = " " },
+  { name = "bytes_per_sector",     offset = 0x0B, type = "u16", enum = { "512" = "512", "1024" = "1024", "2048" = "2048", "4096" = "4096" } },
+  { name = "sectors_per_cluster",  offset = 0x0D, type = "u8", nonzero = true, doc = "Power of two; values > 0x80 encode 2^(256-x) for large clusters" },
+  { name = "reserved_sectors",     offset = 0x0E, type = "u16", expect = 0 },
+  { name = "fats",                 offset = 0x10, type = "u8", expect = 0 },
+  { name = "root_entries",         offset = 0x11, type = "u16", expect = 0 },
+  { name = "sectors",              offset = 0x13, type = "u16", expect = 0 },
+  { name = "media_type",           offset = 0x15, type = "u8", enum = { "0xF8" = "fixed disk" } },
+  { name = "sectors_per_fat",      offset = 0x16, type = "u16", expect = 0 },
+  { name = "sectors_per_track",    offset = 0x18, type = "u16" },
+  { name = "heads",                offset = 0x1A, type = "u16" },
+  { name = "hidden_sectors",       offset = 0x1C, type = "u32", doc = "Sectors before the volume; GParted/kpmcore patch this after a move" },
+  { name = "large_sectors",        offset = 0x20, type = "u32", expect = 0 },
+  { name = "physical_drive",       offset = 0x24, type = "u8" },
+  { name = "current_head",         offset = 0x25, type = "u8" },
+  { name = "extended_boot_signature", offset = 0x26, type = "u8", expect = 0x80 },
+  { name = "reserved2",            offset = 0x27, type = "u8" },
+  { name = "number_of_sectors",    offset = 0x28, type = "u64", nonzero = true, doc = "Volume size in sectors, excluding the backup boot sector" },
+  { name = "mft_lcn",              offset = 0x30, type = "u64", doc = "Cluster of $MFT" },
+  { name = "mftmirr_lcn",          offset = 0x38, type = "u64", doc = "Cluster of $MFTMirr" },
+  { name = "clusters_per_mft_record", offset = 0x40, type = "i8", doc = "Positive: clusters; negative: record size = 2^(-x) bytes" },
+  { name = "reserved3",            offset = 0x41, type = "bytes", size = 3 },
+  { name = "clusters_per_index_record", offset = 0x44, type = "i8" },
+  { name = "reserved4",            offset = 0x45, type = "bytes", size = 3 },
+  { name = "volume_serial_number", offset = 0x48, type = "u64", doc = "Shown as 16 hex digits" },
+  { name = "checksum",             offset = 0x50, type = "u32", doc = "Unused by Windows" },
+]
+
+[ntfs_mft_record_header]
+doc = "MFT FILE record header"
+size = 48
+endian = "le"
+fields = [
+  { name = "magic",               offset = 0x00, type = "ascii", size = 4, expect = "FILE" },
+  { name = "usa_offset",          offset = 0x04, type = "u16", doc = "Update sequence array offset" },
+  { name = "usa_count",           offset = 0x06, type = "u16" },
+  { name = "lsn",                 offset = 0x08, type = "u64", doc = "$LogFile sequence number" },
+  { name = "sequence_number",     offset = 0x10, type = "u16" },
+  { name = "link_count",          offset = 0x12, type = "u16" },
+  { name = "attrs_offset",        offset = 0x14, type = "u16", doc = "Offset of the first attribute" },
+  { name = "flags",               offset = 0x16, type = "bits16", bits = { "0" = "in_use", "1" = "directory", "2" = "in_extend", "3" = "is_view_index" } },
+  { name = "bytes_in_use",        offset = 0x18, type = "u32" },
+  { name = "bytes_allocated",     offset = 0x1C, type = "u32" },
+  { name = "base_mft_record",     offset = 0x20, type = "u64" },
+  { name = "next_attr_instance",  offset = 0x28, type = "u16" },
+  { name = "reserved",            offset = 0x2A, type = "u16" },
+  { name = "mft_record_number",   offset = 0x2C, type = "u32" },
+]
+
+[ntfs_attr_header]
+doc = "Attribute record header (common part)"
+size = 16
+endian = "le"
+fields = [
+  { name = "type",            offset = 0x0, type = "u32", enum = { "0x10" = "$STANDARD_INFORMATION", "0x20" = "$ATTRIBUTE_LIST", "0x30" = "$FILE_NAME", "0x40" = "$OBJECT_ID", "0x50" = "$SECURITY_DESCRIPTOR", "0x60" = "$VOLUME_NAME", "0x70" = "$VOLUME_INFORMATION", "0x80" = "$DATA", "0x90" = "$INDEX_ROOT", "0xA0" = "$INDEX_ALLOCATION", "0xB0" = "$BITMAP", "0xC0" = "$REPARSE_POINT", "0xD0" = "$EA_INFORMATION", "0xE0" = "$EA", "0x100" = "$LOGGED_UTILITY_STREAM", "0xFFFFFFFF" = "end marker" } },
+  { name = "length",          offset = 0x4, type = "u32", nonzero = true, doc = "Length of this attribute record" },
+  { name = "non_resident",    offset = 0x8, type = "u8", enum = { "0" = "resident", "1" = "non-resident" } },
+  { name = "name_length",     offset = 0x9, type = "u8", doc = "In UTF-16 units" },
+  { name = "name_offset",     offset = 0xA, type = "u16" },
+  { name = "flags",           offset = 0xC, type = "bits16", bits = { "0" = "compressed", "14" = "encrypted", "15" = "sparse" } },
+  { name = "instance",        offset = 0xE, type = "u16" },
+]
+
+[ntfs_attr_resident]
+doc = "Resident attribute tail (after the 16-byte header)"
+size = 8
+endian = "le"
+fields = [
+  { name = "value_length", offset = 0x0, type = "u32" },
+  { name = "value_offset", offset = 0x4, type = "u16", doc = "From the start of the attribute record" },
+  { name = "resident_flags", offset = 0x6, type = "u8" },
+  { name = "reserved",     offset = 0x7, type = "u8" },
+]
+
+[ntfs_volume_information]
+doc = "$VOLUME_INFORMATION attribute value"
+size = 12
+endian = "le"
+fields = [
+  { name = "reserved",      offset = 0x0, type = "u64" },
+  { name = "major_version", offset = 0x8, type = "u8", doc = "3 = NTFS 3.x (Windows 2000+)" },
+  { name = "minor_version", offset = 0x9, type = "u8", doc = "1 = XP and later" },
+  { name = "flags",         offset = 0xA, type = "bits16", bits = { "0" = "dirty", "1" = "resize_logfile", "2" = "upgrade_on_mount", "3" = "mounted_on_nt4", "4" = "delete_usn_underway", "5" = "repair_object_ids", "14" = "chkdsk_underway", "15" = "modified_by_chkdsk" } },
+]

@@ -1,0 +1,27 @@
+# exFAT main boot sector — Microsoft exFAT specification (2019), §3.1.
+
+[exfat_boot_sector]
+doc = "exFAT boot sector (sector 0 of the main boot region; copy at sector 12)"
+size = 120
+endian = "le"
+fields = [
+  { name = "jump_boot",               offset = 0x00, type = "bytes", size = 3, expect_hex = "eb7690", doc = "EB 76 90" },
+  { name = "fs_name",                 offset = 0x03, type = "ascii", size = 8, expect = "EXFAT   ", pad = " " },
+  { name = "must_be_zero",            offset = 0x0B, type = "bytes", size = 53, doc = "Where a FAT BPB would be; must be zero" },
+  { name = "partition_offset",        offset = 0x40, type = "u64", doc = "Sector offset of the volume on the media" },
+  { name = "volume_length",           offset = 0x48, type = "u64", nonzero = true, doc = "Volume size in sectors" },
+  { name = "fat_offset",              offset = 0x50, type = "u32", min = 24 },
+  { name = "fat_length",              offset = 0x54, type = "u32", nonzero = true },
+  { name = "cluster_heap_offset",     offset = 0x58, type = "u32", nonzero = true },
+  { name = "cluster_count",           offset = 0x5C, type = "u32", nonzero = true },
+  { name = "first_cluster_of_root",   offset = 0x60, type = "u32", min = 2 },
+  { name = "volume_serial_number",    offset = 0x64, type = "u32", doc = "Shown as XXXX-XXXX" },
+  { name = "fs_revision",             offset = 0x68, type = "u16", doc = "High byte major, low byte minor: 0x0100 = 1.00" },
+  { name = "volume_flags",            offset = 0x6A, type = "bits16", bits = { "0" = "active_fat_second", "1" = "volume_dirty", "2" = "media_failure", "3" = "clear_to_zero" } },
+  { name = "bytes_per_sector_shift",  offset = 0x6C, type = "u8", min = 9, max = 12 },
+  { name = "sectors_per_cluster_shift", offset = 0x6D, type = "u8", max = 25 },
+  { name = "number_of_fats",          offset = 0x6E, type = "u8", min = 1, max = 2 },
+  { name = "drive_select",            offset = 0x6F, type = "u8" },
+  { name = "percent_in_use",          offset = 0x70, type = "u8", doc = "0..100, or 0xFF = unknown" },
+  { name = "reserved",                offset = 0x71, type = "bytes", size = 7 },
+]

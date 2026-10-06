@@ -40,6 +40,8 @@ def camel(s: str, upper_first: bool) -> str:
 def cstr(s) -> str:
     if s is None:
         return "nullptr"
+    if isinstance(s, bytes):
+        return '"' + "".join(f"\\{b:03o}" for b in s) + '"'
     s = str(s).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
     return f'"{s}"'
 
@@ -57,7 +59,7 @@ class Field:
         t = raw["type"]
         self.doc = raw.get("doc", "")
         self.big_endian = raw.get("endian", struct_endian) == "be"
-        self.expect_ascii = None
+        self.expect_ascii = None     # bytes (may contain any value) compared byte-wise
         self.expect_value = None
         self.min = raw.get("min")
         self.max = raw.get("max")
@@ -75,7 +77,9 @@ class Field:
             self.size = parse_int(raw["size"])
             self.category = t
             if "expect" in raw:
-                self.expect_ascii = str(raw["expect"])
+                self.expect_ascii = str(raw["expect"]).encode("latin-1")
+            if "expect_hex" in raw:
+                self.expect_ascii = bytes.fromhex(raw["expect_hex"])
         elif t in FIXED_TYPES:
             self.kind, self.size = FIXED_TYPES[t]
             self.category = t
@@ -134,7 +138,7 @@ def gen_header(structs, base: str) -> str:
         out.append("")
         out.append(f"    // View over at least kSize bytes; the caller guarantees the length.")
         out.append(f"    explicit {s.cls}(std::span<const std::byte> bytes) : m_bytes(bytes) {{}}")
-        out.append("    std::span<const std::byte> bytes() const { return m_bytes; }")
+        out.append("    std::span<const std::byte> rawBytes() const { return m_bytes; }")
         out.append("    Node describe(std::uint64_t absOffset) const { return stein::layout::describe(spec(), m_bytes, absOffset); }")
         out.append("")
         out.append("    // Field offsets, for code that addresses pieces directly.")
@@ -199,7 +203,8 @@ def gen_source(structs, base: str) -> str:
             if f.enums:
                 out.append(f"const EnumValue k{s.cls}_{camel(f.name, True)}_Enums[] = {{")
                 for v, name in f.enums:
-                    out.append(f"    {{{v:#x}ull, {cstr(name)}}},")
+                    lit = f"{v:#x}ull" if v >= 0 else f"static_cast<std::uint64_t>(std::int64_t{{{v}}})"
+                    out.append(f"    {{{lit}, {cstr(name)}}},")
                 out.append("};")
             if f.bits:
                 out.append(f"const BitName k{s.cls}_{camel(f.name, True)}_Bits[] = {{")
@@ -214,6 +219,7 @@ def gen_source(structs, base: str) -> str:
                 cstr(f.name), str(f.offset), str(f.size), f"FieldType::{f.kind}",
                 "true" if f.big_endian else "false", cstr(f.doc),
                 cstr(f.expect_ascii) if f.expect_ascii is not None else "nullptr",
+                str(len(f.expect_ascii)) if f.expect_ascii is not None else "0",
                 "true" if f.expect_value is not None else "false",
                 f"{f.expect_value}ull" if f.expect_value is not None else "0",
                 "true" if f.min is not None else "false", "true" if f.max is not None else "false",

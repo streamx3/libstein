@@ -1,0 +1,64 @@
+# HFS+ volume header (Apple TN1150) at byte 1024; HFS Master Directory Block at byte 1024.
+# Both are big-endian.
+
+[hfsplus_volume_header]
+doc = "HFS+/HFSX volume header at offset 1024 (alternate copy 1024 bytes before the end)"
+size = 128
+endian = "be"
+fields = [
+  { name = "signature",         offset = 0x00, type = "ascii", size = 2, doc = "H+ (HFS+) or HX (HFSX)" },
+  { name = "version",           offset = 0x02, type = "u16", enum = { "4" = "HFS+", "5" = "HFSX" } },
+  { name = "attributes",        offset = 0x04, type = "bits32", bits = { "7" = "hardware_lock", "8" = "unmounted (clean)", "9" = "spared_blocks", "10" = "no_cache_required", "11" = "boot_volume_inconsistent", "12" = "catalog_node_ids_reused", "13" = "journaled", "15" = "software_lock" } },
+  { name = "last_mounted_version", offset = 0x08, type = "ascii", size = 4, doc = "10.0 (Mac OS X), HFSJ (journaled), fsck" },
+  { name = "journal_info_block", offset = 0x0C, type = "u32" },
+  { name = "create_date",       offset = 0x10, type = "u32", doc = "Seconds since 1904-01-01 (local time!)" },
+  { name = "modify_date",       offset = 0x14, type = "u32" },
+  { name = "backup_date",       offset = 0x18, type = "u32" },
+  { name = "checked_date",      offset = 0x1C, type = "u32" },
+  { name = "file_count",        offset = 0x20, type = "u32" },
+  { name = "folder_count",      offset = 0x24, type = "u32" },
+  { name = "block_size",        offset = 0x28, type = "u32", nonzero = true, doc = "Allocation block size, power of two >= 512" },
+  { name = "total_blocks",      offset = 0x2C, type = "u32", nonzero = true },
+  { name = "free_blocks",       offset = 0x30, type = "u32" },
+  { name = "next_allocation",   offset = 0x34, type = "u32" },
+  { name = "rsrc_clump_size",   offset = 0x38, type = "u32" },
+  { name = "data_clump_size",   offset = 0x3C, type = "u32" },
+  { name = "next_catalog_id",   offset = 0x40, type = "u32" },
+  { name = "write_count",       offset = 0x44, type = "u32" },
+  { name = "encodings_bitmap",  offset = 0x48, type = "u64" },
+  { name = "finder_info",       offset = 0x50, type = "bytes", size = 32, doc = "Boot folder ids; the last 8 bytes are the volume UUID seed" },
+]
+
+[hfs_mdb]
+doc = "Classic HFS Master Directory Block at offset 1024"
+size = 162
+endian = "be"
+fields = [
+  { name = "signature",        offset = 0x00, type = "ascii", size = 2, expect = "BD" },
+  { name = "create_date",      offset = 0x02, type = "u32" },
+  { name = "modify_date",      offset = 0x06, type = "u32" },
+  { name = "attributes",       offset = 0x0A, type = "bits16", bits = { "7" = "hardware_lock", "8" = "unmounted (clean)", "9" = "spared_blocks", "15" = "software_lock" } },
+  { name = "root_file_count",  offset = 0x0C, type = "u16" },
+  { name = "volume_bitmap_start", offset = 0x0E, type = "u16" },
+  { name = "alloc_ptr",        offset = 0x10, type = "u16" },
+  { name = "num_alloc_blocks", offset = 0x12, type = "u16", nonzero = true },
+  { name = "alloc_block_size", offset = 0x14, type = "u32", nonzero = true },
+  { name = "clump_size",       offset = 0x18, type = "u32" },
+  { name = "first_alloc_block",offset = 0x1C, type = "u16" },
+  { name = "next_catalog_id",  offset = 0x1E, type = "u32" },
+  { name = "free_blocks",      offset = 0x22, type = "u16" },
+  { name = "volume_name_len",  offset = 0x24, type = "u8", max = 27 },
+  { name = "volume_name",      offset = 0x25, type = "ascii", size = 27, doc = "Pascal string body (MacRoman)" },
+  { name = "backup_date",      offset = 0x40, type = "u32" },
+  { name = "backup_seq",       offset = 0x44, type = "u16" },
+  { name = "write_count",      offset = 0x46, type = "u32" },
+  { name = "ext_clump_size",   offset = 0x4A, type = "u32" },
+  { name = "cat_clump_size",   offset = 0x4E, type = "u32" },
+  { name = "root_dir_count",   offset = 0x52, type = "u16" },
+  { name = "file_count",       offset = 0x54, type = "u32" },
+  { name = "dir_count",        offset = 0x58, type = "u32" },
+  { name = "finder_info",      offset = 0x5C, type = "bytes", size = 32 },
+  { name = "embed_signature",  offset = 0x7C, type = "ascii", size = 2, doc = "H+ when an HFS+ volume is embedded (wrapper)" },
+  { name = "embed_start_block",offset = 0x7E, type = "u16" },
+  { name = "embed_block_count",offset = 0x80, type = "u16" },
+]

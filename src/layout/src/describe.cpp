@@ -126,12 +126,23 @@ Node describeField(const FieldSpec& f, std::span<const std::byte> s, std::uint64
         default: v = static_cast<std::int64_t>(raw); break;
         }
         n.value = std::to_string(v);
+        if (f.enums) {
+            bool known = false;
+            for (std::size_t i = 0; i < f.enumCount; ++i)
+                if (f.enums[i].value == static_cast<std::uint64_t>(v)) {
+                    n.pretty = f.enums[i].name;
+                    known = true;
+                }
+            if (!known) n.flag(Validity::Warning, "unknown value " + std::to_string(v));
+        }
+        if (f.hasExpectValue && static_cast<std::uint64_t>(v) != f.expectValue)
+            n.flag(Validity::Error, "expected " + std::to_string(static_cast<std::int64_t>(f.expectValue)));
     } else {
         switch (f.type) {
         case FieldType::Ascii: {
             n.value = asciiField(bytes);
             if (f.expectAscii) {
-                std::string_view expect(f.expectAscii);
+                std::string_view expect(f.expectAscii, f.expectLength);
                 bool match = expect.size() <= bytes.size();
                 for (std::size_t i = 0; match && i < expect.size(); ++i)
                     match = std::to_integer<char>(bytes[i]) == expect[i];
@@ -163,7 +174,7 @@ Node describeField(const FieldSpec& f, std::span<const std::byte> s, std::uint64
         default:
             n.value = bytes.size() <= 32 ? toHex(bytes) : "<" + std::to_string(bytes.size()) + " bytes>";
             if (f.expectAscii) {
-                std::string_view expect(f.expectAscii);
+                std::string_view expect(f.expectAscii, f.expectLength);
                 bool match = expect.size() <= bytes.size();
                 for (std::size_t i = 0; match && i < expect.size(); ++i)
                     match = std::to_integer<char>(bytes[i]) == expect[i];

@@ -24,7 +24,7 @@ TEST_CASE("MemoryDevice read/write/range") {
     CHECK(bad.error().category() == ErrorCategory::OutOfRange);
     CHECK(dev->zero(1000, 5));
     got = dev->read(1000, 5);
-    CHECK(std::to_integer<int>((*got)[0]) == 0);
+    CHECK(got->at(0) == std::byte{0});
     dev->setReadOnly(true);
     CHECK(dev->writeAt(0, bytesOf("x")).error().category() == ErrorCategory::Permission);
     auto sectors = dev->readSectors(1, 2);
@@ -50,7 +50,7 @@ TEST_CASE("SliceDevice maps offsets onto the parent") {
     CHECK(ro.writeAt(0, bytesOf("z")).error().category() == ErrorCategory::Permission);
     std::array<std::byte, 3> buf{};
     CHECK(ro.readAt(0, buf));
-    CHECK(std::to_integer<char>(buf[0]) == 'A');
+    CHECK(buf[0] == std::byte{'A'});
 }
 
 TEST_CASE("FileDevice create/open/sparse") {

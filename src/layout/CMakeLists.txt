@@ -7,9 +7,8 @@ stein_add_module(layout
     src/describe.cpp
   PUBLIC_DEPS stein::core)
 
-stein_add_layouts(stein_layout
-  ${PROJECT_SOURCE_DIR}/formats/gpt.layout.toml
-  ${PROJECT_SOURCE_DIR}/formats/mbr.layout.toml)
+file(GLOB STEIN_MANIFESTS CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/formats/*.layout.toml)
+stein_add_layouts(stein_layout ${STEIN_MANIFESTS})
 
 stein_add_test(test_layout
   SOURCES ../core/tests/test_main.cpp tests/test_layout.cpp

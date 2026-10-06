@@ -1,0 +1,6 @@
+DEVNAME=/tmp/claude-0/-home-user-libstein/8dd51936-c756-5ab7-bdf1-4196bfbb50b9/scratchpad/md.img
+UUID=0123abcd-4567-89ef-0123-456789abcdef
+LABEL=steintest
+VERSION=1.2
+TYPE=linux_raid_member
+USAGE=raid

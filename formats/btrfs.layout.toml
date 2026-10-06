@@ -1,0 +1,40 @@
+# btrfs superblock (ctree.h struct btrfs_super_block), little-endian, primary copy at 64 KiB,
+# mirrors at 64 MiB, 256 GiB and 1 PiB.
+[btrfs_superblock]
+doc = "btrfs superblock at offset 65536 (first 0x1000 bytes shown partially)"
+size = 0x1000
+endian = "le"
+fields = [
+  { name = "csum",            offset = 0x000, type = "bytes", size = 32, doc = "Checksum of bytes 0x20..0x1000 (crc32c/xxhash/sha256/blake2)" },
+  { name = "fsid",            offset = 0x020, type = "uuid", doc = "Filesystem UUID" },
+  { name = "bytenr",          offset = 0x030, type = "u64", doc = "Physical address of this copy (65536 for the primary)" },
+  { name = "flags",           offset = 0x038, type = "u64" },
+  { name = "magic",           offset = 0x040, type = "ascii", size = 8, expect = "_BHRfS_M" },
+  { name = "generation",      offset = 0x048, type = "u64" },
+  { name = "root",            offset = 0x050, type = "u64", doc = "Logical address of the root tree root" },
+  { name = "chunk_root",      offset = 0x058, type = "u64" },
+  { name = "log_root",        offset = 0x060, type = "u64" },
+  { name = "log_root_transid",offset = 0x068, type = "u64" },
+  { name = "total_bytes",     offset = 0x070, type = "u64", nonzero = true },
+  { name = "bytes_used",      offset = 0x078, type = "u64" },
+  { name = "root_dir_objectid", offset = 0x080, type = "u64" },
+  { name = "num_devices",     offset = 0x088, type = "u64", nonzero = true },
+  { name = "sectorsize",      offset = 0x090, type = "u32", nonzero = true },
+  { name = "nodesize",        offset = 0x094, type = "u32", nonzero = true },
+  { name = "leafsize",        offset = 0x098, type = "u32", doc = "Unused, same as nodesize" },
+  { name = "stripesize",      offset = 0x09C, type = "u32" },
+  { name = "sys_chunk_array_size", offset = 0x0A0, type = "u32" },
+  { name = "chunk_root_generation", offset = 0x0A4, type = "u64" },
+  { name = "compat_flags",    offset = 0x0AC, type = "u64" },
+  { name = "compat_ro_flags", offset = 0x0B4, type = "bits64", bits = { "0" = "free_space_tree", "1" = "free_space_tree_valid", "2" = "verity", "3" = "block_group_tree" } },
+  { name = "incompat_flags",  offset = 0x0BC, type = "bits64", bits = { "0" = "mixed_backref", "1" = "default_subvol", "2" = "mixed_groups", "3" = "compress_lzo", "4" = "compress_zstd", "5" = "big_metadata", "6" = "extended_iref", "7" = "raid56", "8" = "skinny_metadata", "9" = "no_holes", "10" = "metadata_uuid", "11" = "raid1c34", "12" = "zoned", "13" = "extent_tree_v2", "14" = "raid_stripe_tree", "16" = "simple_quota" } },
+  { name = "csum_type",       offset = 0x0C4, type = "u16", enum = { "0" = "crc32c", "1" = "xxhash64", "2" = "sha256", "3" = "blake2b" } },
+  { name = "root_level",      offset = 0x0C6, type = "u8" },
+  { name = "chunk_root_level",offset = 0x0C7, type = "u8" },
+  { name = "log_root_level",  offset = 0x0C8, type = "u8" },
+  { name = "dev_item",        offset = 0x0C9, type = "bytes", size = 98, doc = "struct btrfs_dev_item of this device (devid, bytes, uuid @0x3B)" },
+  { name = "label",           offset = 0x12B, type = "ascii", size = 256 },
+  { name = "cache_generation",offset = 0x22B, type = "u64" },
+  { name = "uuid_tree_generation", offset = 0x233, type = "u64" },
+  { name = "metadata_uuid",   offset = 0x23B, type = "uuid", doc = "Valid when incompat metadata_uuid is set" },
+]

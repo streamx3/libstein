@@ -1,0 +1,69 @@
+# FAT12/16/32 boot sector (BPB) — Microsoft "FAT32 File System Specification".
+
+[fat_bpb]
+doc = "Common BIOS Parameter Block (first 36 bytes of the boot sector)"
+size = 36
+endian = "le"
+fields = [
+  { name = "jump",                offset = 0x00, type = "bytes", size = 3, doc = "Jump instruction (EB xx 90 or E9 xx xx)" },
+  { name = "oem_name",            offset = 0x03, type = "ascii", size = 8, doc = "OEM name, e.g. MSWIN4.1, mkfs.fat" },
+  { name = "bytes_per_sector",    offset = 0x0B, type = "u16", enum = { "512" = "512", "1024" = "1024", "2048" = "2048", "4096" = "4096" } },
+  { name = "sectors_per_cluster", offset = 0x0D, type = "u8", nonzero = true, doc = "Power of two, 1..128" },
+  { name = "reserved_sectors",    offset = 0x0E, type = "u16", nonzero = true, doc = "1 for FAT12/16, usually 32 for FAT32" },
+  { name = "num_fats",            offset = 0x10, type = "u8", min = 1, max = 2 },
+  { name = "root_entries",        offset = 0x11, type = "u16", doc = "Root directory entries (0 on FAT32)" },
+  { name = "total_sectors16",     offset = 0x13, type = "u16", doc = "Total sectors if < 65536, else 0" },
+  { name = "media",               offset = 0x15, type = "u8", enum = { "0xF8" = "fixed disk", "0xF0" = "removable" } },
+  { name = "sectors_per_fat16",   offset = 0x16, type = "u16", doc = "FAT size in sectors (0 on FAT32)" },
+  { name = "sectors_per_track",   offset = 0x18, type = "u16" },
+  { name = "num_heads",           offset = 0x1A, type = "u16" },
+  { name = "hidden_sectors",      offset = 0x1C, type = "u32", doc = "Sectors before this partition (must match the table)" },
+  { name = "total_sectors32",     offset = 0x20, type = "u32", doc = "Total sectors if >= 65536" },
+]
+
+[fat16_ebpb]
+doc = "FAT12/16 extended BPB (offset 36)"
+size = 26
+endian = "le"
+fields = [
+  { name = "drive_number",   offset = 0x00, type = "u8", doc = "0x80 for hard disks" },
+  { name = "reserved1",      offset = 0x01, type = "u8", doc = "Dirty flags on NT: bit0 = needs chkdsk, bit1 = surface scan" },
+  { name = "boot_signature", offset = 0x02, type = "u8", enum = { "0x29" = "extended fields present", "0x28" = "extended fields (old)" } },
+  { name = "volume_id",      offset = 0x03, type = "u32", doc = "Volume serial number (shown as XXXX-XXXX)" },
+  { name = "volume_label",   offset = 0x07, type = "ascii", size = 11, pad = " ", doc = "Label, space padded; 'NO NAME    ' when unset" },
+  { name = "fs_type",        offset = 0x12, type = "ascii", size = 8, pad = " ", doc = "Informational: FAT12/FAT16/FAT" },
+]
+
+[fat32_ebpb]
+doc = "FAT32 extended BPB (offset 36)"
+size = 54
+endian = "le"
+fields = [
+  { name = "sectors_per_fat32", offset = 0x00, type = "u32", nonzero = true },
+  { name = "ext_flags",         offset = 0x04, type = "bits16", bits = { "7" = "no_fat_mirroring" } },
+  { name = "fs_version",        offset = 0x06, type = "u16", expect = 0 },
+  { name = "root_cluster",      offset = 0x08, type = "u32", min = 2 },
+  { name = "fsinfo_sector",     offset = 0x0C, type = "u16", doc = "Usually 1" },
+  { name = "backup_boot_sector",offset = 0x0E, type = "u16", doc = "Usually 6" },
+  { name = "reserved",          offset = 0x10, type = "bytes", size = 12 },
+  { name = "drive_number",      offset = 0x1C, type = "u8" },
+  { name = "reserved1",         offset = 0x1D, type = "u8", doc = "Dirty flags on NT: bit0 = needs chkdsk" },
+  { name = "boot_signature",    offset = 0x1E, type = "u8", enum = { "0x29" = "extended fields present", "0x28" = "extended fields (old)" } },
+  { name = "volume_id",         offset = 0x1F, type = "u32", doc = "Volume serial number" },
+  { name = "volume_label",      offset = 0x23, type = "ascii", size = 11, pad = " " },
+  { name = "fs_type",           offset = 0x2E, type = "ascii", size = 8, pad = " ", doc = "Informational: FAT32" },
+]
+
+[fat32_fsinfo]
+doc = "FAT32 FSInfo sector"
+size = 512
+endian = "le"
+fields = [
+  { name = "lead_signature",   offset = 0x000, type = "u32", expect = 0x41615252, doc = "RRaA" },
+  { name = "reserved1",        offset = 0x004, type = "bytes", size = 480 },
+  { name = "struct_signature", offset = 0x1E4, type = "u32", expect = 0x61417272, doc = "rrAa" },
+  { name = "free_count",       offset = 0x1E8, type = "u32", doc = "Last known free cluster count; 0xFFFFFFFF = unknown" },
+  { name = "next_free",        offset = 0x1EC, type = "u32", doc = "Hint for the next free cluster" },
+  { name = "reserved2",        offset = 0x1F0, type = "bytes", size = 12 },
+  { name = "trail_signature",  offset = 0x1FC, type = "u32", expect = 0xAA550000 },
+]

@@ -1,0 +1,4 @@
+DEVNAME=/tmp/tmp.KuVVC5TJPw/hfs.img
+LABEL=STEIN_HFS
+TYPE=hfs
+USAGE=filesystem

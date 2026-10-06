@@ -15,6 +15,7 @@
 #include "stein/block/sparse_file.hpp"
 #include "stein/core/strings.hpp"
 #include "stein/core/units.hpp"
+#include "stein/fs/filesystem.hpp"
 #include "stein/pt/gpt_table.hpp"
 #include "stein/pt/partition_table.hpp"
 
@@ -34,6 +35,7 @@ int usage() {
                "  stein repair  <image> [--dry-run]\n"
                "  stein pt dump <image> <piece.sparse>\n"
                "  stein pt restore <piece.sparse> <image>\n"
+               "  stein fs      <image> [--doc]       filesystem / container signature, label, uuid\n"
                "  stein types [gpt|mbr]\n",
                stderr);
     return 64;
@@ -194,6 +196,33 @@ int cmdPt(const Args& a) {
     return usage();
 }
 
+int cmdFs(const Args& a) {
+    if (a.positional.size() < 2) return usage();
+    auto dev = openImage(a.positional[1], false, a.sectorSize);
+    if (!dev) return die(dev.error());
+    auto r = fs::probe(*dev);
+    if (!r) return die(r.error());
+    if (!*r) {
+        std::puts("no known filesystem or container signature");
+        return 1;
+    }
+    const auto& info = (*r)->info();
+    std::printf("Type:     %s (%s)\n", std::string(fs::displayName(info.type)).c_str(), std::string(fs::toString(info.type)).c_str());
+    if (!info.version.empty()) std::printf("Version:  %s\n", info.version.c_str());
+    if (!info.label.empty()) std::printf("Label:    %s\n", info.label.c_str());
+    if (!info.uuid.empty()) std::printf("UUID:     %s\n", info.uuid.c_str());
+    if (info.blockSize) std::printf("Block:    %s\n", formatSize(*info.blockSize).c_str());
+    if (info.totalBytes) std::printf("Size:     %s\n", formatSizeExact(*info.totalBytes).c_str());
+    if (info.usedBytes) std::printf("Used:     %s\n", formatSizeExact(*info.usedBytes).c_str());
+    if (info.clean) std::printf("State:    %s\n", *info.clean ? "clean" : "DIRTY");
+    if (!info.extra.empty()) std::printf("Info:     %s\n", info.extra.c_str());
+    for (const auto& f : info.features) std::printf("Feature:  %s\n", f.c_str());
+    for (const auto& d : (*r)->diagnostics())
+        std::printf("[%s] %s (%s)\n", std::string(layout::toString(d.severity)).c_str(), d.message.c_str(), d.code.c_str());
+    if (a.doc) std::fputs((*r)->describe().toText(0, true).c_str(), stdout);
+    return 0;
+}
+
 int cmdTypes(const Args& a) {
     const std::string filter = a.positional.size() > 1 ? a.positional[1] : "";
     for (const auto& info : pt::types::all()) {
@@ -215,6 +244,7 @@ int main(int argc, char** argv) {
     if (cmd == "verify") return cmdVerify(a);
     if (cmd == "repair") return cmdRepair(a);
     if (cmd == "pt") return cmdPt(a);
+    if (cmd == "fs") return cmdFs(a);
     if (cmd == "types") return cmdTypes(a);
     return usage();
 }

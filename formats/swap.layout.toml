@@ -1,0 +1,16 @@
+# Linux swap header (include/linux/swap.h union swap_header, info part), at offset 1024.
+# The signature "SWAPSPACE2" / "SWAP-SPACE" is at page_size - 10.
+[swap_header_info]
+doc = "Linux swap header 'info' at offset 1024"
+size = 0x490
+endian = "le"
+fields = [
+  { name = "bootbits_tail", offset = 0x000, type = "bytes", size = 0,  doc = "(bootbits occupy 0..1023 before this struct)" },
+  { name = "version",       offset = 0x000, type = "u32", expect = 1 },
+  { name = "last_page",     offset = 0x004, type = "u32", nonzero = true, doc = "Last usable page; size = (last_page + 1) * page_size" },
+  { name = "nr_badpages",   offset = 0x008, type = "u32" },
+  { name = "uuid",          offset = 0x00C, type = "uuid" },
+  { name = "volume_name",   offset = 0x01C, type = "ascii", size = 16 },
+  { name = "padding",       offset = 0x02C, type = "bytes", size = 468 },
+  { name = "badpages",      offset = 0x200, type = "bytes", size = 656, doc = "List of bad page numbers (first entries)" },
+]

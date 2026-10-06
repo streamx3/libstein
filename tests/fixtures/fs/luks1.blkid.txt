@@ -1,0 +1,5 @@
+DEVNAME=/tmp/tmp.KuVVC5TJPw/luks1.img
+VERSION=1
+UUID=1e08fb4a-bb9a-4de8-ba24-053be8dd2771
+TYPE=crypto_LUKS
+USAGE=crypto

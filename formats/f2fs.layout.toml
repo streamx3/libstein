@@ -1,0 +1,40 @@
+# F2FS superblock (f2fs_fs.h struct f2fs_super_block), little-endian, two copies at 1024 and 1024+4096.
+[f2fs_superblock]
+doc = "F2FS superblock at offset 1024 (copy at 5120)"
+size = 0x6C0
+endian = "le"
+fields = [
+  { name = "magic",            offset = 0x00, type = "u32", expect = 0xF2F52010 },
+  { name = "major_ver",        offset = 0x04, type = "u16" },
+  { name = "minor_ver",        offset = 0x06, type = "u16" },
+  { name = "log_sectorsize",   offset = 0x08, type = "u32", min = 9, max = 12 },
+  { name = "log_sectors_per_block", offset = 0x0C, type = "u32" },
+  { name = "log_blocksize",    offset = 0x10, type = "u32", expect = 12, doc = "Always 4 KiB blocks" },
+  { name = "log_blocks_per_seg", offset = 0x14, type = "u32" },
+  { name = "segs_per_sec",     offset = 0x18, type = "u32" },
+  { name = "secs_per_zone",    offset = 0x1C, type = "u32" },
+  { name = "checksum_offset",  offset = 0x20, type = "u32" },
+  { name = "block_count",      offset = 0x24, type = "u64", nonzero = true },
+  { name = "section_count",    offset = 0x2C, type = "u32" },
+  { name = "segment_count",    offset = 0x30, type = "u32" },
+  { name = "segment_count_ckpt", offset = 0x34, type = "u32" },
+  { name = "segment_count_sit",offset = 0x38, type = "u32" },
+  { name = "segment_count_nat",offset = 0x3C, type = "u32" },
+  { name = "segment_count_ssa",offset = 0x40, type = "u32" },
+  { name = "segment_count_main", offset = 0x44, type = "u32" },
+  { name = "segment0_blkaddr", offset = 0x48, type = "u32" },
+  { name = "cp_blkaddr",       offset = 0x4C, type = "u32" },
+  { name = "sit_blkaddr",      offset = 0x50, type = "u32" },
+  { name = "nat_blkaddr",      offset = 0x54, type = "u32" },
+  { name = "ssa_blkaddr",      offset = 0x58, type = "u32" },
+  { name = "main_blkaddr",     offset = 0x5C, type = "u32" },
+  { name = "root_ino",         offset = 0x60, type = "u32" },
+  { name = "node_ino",         offset = 0x64, type = "u32" },
+  { name = "meta_ino",         offset = 0x68, type = "u32" },
+  { name = "uuid",             offset = 0x6C, type = "uuid" },
+  { name = "volume_name",      offset = 0x7C, type = "utf16le", size = 1024, doc = "512 UTF-16 units" },
+  { name = "extension_count",  offset = 0x47C, type = "u32" },
+  { name = "extension_list",   offset = 0x480, type = "bytes", size = 512 },
+  { name = "cp_payload",       offset = 0x680, type = "u32" },
+  { name = "version",          offset = 0x684, type = "ascii", size = 60, doc = "Kernel version string written by mkfs/mount" },
+]

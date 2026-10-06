@@ -1,0 +1,53 @@
+# LVM2 physical volume label (lib/label/label.h, lib/format_text/layout.h), little-endian, at sector 1.
+[lvm_label_header]
+doc = "LVM2 label header in one of sectors 0..3 (normally sector 1)"
+size = 32
+endian = "le"
+fields = [
+  { name = "id",       offset = 0x00, type = "ascii", size = 8, expect = "LABELONE" },
+  { name = "sector",   offset = 0x08, type = "u64", doc = "Sector number of this label" },
+  { name = "crc",      offset = 0x10, type = "crc32", doc = "CRC of bytes 0x14..0x200 (LVM's own CRC32 variant)" },
+  { name = "offset",   offset = 0x14, type = "u32", doc = "Offset of the pv_header from the label start (32)" },
+  { name = "type",     offset = 0x18, type = "ascii", size = 8, expect = "LVM2 001" },
+]
+
+[lvm_pv_header]
+doc = "Physical volume header (follows the label header)"
+size = 40
+endian = "le"
+fields = [
+  { name = "pv_uuid",     offset = 0x00, type = "ascii", size = 32, doc = "32-character UUID without dashes (shown as 6-4-4-4-4-4-6)" },
+  { name = "device_size", offset = 0x20, type = "u64", doc = "PV size in bytes" },
+]
+
+[lvm_disk_locn]
+doc = "Data area / metadata area location entry (list terminated by an all-zero entry)"
+size = 16
+endian = "le"
+fields = [
+  { name = "offset", offset = 0x0, type = "u64", doc = "Bytes from the start of the PV" },
+  { name = "size",   offset = 0x8, type = "u64", doc = "Bytes; 0 = extends to the end" },
+]
+
+[lvm_mda_header]
+doc = "Metadata area header (first 512 bytes of each metadata area)"
+size = 40
+endian = "le"
+fields = [
+  { name = "checksum", offset = 0x00, type = "crc32", doc = "CRC of bytes 4..512" },
+  { name = "magic",    offset = 0x04, type = "bytes", size = 16, doc = "\" LVM2 x[5A%r0N*>\"" },
+  { name = "version",  offset = 0x14, type = "u32", expect = 1 },
+  { name = "start",    offset = 0x18, type = "u64", doc = "Absolute offset of this area" },
+  { name = "size",     offset = 0x20, type = "u64" },
+]
+
+[lvm_raw_locn]
+doc = "Raw metadata location (text metadata inside the metadata area)"
+size = 24
+endian = "le"
+fields = [
+  { name = "offset",   offset = 0x00, type = "u64", doc = "From the start of the metadata area" },
+  { name = "size",     offset = 0x08, type = "u64" },
+  { name = "checksum", offset = 0x10, type = "crc32" },
+  { name = "flags",    offset = 0x14, type = "u32" },
+]

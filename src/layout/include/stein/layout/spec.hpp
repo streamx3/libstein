@@ -44,7 +44,8 @@ struct FieldSpec {
     bool bigEndian;
     const char* doc;            // may be ""
     // Simple validity rules (0/null = not set).
-    const char* expectAscii;    // Ascii/Bytes field must equal this literal
+    const char* expectAscii;    // Ascii/Bytes field must start with these bytes...
+    std::uint32_t expectLength; // ...this many of them (may include NUL / high bytes)
     bool hasExpectValue;
     std::uint64_t expectValue;  // integer field must equal
     bool hasMin, hasMax;
