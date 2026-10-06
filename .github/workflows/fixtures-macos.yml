@@ -1,8 +1,8 @@
 name: Fixtures (macOS)
 
-# Builds, on dispatch or when its inputs change, the HFS+ family of reader fixtures with hdiutil and the native
-# driver, which only macOS has. Download the artifact and commit it under
-# tests/fixtures/hfsfs.
+# Builds, on dispatch or when its inputs change, the HFS+ family of reader
+# fixtures with hdiutil and the native driver, which only macOS has, and
+# commits them under tests/fixtures/hfsfs on the same branch.
 on:
   workflow_dispatch:
   push:
@@ -11,15 +11,27 @@ on:
       - tools/fixtures/oracle.py
       - .github/workflows/fixtures-macos.yml
 
+permissions:
+  contents: write
+
 jobs:
   hfsplus:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
       - name: Build HFS+ fixtures
-        run: tools/fixtures/make_hfsplus_fixtures_macos.sh out/hfsfs
+        run: tools/fixtures/make_hfsplus_fixtures_macos.sh tests/fixtures/hfsfs
       - uses: actions/upload-artifact@v4
         with:
           name: hfsfs-fixtures
-          path: out/hfsfs
+          path: tests/fixtures/hfsfs
           if-no-files-found: error
+      - name: Commit fixtures to the branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tests/fixtures/hfsfs
+          if git diff --cached --quiet; then echo "fixtures unchanged"; exit 0; fi
+          git commit -m "fixtures: HFS+/HFSX/journaled reader fixtures generated on macOS"
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
