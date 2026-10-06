@@ -108,7 +108,7 @@ private:
 
 constexpr std::uint32_t kProgMount = 100005, kProgNfs = 100003, kVersion3 = 3;
 constexpr std::uint32_t kNfs3Ok = 0, kNfs3ErrNoent = 2, kNfs3ErrIo = 5, kNfs3ErrAcces = 13, kNfs3ErrNotdir = 20, kNfs3ErrIsdir = 21, kNfs3ErrInval = 22,
-                        kNfs3ErrRofs = 30, kNfs3ErrStale = 70, kNfs3ErrBadhandle = 10001, kNfs3ErrNotsupp = 10004;
+                        kNfs3ErrRofs = 30, kNfs3ErrBadhandle = 10001, kNfs3ErrNotsupp = 10004;
 constexpr std::uint32_t kAccessRead = 1, kAccessLookup = 2, kAccessExecute = 32;
 
 std::uint32_t nfsType(fs::FileType t) {

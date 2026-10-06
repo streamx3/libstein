@@ -66,4 +66,7 @@ stein_add_test(test_mount
 if(TARGET test_mount)
   # A FUSE request that is never answered blocks uninterruptibly; fail instead of hanging CI.
   set_tests_properties(test_mount PROPERTIES TIMEOUT 180)
+  if(WIN32)
+    target_link_libraries(test_mount PRIVATE ws2_32)   # the test's own NFS client
+  endif()
 endif()
