@@ -92,7 +92,8 @@ int usage() {
                "      stein probe --passphrase P also descends into LUKS containers it can open\n"
                "  stein lvm list    <image|device> [--part N] [--doc]   volume group, PVs, LVs and how they map\n"
                "  stein lvm extract <image|device> <lv> <out> [--part N] copy a logical volume into a plain image\n"
-               "  stein ls  <image|device> [path] [--part N] [--lv NAME] [--passphrase P]   list a directory in-process\n"
+               "  stein ls  <image|device> [path] [--part N] [--lv NAME] [--volume V] [--snapshot S] [--passphrase P]   list a directory in-process\n"
+               "                                 (--volume/--snapshot: an APFS container's volume by name or slot, and a snapshot by name or xid)\n"
                "  stein cat <image|device> <path> ...                                       print a file\n"
                "  stein cp  <image|device> <path> <out> ...                                 copy a file out (ext2/3/4 so far)\n"
                "  stein mount <image|device> <mountpoint> [--part N] [--lv NAME] [--passphrase P] [--allow-other]\n"
@@ -123,6 +124,7 @@ struct Args {
     std::string compress, split, chunk;
     std::string start, size, end, type, name, index;
     std::string passphrase, passphraseFile, newPassphrase, kdf, lv;
+    std::string volume, snapshot;   // APFS: which volume of the container and which snapshot of it
     std::uint32_t pim = 0;
     std::string prf;   // tcrypt: try only this PRF
     std::string port, format;
@@ -153,6 +155,8 @@ Args parse(int argc, char** argv) {
         else if (s == "--name" && i + 1 < argc) a.name = argv[++i];
         else if ((s == "--index" || s == "--part") && i + 1 < argc) a.index = argv[++i];
         else if (s == "--lv" && i + 1 < argc) a.lv = argv[++i];
+        else if (s == "--volume" && i + 1 < argc) a.volume = argv[++i];
+        else if (s == "--snapshot" && i + 1 < argc) a.snapshot = argv[++i];
         else if (s == "--allow-other") a.allowOther = true;
         else if (s == "--pim" && i + 1 < argc) a.pim = static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 10));
         else if (s == "--prf" && i + 1 < argc) a.prf = argv[++i];
@@ -1183,7 +1187,10 @@ Expected<std::unique_ptr<fs::Reader>> openReaderFor(const Args& a, const std::st
     const auto t = (*probed)->type();
     if (!fs::has((*probed)->capabilities(), fs::Capability::Read))
         return fail(ErrorCategory::Unsupported, where + ": " + std::string(fs::displayName(t)) + " cannot be read in-process yet");
-    return (*probed)->openReader();
+    fs::ReaderOptions ro;
+    ro.volume = a.volume;
+    ro.snapshot = a.snapshot;
+    return (*probed)->openReader(ro);
 }
 
 std::string modeText(const fs::Stat& st) {

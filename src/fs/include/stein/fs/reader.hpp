@@ -25,6 +25,21 @@ struct Inode {
 enum class FileType : std::uint8_t { Unknown, File, Directory, Symlink, CharDevice, BlockDevice, Fifo, Socket };
 std::string_view toString(FileType t);
 
+// Which tree of a filesystem a reader opens: a volume of an APFS container (name or slot number;
+// empty = the first), a snapshot of it (name or transaction id; empty = the live tree).
+struct ReaderOptions {
+    std::string volume;
+    std::string snapshot;
+};
+
+// A volume, snapshot or subvolume a filesystem offers to openReader(): kind is "volume",
+// "snapshot" or "subvolume"; parent names the volume a snapshot belongs to.
+struct SubvolumeInfo {
+    std::string kind, name, parent;
+    std::uint64_t id = 0;   // slot, transaction id or subvolume id
+    std::string note;       // role, snapshot count, ...
+};
+
 struct Stat {
     FileType type = FileType::Unknown;
     std::uint64_t size = 0;

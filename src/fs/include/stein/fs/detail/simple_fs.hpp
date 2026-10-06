@@ -19,6 +19,11 @@ class ReaderSource {
 public:
     virtual ~ReaderSource() = default;
     virtual Expected<std::unique_ptr<Reader>> open(std::shared_ptr<BlockDevice> device) const = 0;
+    // Sources with volumes or snapshots override this one too.
+    virtual Expected<std::unique_ptr<Reader>> openWith(std::shared_ptr<BlockDevice> device, const ReaderOptions& options) const {
+        if (!options.volume.empty() || !options.snapshot.empty()) return fail(ErrorCategory::InvalidArgument, "this filesystem has no volumes or snapshots to select");
+        return open(std::move(device));
+    }
 };
 
 class SimpleFileSystem : public FileSystem {
@@ -34,7 +39,9 @@ public:
     layout::Node describe() const override { return m_tree; }
     std::uint32_t capabilities() const override;
     Expected<AllocationMap> allocationMap() const override;
-    Expected<std::unique_ptr<Reader>> openReader() const override;
+    Expected<std::unique_ptr<Reader>> openReader(const ReaderOptions& options) const override;
+    using FileSystem::openReader;
+    std::vector<SubvolumeInfo> subvolumes() const override { return m_subvolumes; }
 
     // Construction helpers used by detectors.
     FsInfo& mutableInfo() { return m_info; }
@@ -43,6 +50,7 @@ public:
     void setTreeName(std::string name) { m_tree.name = std::move(name); }
     void setAllocationSource(std::unique_ptr<AllocationSource> src) { m_alloc = std::move(src); }
     void setReaderSource(std::unique_ptr<ReaderSource> src) { m_reader = std::move(src); }
+    void setSubvolumes(std::vector<SubvolumeInfo> v) { m_subvolumes = std::move(v); }
     void diag(layout::Validity sev, std::string code, std::string message) {
         if (sev >= layout::Validity::Warning) m_tree.flag(sev, message);
         m_diagnostics.push_back(FsDiagnostic{sev, std::move(code), std::move(message)});
@@ -55,6 +63,7 @@ protected:
     layout::Node m_tree;
     std::unique_ptr<AllocationSource> m_alloc;
     std::unique_ptr<ReaderSource> m_reader;
+    std::vector<SubvolumeInfo> m_subvolumes;
 };
 
 // Read `length` bytes at `offset`; NotFound (not Io) when the device is too

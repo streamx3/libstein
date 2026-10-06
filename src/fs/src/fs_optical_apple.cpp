@@ -155,7 +155,23 @@ Result detectApfs(Dev dev) {
     fs->setTreeName("APFS container");
     fs->addNode(nx.describe(0));
     fs->addRegion(Region{0, nx.nxBlockSize()});
-    fs->setReaderSource(makeApfsReaderSource());   // the first volume
+    fs->setReaderSource(makeApfsReaderSource());   // the first volume unless ReaderOptions say otherwise
+    if (auto vols = ApfsReader::enumerate(dev); vols && !vols->empty()) {
+        std::string names;
+        std::size_t volumes = 0, snapshots = 0;
+        for (const auto& v : *vols) {
+            if (v.kind == "volume") {
+                ++volumes;
+                names += (names.empty() ? "" : ", ") + v.name;
+            } else {
+                ++snapshots;
+            }
+        }
+        info.extra = std::to_string(volumes) + (volumes == 1 ? " volume: " : " volumes: ") + names;
+        if (snapshots) info.extra += "; " + std::to_string(snapshots) + (snapshots == 1 ? " snapshot" : " snapshots");
+        if (volumes == 1 && !vols->front().name.empty()) info.label = vols->front().name;
+        fs->setSubvolumes(std::move(*vols));
+    }
     return std::unique_ptr<FileSystem>(std::move(fs));
 }
 

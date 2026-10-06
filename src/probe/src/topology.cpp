@@ -249,6 +249,13 @@ void render(const Node& n, const std::string& prefix, bool last, bool root, bool
     if (withNotes)
         for (const auto& note : n.notes)
             if (note.severity >= Validity::Warning) out += childPrefix + "   [" + std::string(layout::toString(note.severity)) + "] " + note.message + "\n";
+    if (n.content)
+        for (const auto& v : n.content->subvolumes()) {
+            out += childPrefix + "   " + v.kind + " \"" + v.name + "\"";
+            if (!v.parent.empty()) out += " of \"" + v.parent + "\"";
+            if (!v.note.empty()) out += "  (" + v.note + ")";
+            out += "\n";
+        }
     for (std::size_t i = 0; i < n.children.size(); ++i) render(n.children[i], childPrefix, i + 1 == n.children.size(), false, withNotes, out);
 }
 
