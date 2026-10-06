@@ -854,6 +854,63 @@ TEST_CASE("apfs reader: hdiutil fixtures (case-insensitive and case-sensitive) r
     }
 }
 
+TEST_CASE("f2fs reader: mkfs.f2fs + sload.f2fs fixtures (default features; extra_attr with inode checksums, crtime and the casefold feature; lz4 and lzo compressed clusters) read back exactly") {
+    struct Case { const char* name; bool casefold; };
+    const Case cases[] = {{"f2fs_plain", false}, {"f2fs_extra", false}, {"f2fs_lz4", false}, {"f2fs_lzo", false}};   // casefolding is per directory (chattr +F); sload sets it on none
+    for (const auto& c : cases) {
+        const std::string fixture = c.name;
+        CAPTURE(fixture);
+        auto dev = loadSparseFixture("f2fs/" + fixture + ".sparse");
+        auto probed = fs::probe(dev);
+        REQUIRE(probed);
+        REQUIRE(*probed);
+        CHECK((*probed)->info().type == fs::FsType::F2fs);
+        CHECK((*probed)->info().label == fixture);
+        REQUIRE(fs::has((*probed)->capabilities(), fs::Capability::Read));
+        auto reader = (*probed)->openReader();
+        REQUIRE_MESSAGE(reader, (reader ? std::string() : reader.error().toString()));
+        CHECK((*reader)->caseSensitive() == !c.casefold);
+        auto root = (*reader)->root();
+        REQUIRE(root);
+        std::map<std::string, std::pair<char, std::uint64_t>> seen;
+        std::map<std::string, std::string> sha, links;
+        walk(**reader, *root, "", seen, sha, links);
+        const auto o = loadExtOracle("f2fs", "f2fs");
+        for (const auto& [path, ts] : o.entries) {
+            CAPTURE(path);
+            REQUIRE(seen.count(path));
+            CHECK(seen[path].first == ts.first);
+            if (ts.first == 'f') CHECK(seen[path].second == ts.second);
+        }
+        CHECK(seen.size() == o.entries.size());
+        for (const auto& [path, h] : o.sha) {
+            CAPTURE(path);
+            CHECK(sha[path] == h);
+        }
+        for (const auto& [path, t] : o.links) {
+            CAPTURE(path);
+            CHECK(links[path] == t);
+        }
+        auto hl = fs::resolvePath(**reader, "hardlink.txt");
+        REQUIRE(hl);
+        CHECK(*hl == *fs::resolvePath(**reader, "hello.txt"));
+        CHECK((*reader)->stat(*hl)->nlink == 2);
+        CHECK((*reader)->stat(*hl)->mtime == 1704164645);
+        CHECK((*reader)->readdir(*fs::resolvePath(**reader, "many"))->size() == 400);   // several dentry blocks
+        CHECK((*reader)->readdir(*fs::resolvePath(**reader, "few"))->size() == 3);      // inline dentries
+        auto tiny = fs::resolvePath(**reader, "tiny.txt");                               // inline data
+        REQUIRE(tiny);
+        CHECK((*reader)->stat(*tiny)->size == 1);
+        // Reads that straddle the inode slots, the direct nodes and the indirect node of the 13 MiB file.
+        auto big = fs::resolvePath(**reader, "indirect.bin");
+        REQUIRE(big);
+        std::vector<std::byte> window(8192);
+        for (std::uint64_t off : {873ull * 4096 - 100, 2909ull * 4096 - 100, 3000ull * 4096 + 1})
+            CHECK(*(*reader)->read(*big, off, window) == window.size());
+        CHECK(static_cast<bool>(fs::resolvePath(**reader, "HELLO.TXT")) == c.casefold);
+    }
+}
+
 TEST_CASE("erofs reader: mkfs.erofs fixtures (plain, chunk-based, lz4 compact/legacy/big pcluster/ztailpacking/fragments+dedupe, lzma, deflate) read back exactly") {
     const char* names[] = {"erofs_plain", "erofs_chunked", "erofs_lz4", "erofs_lz4_legacy", "erofs_lz4hc_bigpcl", "erofs_lz4_ztail", "erofs_lz4_frag", "erofs_lzma", "erofs_deflate"};
     for (const char* name : names) {

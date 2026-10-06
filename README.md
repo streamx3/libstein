@@ -82,7 +82,8 @@ to the OS (Linux: FUSE, Windows: WinFsp, macOS: built-in NFS loopback).
 | EROFS | ✓ | – | ✓ full and compact indexes, big pclusters, fragments, dedupe; lz4/lzma/deflate/zstd | ✓ | – |
 | ISO 9660 | ✓ Joliet | – | ✓ Rock Ridge, Joliet, plain | ✓ | – |
 | UDF 1.02–2.60 | ✓ | – | ✓ physical/sparable/metadata partitions; VAT – | ✓ | – |
-| F2FS, JFS, NILFS2, bcachefs, OCFS2, ReiserFS, Reiser4, Minix, UFS | ✓ | – | – | – | – |
+| F2FS | ✓ | – | ✓ inline data/dentries, node tree, extra attributes, casefold; lz4/lzo clusters (zstd/lzo-rle decode untested/refused) | ✓ | – |
+| JFS, NILFS2, bcachefs, OCFS2, ReiserFS, Reiser4, Minix, UFS | ✓ | – | – | – | – |
 | ReFS, ZFS | ✓ (ZFS: name, GUID) | – | – | – | – |
 | Linux swap, BitLocker marker | ✓ | – | n/a | n/a | – |
 

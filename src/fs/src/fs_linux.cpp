@@ -5,6 +5,7 @@
 #include "stein/fs/btrfs_reader.hpp"
 #include "stein/fs/squashfs_reader.hpp"
 #include "stein/fs/erofs_reader.hpp"
+#include "stein/fs/f2fs_reader.hpp"
 #include "stein/fs/xfs_reader.hpp"
 #include "stein/core/endian.hpp"
 #include "stein/core/strings.hpp"
@@ -94,6 +95,7 @@ Result detectF2fs(Dev dev) {
     fs->addNode(sb.describe(kOff));
     fs->addRegion(Region{kOff, 4096});
     if (kOff + 4096 + 4096 <= dev->size()) fs->addRegion(Region{kOff + 4096, 4096});
+    fs->setReaderSource(makeF2fsReaderSource());
     return std::unique_ptr<FileSystem>(std::move(fs));
 }
 

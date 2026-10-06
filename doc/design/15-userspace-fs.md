@@ -100,7 +100,8 @@ filesystems from the first try" credible rather than reckless):
 | ISO9660/Joliet/RockRidge, UDF | v1 read | — | ECMA-119/167, UDF 2.60 (public) | Trivial, valuable for images |
 | XFS | v2 read | — | public on-disk docs; v5 CRCs | |
 | btrfs | v2 read (single device, no compression → with zstd/lzo/zlib in v3) | — | public wiki docs | |
-| F2FS, JFS, Reiser*, nilfs2, bcachefs, minix | detect/label only | — | | |
+| F2FS | **done** (read; fixtures from mkfs.f2fs + sload.f2fs, lz4/lzo compression) | — | kernel `f2fs_fs.h` (public) | fscrypt files refused; zstd/lzo-rle clusters need newer f2fs-tools to test |
+| JFS, Reiser*, nilfs2, bcachefs, minix | detect/label only | — | | |
 | ZFS | detect | — | | out of scope |
 
 ## 4. Mount backends
