@@ -2,6 +2,7 @@
 // Linux-native filesystems: XFS, btrfs, F2FS, JFS, ReiserFS, Reiser4, NILFS2, bcachefs, OCFS2,
 // Minix, EROFS, SquashFS, swap.
 #include "detectors.hpp"
+#include "stein/fs/btrfs_reader.hpp"
 #include "stein/fs/xfs_reader.hpp"
 #include "stein/core/endian.hpp"
 #include "stein/core/strings.hpp"
@@ -67,6 +68,7 @@ Result detectBtrfs(Dev dev) {
     if (sb.bytenr() != kOff) fs->diag(Validity::Warning, "btrfs.bytenr", "superblock bytenr does not match its location");
     fs->setTreeName("btrfs filesystem");
     fs->addNode(std::move(tree));
+    fs->setReaderSource(makeBtrfsReaderSource());
     for (ByteCount copy : {ByteCount{64 * KiB}, ByteCount{64 * MiB}, ByteCount{256} * GiB})
         if (copy + 4096 <= dev->size()) fs->addRegion(Region{copy, 4096});
     return std::unique_ptr<FileSystem>(std::move(fs));

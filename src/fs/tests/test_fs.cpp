@@ -682,3 +682,49 @@ TEST_CASE("xfs reader: protofile-built v5 fixtures read back exactly (shortform/
         CHECK(*fs::resolvePath(**reader, "link_short") == *hello);
     }
 }
+
+TEST_CASE("btrfs reader: mkfs.btrfs --rootdir fixtures read back exactly (inline and regular extents, holes, hard links, symlinks, mixed block groups)") {
+    const char* names[] = {"btrfs", "btrfs_mixed"};
+    for (const char* name : names) {
+        const std::string fixture = name;
+        CAPTURE(fixture);
+        auto dev = loadSparseFixture("btrfsfs/" + fixture + ".sparse");
+        auto probed = fs::probe(dev);
+        REQUIRE(probed);
+        REQUIRE(*probed);
+        CHECK((*probed)->info().type == fs::FsType::Btrfs);
+        REQUIRE(fs::has((*probed)->capabilities(), fs::Capability::Read));
+        auto reader = (*probed)->openReader();
+        REQUIRE_MESSAGE(reader, (reader ? std::string() : reader.error().toString()));
+        auto root = (*reader)->root();
+        REQUIRE(root);
+        std::map<std::string, std::pair<char, std::uint64_t>> seen;
+        std::map<std::string, std::string> sha, links;
+        walk(**reader, *root, "", seen, sha, links);
+        const auto o = loadExtOracle(fixture, "btrfsfs");
+        CHECK(seen.size() == o.entries.size());
+        for (const auto& [path, ts] : o.entries) {
+            CAPTURE(path);
+            REQUIRE(seen.count(path));
+            CHECK(seen[path].first == ts.first);
+            if (ts.first == 'f') CHECK(seen[path].second == ts.second);
+        }
+        for (const auto& [path, h] : o.sha) {
+            CAPTURE(path);
+            CHECK(sha[path] == h);
+        }
+        for (const auto& [path, t] : o.links) {
+            CAPTURE(path);
+            CHECK(links[path] == t);
+        }
+        auto hl = fs::resolvePath(**reader, "hardlink.txt");
+        REQUIRE(hl);
+        CHECK(*hl == *fs::resolvePath(**reader, "hello.txt"));   // same inode
+        CHECK((*reader)->stat(*hl)->nlink == 2);
+        CHECK((*reader)->stat(*hl)->mtime == 1704164645);
+        CHECK((*reader)->stat(*hl)->mode == 0644);
+        CHECK_FALSE(fs::resolvePath(**reader, "HELLO.TXT"));
+        CHECK((*reader)->readdir(*fs::resolvePath(**reader, "many"))->size() == 400);
+        CHECK(*fs::resolvePath(**reader, "link_short") == *hl);
+    }
+}
