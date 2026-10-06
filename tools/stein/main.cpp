@@ -17,12 +17,15 @@
 #include "stein/core/strings.hpp"
 #include "stein/core/units.hpp"
 #include "stein/fs/filesystem.hpp"
+#include "stein/image/operations.hpp"
 #include "stein/pt/gpt_table.hpp"
 #include "stein/pt/partition_table.hpp"
 #include "stein/platform/platform.hpp"
 #include "stein/probe/topology.hpp"
 
 #include <cstdio>
+#include <cstdlib>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -40,6 +43,10 @@ int usage() {
                "  stein repair  <image> [--dry-run]\n"
                "  stein pt dump <image> <piece.sparse>\n"
                "  stein pt restore <piece.sparse> <image>\n"
+               "  stein image create  <device|file> <out.stein> [--compress lz4|none] [--chunk 4M] [--split 2G]\n"
+               "  stein image restore <in.stein> <device|file> [--no-verify] [--force]\n"
+               "  stein image verify  <in.stein> [--level 1|2|3]\n"
+               "  stein image info    <in.stein>\n"
                "  stein fs      <image> [--doc]       filesystem / container signature, label, uuid\n"
                "  stein types [gpt|mbr]\n",
                stderr);
@@ -53,7 +60,9 @@ int die(const Error& e) {
 
 struct Args {
     std::vector<std::string> positional;
-    bool doc = false, dryRun = false;
+    bool doc = false, dryRun = false, noVerify = false, force = false;
+    int level = 0;
+    std::string compress, split, chunk;
     std::uint32_t sectorSize = 512;
 };
 
@@ -64,13 +73,118 @@ Args parse(int argc, char** argv) {
         if (s == "--doc") a.doc = true;
         else if (s == "--dry-run") a.dryRun = true;
         else if (s == "--sector-size" && i + 1 < argc) a.sectorSize = static_cast<std::uint32_t>(std::stoul(argv[++i]));
+        else if (s == "--no-verify") a.noVerify = true;
+        else if (s == "--force") a.force = true;
+        else if (s == "--level" && i + 1 < argc) a.level = std::stoi(argv[++i]);
+        else if (s == "--compress" && i + 1 < argc) a.compress = argv[++i];
+        else if (s == "--split" && i + 1 < argc) a.split = argv[++i];
+        else if (s == "--chunk" && i + 1 < argc) a.chunk = argv[++i];
         else a.positional.push_back(s);
     }
     return a;
 }
 
 Expected<std::shared_ptr<BlockDevice>> openImage(const std::string& path, bool writable, std::uint32_t ss) {
+    // A .stein image opens as a (read-only) device like any disk.
+    if (!writable && std::filesystem::is_regular_file(path) && image::SteinReader::looksLikeStein(path)) return image::openImage(path);
     return platform::openAny(path, writable ? platform::OpenMode::ReadWrite : platform::OpenMode::ReadOnly, ss);
+}
+
+// Terminal progress: one updating line.
+struct TtyProgress final : ProgressSink {
+    void onProgress(const ProgressSnapshot& s) override {
+        if (s.total)
+            std::fprintf(stderr, "\r%-12s %5.1f%%  %s / %s  %s/s  ETA %s   ", s.phase.c_str(), 100.0 * s.fraction(),
+                         s.unit == "bytes" ? formatSize(s.done).c_str() : std::to_string(s.done).c_str(),
+                         s.unit == "bytes" ? formatSize(s.total).c_str() : std::to_string(s.total).c_str(),
+                         s.unit == "bytes" ? formatSize(static_cast<ByteCount>(s.rate)).c_str() : std::to_string(static_cast<long>(s.rate)).c_str(),
+                         s.etaSeconds < 0 ? "?" : (std::to_string(static_cast<long>(s.etaSeconds)) + "s").c_str());
+        if (s.total && s.done >= s.total) std::fputc('\n', stderr);
+    }
+    void onMessage(std::string_view m) override { std::fprintf(stderr, "%.*s\n", static_cast<int>(m.size()), m.data()); }
+};
+
+ByteCount parseSize(const std::string& s) {
+    char* end = nullptr;
+    const double v = std::strtod(s.c_str(), &end);
+    std::string unit = end ? toLower(std::string(end)) : "";
+    ByteCount mult = 1;
+    if (unit == "k" || unit == "kib") mult = KiB;
+    else if (unit == "m" || unit == "mib") mult = MiB;
+    else if (unit == "g" || unit == "gib") mult = GiB;
+    else if (unit == "t" || unit == "tib") mult = TiB;
+    return static_cast<ByteCount>(v * static_cast<double>(mult));
+}
+
+int cmdImage(const Args& a) {
+    if (a.positional.size() < 3) return usage();
+    const std::string& sub = a.positional[1];
+    TtyProgress tty;
+    Progress progress(tty);
+    if (sub == "create") {
+        if (a.positional.size() < 4) return usage();
+        auto dev = openImage(a.positional[2], false, a.sectorSize);
+        if (!dev) return die(dev.error());
+        image::CreateOptions co;
+        if (!a.compress.empty()) {
+            auto c = image::compressionFromString(a.compress);
+            if (!c) return die(Error(ErrorCategory::InvalidArgument, "unknown compression " + a.compress));
+            co.compression = *c;
+        }
+        if (!a.split.empty()) co.splitSize = parseSize(a.split);
+        if (!a.chunk.empty()) co.chunkSize = static_cast<std::uint32_t>(parseSize(a.chunk));
+        co.sourceName = a.positional[2];
+        if (auto d = platform::current().describe(a.positional[2])) co.sourceIdentity = d->identity();
+        auto r = image::createImage(*dev, a.positional[3], co, progress);
+        if (!r) return die(r.error());
+        std::printf("image %s: %llu chunks (%llu all-zero), %s read, %s stored in %zu file(s)\n", r->imageUuid.toString(false).c_str(),
+                    static_cast<unsigned long long>(r->stats.chunks), static_cast<unsigned long long>(r->stats.zeroChunks),
+                    formatSize(r->stats.bytesRead).c_str(), formatSize(r->storedBytes).c_str(), r->files.size());
+        if (r->stats.unreadableSectors) std::printf("WARNING: %llu unreadable sectors were zero-filled\n", static_cast<unsigned long long>(r->stats.unreadableSectors));
+        if (!r->imageHashHex.empty()) std::printf("sha256 %s\n", r->imageHashHex.c_str());
+        return r->stats.unreadableSectors ? 1 : 0;
+    }
+    if (sub == "restore") {
+        if (a.positional.size() < 4) return usage();
+        auto dev = openImage(a.positional[3], true, a.sectorSize);
+        if (!dev) return die(dev.error());
+        image::RestoreOptions ro;
+        ro.verifyPayloadFirst = !a.noVerify;
+        ro.allowSmallerTarget = a.force;
+        auto r = image::restoreImage(a.positional[2], **dev, ro, progress);
+        if (!r) return die(r.error());
+        std::printf("restored %s (%llu chunks)%s%s\n", formatSize(r->stats.bytesRead).c_str(), static_cast<unsigned long long>(r->stats.chunks),
+                    r->targetLarger ? "; target is larger than the image" : "", r->targetSmaller ? "; target was SMALLER, image truncated" : "");
+        return 0;
+    }
+    if (sub == "verify") {
+        const int level = a.level ? a.level : 3;
+        auto v = image::verifyImage(a.positional[2], level, progress);
+        if (!v) return die(v.error());
+        std::printf("structure %s, %s, %llu/%llu chunks stored, %llu checked, %llu bad", v->structureOk ? "ok" : "BAD", v->complete ? "complete" : "INCOMPLETE",
+                    static_cast<unsigned long long>(v->chunksStored), static_cast<unsigned long long>(v->chunksTotal),
+                    static_cast<unsigned long long>(v->chunksChecked), static_cast<unsigned long long>(v->chunksBad));
+        if (v->imageHashChecked) std::printf(", sha256 %s", v->imageHashOk ? "ok" : "MISMATCH");
+        std::printf("\n");
+        for (auto c : v->badChunks) std::printf("  bad chunk %llu\n", static_cast<unsigned long long>(c));
+        return (v->chunksBad || (v->imageHashChecked && !v->imageHashOk)) ? 2 : (v->complete ? 0 : 1);
+    }
+    if (sub == "info") {
+        auto i = image::imageInfo(a.positional[2]);
+        if (!i) return die(i.error());
+        std::printf("stein image v%u  uuid %s  %s\n", i->header.version, i->header.imageUuid.toString(false).c_str(), i->complete ? "complete" : "INCOMPLETE");
+        std::printf("source size %s, sector %u, chunk %s, compression %s, %llu/%llu chunks stored, %s on disk in %zu segment(s)\n",
+                    formatSizeExact(i->header.totalSize).c_str(), i->header.sectorSize, formatSize(i->header.chunkSize).c_str(),
+                    std::string(image::toString(i->header.compression)).c_str(), static_cast<unsigned long long>(i->chunksStored),
+                    static_cast<unsigned long long>(i->chunksTotal), formatSize(i->storedBytes).c_str(), i->segments.size());
+        if (i->imageHashHex) std::printf("sha256 %s\n", i->imageHashHex->c_str());
+        for (const auto& s : i->segments)
+            std::printf("  segment %u: %s (%s, %llu records%s)\n", s.header.segmentIndex, s.path.string().c_str(), formatSize(s.fileSize).c_str(),
+                        static_cast<unsigned long long>(s.records), s.trailer ? "" : ", NO TRAILER - recovered by scanning");
+        std::printf("manifest:\n%s\n", i->manifest.dump(2).c_str());
+        return 0;
+    }
+    return usage();
 }
 
 int cmdList(const Args&) {
@@ -281,6 +395,7 @@ int main(int argc, char** argv) {
     if (cmd == "verify") return cmdVerify(a);
     if (cmd == "repair") return cmdRepair(a);
     if (cmd == "pt") return cmdPt(a);
+    if (cmd == "image") return cmdImage(a);
     if (cmd == "fs") return cmdFs(a);
     if (cmd == "types") return cmdTypes(a);
     return usage();
