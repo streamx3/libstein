@@ -17,7 +17,7 @@ L0 detect/geometry/label/uuid · L1 used-block map · L2 offline metadata edit
 | HFS+ / HFSX | **done** | **done** (allocation map; used-only imaging) | v1 | v3 | – | v2 | **done** (reader: B-trees, overflow extents, hard links, HFSX case) | v3 |
 | HFS (classic) | **done** (incl. wrapper) | – | v1 | – | – | – | – | – |
 | APFS (container + volumes) | **done** (container) | v2 | v1 (name) | – | – | – | v2 | – |
-| XFS | **done** | v2 | v1 | x (grow) | x | x | v2 | – |
+| XFS | **done** | v2 | v1 | x (grow) | x | x | **done** (reader: v4/v5 inodes, extents and bmbt forks, sf/block/leaf/node dirs) | – |
 | btrfs | **done** | v2 | v1 | x | x | x | v2 | – |
 | F2FS, JFS, nilfs2, bcachefs, reiser*, minix, ocfs2 | **done** (+erofs, squashfs) | – | v1 (read) | x | x | x | – | – |
 | UDF | **done** | – | v1 | – | – | x | v1 | – |

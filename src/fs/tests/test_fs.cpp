@@ -628,3 +628,57 @@ TEST_CASE("iso9660 reader: genisoimage fixtures read back exactly (Rock Ridge na
         CHECK((*fresh)->stat(*hello)->size == 20);
     }
 }
+
+TEST_CASE("xfs reader: protofile-built v5 fixtures read back exactly (shortform/block/leaf/node directories, inline symlinks, 1 KiB blocks)") {
+    const char* names[] = {"xfs", "xfs_1k"};
+    for (const char* name : names) {
+        const std::string fixture = name;
+        CAPTURE(fixture);
+        auto dev = loadSparseFixture("xfsfs/" + fixture + ".sparse");
+        auto probed = fs::probe(dev);
+        REQUIRE(probed);
+        REQUIRE(*probed);
+        CHECK((*probed)->info().type == fs::FsType::Xfs);
+        REQUIRE(fs::has((*probed)->capabilities(), fs::Capability::Read));
+        auto reader = (*probed)->openReader();
+        REQUIRE_MESSAGE(reader, (reader ? std::string() : reader.error().toString()));
+        CHECK((*reader)->caseSensitive());
+        auto root = (*reader)->root();
+        REQUIRE(root);
+        std::map<std::string, std::pair<char, std::uint64_t>> seen;
+        std::map<std::string, std::string> sha, links;
+        walk(**reader, *root, "", seen, sha, links);
+        const auto o = loadExtOracle(fixture, "xfsfs");
+        CHECK(seen.size() == o.entries.size());
+        for (const auto& [path, ts] : o.entries) {
+            CAPTURE(path);
+            REQUIRE(seen.count(path));
+            CHECK(seen[path].first == ts.first);
+            if (ts.first == 'f') CHECK(seen[path].second == ts.second);
+        }
+        for (const auto& [path, h] : o.sha) {
+            CAPTURE(path);
+            CHECK(sha[path] == h);
+        }
+        for (const auto& [path, t] : o.links) {
+            CAPTURE(path);
+            CHECK(links[path] == t);
+        }
+        auto huge = fs::resolvePath(**reader, "huge");
+        REQUIRE(huge);
+        CHECK((*reader)->readdir(*huge)->size() == 700);
+        CHECK_FALSE(fs::resolvePath(**reader, "HELLO.TXT"));
+        auto hello = fs::resolvePath(**reader, "hello.txt");
+        REQUIRE(hello);
+        auto st = (*reader)->stat(*hello);
+        REQUIRE(st);
+        CHECK(st->mode == 0644);
+        CHECK(st->nlink == 1);
+        CHECK(st->mtime > 1700000000);   // bigtime decoded to a sane epoch value
+        auto dir = (*reader)->stat(*fs::resolvePath(**reader, "dir"));
+        REQUIRE(dir);
+        CHECK(dir->type == fs::FileType::Directory);
+        CHECK(dir->mode == 0755);
+        CHECK(*fs::resolvePath(**reader, "link_short") == *hello);
+    }
+}

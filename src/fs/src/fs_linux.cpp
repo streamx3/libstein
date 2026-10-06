@@ -2,6 +2,7 @@
 // Linux-native filesystems: XFS, btrfs, F2FS, JFS, ReiserFS, Reiser4, NILFS2, bcachefs, OCFS2,
 // Minix, EROFS, SquashFS, swap.
 #include "detectors.hpp"
+#include "stein/fs/xfs_reader.hpp"
 #include "stein/core/endian.hpp"
 #include "stein/core/strings.hpp"
 #include "stein/layout/gen/btrfs.hpp"
@@ -37,6 +38,7 @@ Result detectXfs(Dev dev) {
     if (auto* n = tree.child("features_incompat")) for (const auto& f : split(n->pretty, '|')) if (f != "none") info.features.push_back(f);
     fs->setTreeName("XFS filesystem");
     fs->addNode(std::move(tree));
+    fs->setReaderSource(makeXfsReaderSource());
     for (std::uint32_t ag = 0; ag < sb.agcount() && ag < 4; ++ag) {
         const ByteCount off = ByteCount{ag} * sb.agblocks() * sb.blocksize();
         if (off + sb.sectsize() <= dev->size()) fs->addRegion(Region{off, std::max<ByteCount>(sb.sectsize(), 512)});

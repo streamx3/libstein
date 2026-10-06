@@ -9,6 +9,7 @@ stein_add_module(fs
     src/fs_exfat_reader.cpp
     src/fs_hfsplus_reader.cpp
     src/fs_iso_reader.cpp
+    src/fs_xfs_reader.cpp
     src/registry.cpp
     src/fs_ext.cpp
     src/fs_fat.cpp
