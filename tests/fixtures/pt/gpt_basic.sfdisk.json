@@ -1,0 +1,37 @@
+{
+   "partitiontable": {
+      "label": "gpt",
+      "id": "11111111-2222-3333-4444-555555555555",
+      "device": "/tmp/tmp.Cn1Y3mw29b/gpt_basic.img",
+      "unit": "sectors",
+      "firstlba": 34,
+      "lastlba": 32734,
+      "sectorsize": 512,
+      "partitions": [
+         {
+            "node": "/tmp/tmp.Cn1Y3mw29b/gpt_basic.img1",
+            "start": 2048,
+            "size": 4096,
+            "type": "C12A7328-F81F-11D2-BA4B-00A0C93EC93B",
+            "uuid": "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
+            "name": "EFI System"
+         },{
+            "node": "/tmp/tmp.Cn1Y3mw29b/gpt_basic.img2",
+            "start": 6144,
+            "size": 8192,
+            "type": "0FC63DAF-8483-4772-8E79-3D69D8477DE4",
+            "uuid": "3E704F05-B2FE-4697-898E-8458A8CFA5FC",
+            "name": "Linux data",
+            "attrs": "LegacyBIOSBootable"
+         },{
+            "node": "/tmp/tmp.Cn1Y3mw29b/gpt_basic.img3",
+            "start": 14336,
+            "size": 18399,
+            "type": "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7",
+            "uuid": "9E431DBA-FF69-487F-BB4F-CAEE22804965",
+            "name": "Data",
+            "attrs": "GUID:63"
+         }
+      ]
+   }
+}

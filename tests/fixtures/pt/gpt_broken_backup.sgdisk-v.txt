@@ -1,0 +1,25 @@
+Caution: invalid backup GPT header, but valid main header; regenerating
+backup header from main header.
+
+Warning! Main and backup partition tables differ! Use the 'c' and 'e' options
+on the recovery & transformation menu to examine the two tables.
+
+Warning! One or more CRCs don't match. You should repair the disk!
+Main header: OK
+Backup header: ERROR
+Main partition table: OK
+Backup partition table: ERROR
+
+****************************************************************************
+Caution: Found protective or hybrid MBR and corrupt GPT. Using GPT, but disk
+verification and recovery are STRONGLY recommended.
+****************************************************************************
+
+Caution: The CRC for the backup partition table is invalid. This table may
+be corrupt. This program will automatically create a new backup partition
+table when you save your partitions.
+
+Caution: Partition 3 doesn't end on a 2048-sector boundary. This may
+result in problems with some disk encryption tools.
+
+Identified 1 problems!

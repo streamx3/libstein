@@ -1,0 +1,11 @@
+label: dos
+label-id: 0xdeadbeef
+device: /tmp/tmp.Cn1Y3mw29b/mbr_basic.img
+unit: sectors
+sector-size: 512
+
+/tmp/tmp.Cn1Y3mw29b/mbr_basic.img1 : start=        2048, size=        4096, type=83, bootable
+/tmp/tmp.Cn1Y3mw29b/mbr_basic.img2 : start=        6144, size=        4096, type=c
+/tmp/tmp.Cn1Y3mw29b/mbr_basic.img3 : start=       10240, size=       22528, type=5
+/tmp/tmp.Cn1Y3mw29b/mbr_basic.img5 : start=       12288, size=        4096, type=83
+/tmp/tmp.Cn1Y3mw29b/mbr_basic.img6 : start=       18432, size=        8192, type=7

@@ -1,0 +1,13 @@
+Disk /tmp/tmp.Cn1Y3mw29b/gpt_basic.img: 32768 sectors, 16.0 MiB
+Sector size (logical): 512 bytes
+Disk identifier (GUID): 11111111-2222-3333-4444-555555555555
+Partition table holds up to 128 entries
+Main partition table begins at sector 2 and ends at sector 33
+First usable sector is 34, last usable sector is 32734
+Partitions will be aligned on 2048-sector boundaries
+Total free space is 2014 sectors (1007.0 KiB)
+
+Number  Start (sector)    End (sector)  Size       Code  Name
+   1            2048            6143   2.0 MiB     EF00  EFI System
+   2            6144           14335   4.0 MiB     8300  Linux data
+   3           14336           32734   9.0 MiB     0700  Data

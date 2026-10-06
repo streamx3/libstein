@@ -1,0 +1,15 @@
+
+Problem: The secondary header's self-pointer indicates that it doesn't reside
+at the end of the disk. If you've added a disk to a RAID array, use the 'e'
+option on the experts' menu to adjust the secondary header's and partition
+table's locations.
+
+Warning: There is a gap between the secondary partition table (ending at sector
+32766) and the secondary metadata (sector 32767).
+This is helpful in some exotic configurations, but is generally ill-advised.
+Using 'k' on the experts' menu can adjust this gap.
+
+Caution: Partition 3 doesn't end on a 2048-sector boundary. This may
+result in problems with some disk encryption tools.
+
+Identified 1 problems!

@@ -35,5 +35,7 @@ struct ChsAddress {
 };
 ChsAddress decodeChs(std::span<const std::byte> three);
 void encodeChs(std::span<std::byte> three, const ChsAddress& chs);
+// Classic 255-heads / 63-sectors mapping; the LBA marker (1023/254/63) when out of range.
+ChsAddress chsFromLba(std::uint64_t lba, unsigned heads = 255, unsigned sectorsPerTrack = 63);
 
 } // namespace stein::layout

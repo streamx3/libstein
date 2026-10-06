@@ -208,6 +208,15 @@ ChsAddress decodeChs(std::span<const std::byte> b) {
     return c;
 }
 
+ChsAddress chsFromLba(std::uint64_t lba, unsigned heads, unsigned spt) {
+    const std::uint64_t perCyl = static_cast<std::uint64_t>(heads) * spt;
+    const std::uint64_t cyl = perCyl ? lba / perCyl : 0;
+    if (cyl > 1023) return ChsAddress{1023, 254, 63};
+    const std::uint64_t rem = lba % perCyl;
+    return ChsAddress{static_cast<std::uint16_t>(cyl), static_cast<std::uint8_t>(rem / spt),
+                      static_cast<std::uint8_t>(rem % spt + 1)};
+}
+
 void encodeChs(std::span<std::byte> b, const ChsAddress& c) {
     if (b.size() < 3) return;
     b[0] = std::byte(c.head);

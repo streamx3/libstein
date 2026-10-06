@@ -1,0 +1,11 @@
+Disk /dev/loop0: 8192 sectors, 32.0 MiB
+Sector size (logical/physical): 4096/4096 bytes
+Disk identifier (GUID): 3E1666FD-EA93-4C58-AFF7-EE01032B4537
+Partition table holds up to 128 entries
+Main partition table begins at sector 2 and ends at sector 5
+First usable sector is 6, last usable sector is 8186
+Partitions will be aligned on 256-sector boundaries
+Total free space is 6133 sectors (24.0 MiB)
+
+Number  Start (sector)    End (sector)  Size       Code  Name
+   1             256            2303   8.0 MiB     8300  Linux 4Kn
