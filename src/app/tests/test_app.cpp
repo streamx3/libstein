@@ -244,6 +244,28 @@ TEST_CASE("scenarios: backup, status, restore and verify on a file target") {
     CHECK(v->ok);
     CHECK(v->verified->imageHashOk);
 
+    // A larger target: the GPT backup is moved to the new end of the disk.
+    const auto bigPath = dir / "big.img";
+    {
+        std::ofstream out(bigPath, std::ios::binary);
+        out.seekp(static_cast<std::streamoff>(src->size() * 2 - 1));
+        out.put(0);
+    }
+    p.target.osPath = bigPath.string();
+    auto grown = app::restore(p, o, progress);
+    REQUIRE_MESSAGE(grown, (grown ? std::string() : grown.error().toString()));
+    CHECK(grown->restored->targetLarger);
+    CHECK(grown->report.toText().find("Adjust partition table") != std::string::npos);
+    {
+        auto big = FileDevice::open(bigPath, FileDevice::Mode::ReadOnly);
+        REQUIRE(big);
+        auto t = pt::PartitionTable::read(*big);
+        REQUIRE(t);
+        CHECK((*t)->health() == layout::Validity::Ok);
+        CHECK((*t)->lastUsableLba() == (*big)->geometry().sectors() - 34);
+        CHECK((*t)->partitions().size() == 3);
+    }
+
     // A smaller target is refused unless the policy allows it.
     const auto smallPath = dir / "small.img";
     {

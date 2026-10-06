@@ -4,6 +4,7 @@
 #include "stein/block/file_device.hpp"
 #include "stein/core/hash.hpp"
 #include "stein/core/strings.hpp"
+#include "stein/pt/partition_table.hpp"
 
 #include <algorithm>
 
@@ -253,7 +254,7 @@ Expected<ScenarioResult> restore(const Profile& profile, const RunOptions& optio
     }
     (void)(*dev)->flush();
     wr.addDetail("written", formatSize(restored->stats.bytesWritten));
-    if (restored->targetLarger) wr.addLine("target is larger than the image; space beyond the image is untouched (GPT backup header relocation: run `stein repair`)");
+    if (restored->targetLarger) wr.addLine("target is larger than the image; space beyond the image is untouched");
     wr.finish(ReportStatus::Success);
     r.restored = *restored;
     if (profile.policy.verifyAfterRestore && info->imageHashHex && !restored->targetSmaller) {
@@ -267,6 +268,31 @@ Expected<ScenarioResult> restore(const Profile& profile, const RunOptions& optio
             return fail(ErrorCategory::Integrity, "target does not read back as the image");
         }
         ver.finish(ReportStatus::Success);
+    }
+    // After the read-back check (the table change below would break the hash):
+    // a GPT restored onto a larger disk has its backup header in the middle of
+    // the disk and a wrong "last usable" sector. Fix it now, like sgdisk -e.
+    if (profile.policy.repairTableAfterRestore && restored->targetLarger) {
+        auto& fix = r.report.addChild("Adjust partition table to the larger target");
+        fix.start();
+        auto table = pt::PartitionTable::read(*dev);
+        bool repairable = false;
+        if (table)
+            for (const auto& d : (*table)->diagnostics()) repairable = repairable || d.repairable;
+        if (!table) {
+            fix.finish(ReportStatus::Warning);
+            fix.addLine(table.error().toString());
+        } else if (!repairable) {
+            fix.finish(ReportStatus::Info);
+            fix.addLine("nothing to adjust for a " + std::string(pt::toString((*table)->type())) + " table");
+        } else if (auto rep = (*table)->repair(**dev, pt::RepairOptions{}); !rep) {
+            fix.finish(ReportStatus::Warning);
+            fix.addLine(rep.error().toString());
+        } else {
+            for (const auto& d : (*table)->diagnostics())
+                if (d.repairable) fix.addLine("fixed: " + d.message);
+            fix.finish(ReportStatus::Success);
+        }
     }
     if (profile.policy.rereadPartitionTable && !t->isFile) {
         dev->reset();

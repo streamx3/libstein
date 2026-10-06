@@ -113,6 +113,7 @@ Expected<Profile> Profile::fromJson(const json::Value& v) {
     p.policy.verifyAfterRestore = po.get("verify_after_restore").asBool(true);
     p.policy.verifyAfterBackup = po.get("verify_after_backup").asBool(true);
     p.policy.rereadPartitionTable = po.get("reread_partition_table").asBool(true);
+    p.policy.repairTableAfterRestore = po.get("repair_table_after_restore").asBool(true);
     for (const auto& n : v.get("notes").asArray()) p.notes.push_back(n.asString());
     if (auto ok = p.validate(); !ok) return fail(ok.error());
     return p;
@@ -146,6 +147,7 @@ json::Value Profile::toJson() const {
     po.set("verify_after_restore", policy.verifyAfterRestore);
     po.set("verify_after_backup", policy.verifyAfterBackup);
     po.set("reread_partition_table", policy.rereadPartitionTable);
+    po.set("repair_table_after_restore", policy.repairTableAfterRestore);
     v.set("policy", std::move(po));
     if (!notes.empty()) {
         json::Value n = json::Value::array();

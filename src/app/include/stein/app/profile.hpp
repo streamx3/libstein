@@ -56,6 +56,7 @@ struct Policy {
     bool verifyAfterRestore = true;    // re-read the target and compare chunk CRCs
     bool verifyAfterBackup = true;
     bool rereadPartitionTable = true;
+    bool repairTableAfterRestore = true;   // larger target: move the GPT backup to the new end
 };
 
 struct Profile {
