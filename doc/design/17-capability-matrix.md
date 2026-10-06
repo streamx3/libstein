@@ -63,7 +63,7 @@ L0 detect/geometry/label/uuid · L1 used-block map · L2 offline metadata edit
 | VHDX | **done** (dynamic; log must be clean) | v3 | **done** | differencing v2 |
 | qcow2 | **done** (v2/v3, deflate-compressed clusters) | v3 | **done** | backing files, zstd, subclusters v2 |
 | VMDK | **done** (sparse, stream-optimized, multi-extent descriptors) | – | **done** | snapshot chains v2 |
-| DMG/UDIF | v2 | – | v2 | zlib/bzip2/ADC/lzfse |
+| DMG/UDIF | **done** (UDRO raw, UDZO zlib, UDCO ADC; ignored/zero blocks) | – | **done** | bzip2 (UDBZ), lzfse (ULFO), lzma (ULMO), segmented and encrypted images v2 |
 | VDI | **done** (dynamic/fixed) | – | **done** | undo/differencing v2 |
 | partclone/Clonezilla | v3 | – | v3 | |
 

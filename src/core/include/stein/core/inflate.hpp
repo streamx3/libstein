@@ -22,4 +22,7 @@ Expected<std::size_t> inflateGzip(std::span<const std::byte> in, std::span<std::
 
 std::uint32_t adler32(std::span<const std::byte> data, std::uint32_t seed = 1);
 
+// Apple Data Compression (ADC, the UDCO DMG codec): literal runs and short/long back-references.
+Expected<std::size_t> adcDecompress(std::span<const std::byte> in, std::span<std::byte> out);
+
 } // namespace stein::compress

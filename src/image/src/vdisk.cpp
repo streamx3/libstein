@@ -30,6 +30,7 @@ std::string_view toString(VdiskFormat f) {
     case VdiskFormat::Vmdk: return "vmdk";
     case VdiskFormat::Vdi: return "vdi";
     case VdiskFormat::Ewf: return "ewf";
+    case VdiskFormat::Dmg: return "dmg";
     }
     return "?";
 }
@@ -759,6 +760,112 @@ Expected<std::shared_ptr<BlockDevice>> openEwf(const std::filesystem::path& path
     return std::shared_ptr<BlockDevice>(dev);
 }
 
+
+// ----------------------------------------------------------------------------- DMG / UDIF
+
+Expected<std::shared_ptr<BlockDevice>> openDmg(std::shared_ptr<BlockDevice> file, const std::filesystem::path& path, VdiskInfo& info) {
+    const ByteCount fsize = file->size();
+    if (fsize < 512) return fail(ErrorCategory::InvalidFormat, "file too small for a DMG trailer");
+    auto koly = readExact(*file, fsize - 512, 512);
+    if (!koly || std::memcmp(koly->data(), "koly", 4) != 0) return fail(ErrorCategory::InvalidFormat, "no DMG koly trailer");
+    const std::byte* k = koly->data();
+    const std::uint64_t dataForkOffset = loadBe64(k + 24), xmlOffset = loadBe64(k + 216), xmlLength = loadBe64(k + 224);
+    const std::uint64_t sectorCount = loadBe64(k + 492);
+    const std::uint32_t segmentCount = loadBe32(k + 60);
+    if (segmentCount > 1) return fail(ErrorCategory::Unsupported, "segmented DMG sets are not supported yet");
+    if (xmlLength == 0 || xmlLength > 64 * MiB || xmlOffset + xmlLength > fsize) return fail(ErrorCategory::InvalidFormat, "DMG property list is missing (raw-attached or encrypted image?)");
+    auto xmlRaw = readExact(*file, xmlOffset, xmlLength);
+    if (!xmlRaw) return fail(xmlRaw.error());
+    const std::string xml(reinterpret_cast<const char*>(xmlRaw->data()), xmlRaw->size());
+    struct Chunk {
+        std::uint32_t type;
+        std::uint64_t sector, sectors, offset, length;
+    };
+    std::vector<Chunk> chunks;
+    // Every <data> element that decodes to a "mish" block is a blkx entry; nothing else in the
+    // plist is needed to read the image.
+    std::size_t pos = 0;
+    while ((pos = xml.find("<data>", pos)) != std::string::npos) {
+        const std::size_t end = xml.find("</data>", pos);
+        if (end == std::string::npos) break;
+        std::string b64 = xml.substr(pos + 6, end - pos - 6);
+        b64.erase(std::remove_if(b64.begin(), b64.end(), [](char c) { return c == '\n' || c == '\r' || c == '\t' || c == ' '; }), b64.end());
+        pos = end + 7;
+        auto bytes = fromBase64(b64);
+        if (!bytes || bytes->size() < 204 || std::memcmp(bytes->data(), "mish", 4) != 0) continue;
+        const std::byte* m = bytes->data();
+        const std::uint64_t firstSector = loadBe64(m + 8), dataOffset = loadBe64(m + 24);
+        const std::uint32_t count = loadBe32(m + 200);
+        if (204 + std::size_t{count} * 40 > bytes->size()) return fail(ErrorCategory::InvalidFormat, "DMG blkx chunk table truncated");
+        for (std::uint32_t i = 0; i < count; ++i) {
+            const std::byte* c = m + 204 + i * 40;
+            Chunk ch{loadBe32(c), firstSector + loadBe64(c + 8), loadBe64(c + 16), dataForkOffset + dataOffset + loadBe64(c + 24), loadBe64(c + 32)};
+            if (ch.type == 0xFFFFFFFFu || ch.type == 0x7FFFFFFEu || ch.sectors == 0) continue;   // terminator / comment
+            chunks.push_back(ch);
+        }
+    }
+    if (chunks.empty()) return fail(ErrorCategory::InvalidFormat, "DMG has no blkx chunks");
+    std::sort(chunks.begin(), chunks.end(), [](const Chunk& a, const Chunk& b) { return a.sector < b.sector; });
+    std::uint64_t maxChunkBytes = 0;
+    bool compressed = false;
+    for (const auto& c : chunks) {
+        maxChunkBytes = std::max(maxChunkBytes, c.sectors * 512);
+        compressed = compressed || (c.type & 0x80000000u) != 0;
+    }
+    if (maxChunkBytes > 256 * MiB) return fail(ErrorCategory::Unsupported, "DMG chunk larger than 256 MiB");
+    info.format = VdiskFormat::Dmg;
+    info.virtualSize = sectorCount * 512;
+    info.clusterSize = static_cast<std::uint32_t>(std::min<std::uint64_t>(maxChunkBytes, 0xFFFFFFFFu));
+    info.compressed = compressed;
+    info.variant = compressed ? "compressed (UDZO/UDCO/...)" : "read-only raw (UDRO)";
+    auto table = std::make_shared<std::vector<Chunk>>(std::move(chunks));
+    auto mapper = [=](ByteCount guest) -> Expected<MappedDevice::Map> {
+        MappedDevice::Map m;
+        const std::uint64_t sector = guest / 512;
+        // Binary search the chunk holding this sector.
+        std::size_t lo = 0, hi = table->size();
+        while (lo < hi) {
+            const std::size_t mid = (lo + hi) / 2;
+            if ((*table)[mid].sector + (*table)[mid].sectors <= sector) lo = mid + 1;
+            else hi = mid;
+        }
+        if (lo >= table->size() || (*table)[lo].sector > sector) {
+            m.length = lo < table->size() ? (*table)[lo].sector * 512 - guest : 512;   // gap: zeros up to the next chunk
+            return m;
+        }
+        const Chunk& c = (*table)[lo];
+        const std::uint64_t in = guest - c.sector * 512;
+        m.length = c.sectors * 512 - in;
+        m.unitStart = c.sector * 512;
+        switch (c.type) {
+        case 0x00000000: case 0x00000002: return m;   // zero fill / ignored
+        case 0x00000001:
+            m.kind = MappedDevice::Kind::File;
+            m.fileOffset = c.offset + in;
+            return m;
+        case 0x80000004: case 0x80000005:
+            m.kind = MappedDevice::Kind::Compressed;
+            m.unit = lo;
+            return m;
+        case 0x80000006: return fail(ErrorCategory::Unsupported, "bzip2-compressed DMG block (UDBZ) is not supported yet");
+        case 0x80000007: return fail(ErrorCategory::Unsupported, "lzfse-compressed DMG block (ULFO) is not supported yet");
+        case 0x80000008: return fail(ErrorCategory::Unsupported, "lzma-compressed DMG block (ULMO) is not supported yet");
+        default: return fail(ErrorCategory::Unsupported, "unknown DMG block type");
+        }
+    };
+    auto decompress = [=](std::uint64_t index, std::span<std::byte> out) -> Expected<void> {
+        const Chunk& c = (*table)[index];
+        auto comp = readExact(*file, c.offset, c.length);
+        if (!comp) return fail(comp.error());
+        auto window = out.subspan(0, static_cast<std::size_t>(c.sectors * 512));
+        auto n = c.type == 0x80000005 ? compress::inflateZlib(*comp, window) : compress::adcDecompress(*comp, window);
+        if (!n) return fail(n.error());
+        return {};
+    };
+    auto dev = std::make_shared<MappedDevice>(file, path.filename().string() + " (dmg)", sectorCount * 512, static_cast<std::uint32_t>(maxChunkBytes), mapper, decompress);
+    return std::shared_ptr<BlockDevice>(dev);
+}
+
 } // namespace
 
 Expected<VdiskFormat> detectVdiskFormat(const std::filesystem::path& path) {
@@ -781,6 +888,7 @@ Expected<VdiskFormat> detectVdiskFormat(const std::filesystem::path& path) {
         in.seekg(static_cast<std::streamoff>(size - 512));
         in.read(tail.data(), 8);
         if (std::memcmp(tail.data(), "conectix", 8) == 0) return VdiskFormat::Vhd;
+        if (std::memcmp(tail.data(), "koly", 4) == 0) return VdiskFormat::Dmg;
     }
     return VdiskFormat::Raw;
 }
@@ -816,6 +924,7 @@ Expected<std::shared_ptr<BlockDevice>> openVdisk(const std::filesystem::path& pa
         case VdiskFormat::Vhdx: dev = openVhdx(*file, path, info); break;
         case VdiskFormat::Vmdk: dev = openVmdk(*file, path, info); break;
         case VdiskFormat::Vdi: dev = openVdi(*file, path, info); break;
+        case VdiskFormat::Dmg: dev = openDmg(*file, path, info); break;
         default: break;
         }
     }

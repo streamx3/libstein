@@ -619,3 +619,76 @@ TEST_CASE("ewf: EnCase 6 compressed, EnCase 6 split into 13 uncompressed segment
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
 }
+
+TEST_CASE("dmg: UDRO, UDZO (zlib) and UDCO (ADC) images from hdiutil reproduce the raw disk") {
+    const char* names[] = {"dmg_udro", "dmg_udzo", "dmg_udco"};
+    const auto dir = std::filesystem::temp_directory_path() / ("stein_dmg_" + std::to_string(std::random_device{}()));
+    std::filesystem::create_directories(dir);
+    for (const char* name : names) {
+        const std::string fixture = name;
+        CAPTURE(fixture);
+        const auto sparse = std::string(STEIN_FIXTURE_DIR) + "/dmg/" + fixture + ".sparse";
+        if (!std::filesystem::exists(sparse)) {
+            MESSAGE("fixture dmg/", fixture, " missing (built by the macOS fixture workflow); skipping");
+            continue;
+        }
+        std::map<std::string, std::string> o;
+        {
+            std::ifstream in(std::string(STEIN_FIXTURE_DIR) + "/dmg/" + fixture + ".oracle.txt");
+            std::string line;
+            while (std::getline(in, line))
+                if (auto eq = line.find('='); eq != std::string::npos) o[line.substr(0, eq)] = line.substr(eq + 1);
+        }
+        auto mem = SparseFile::loadIntoMemory(sparse);
+        REQUIRE(mem);
+        const auto path = dir / (fixture + ".dmg");
+        {
+            auto out = FileDevice::create(path, (*mem)->size());
+            REQUIRE(out);
+            std::vector<std::byte> buf(static_cast<std::size_t>((*mem)->size()));
+            REQUIRE((*mem)->readAt(0, buf));
+            REQUIRE((*out)->writeAt(0, buf));
+            REQUIRE((*out)->flush());
+        }
+        auto fmt = image::detectVdiskFormat(path);
+        REQUIRE(fmt);
+        CHECK(*fmt == image::VdiskFormat::Dmg);
+        image::VdiskInfo info;
+        auto dev = image::openVdisk(path, &info);
+        REQUIRE_MESSAGE(dev, (dev ? std::string() : dev.error().toString()));
+        CHECK(info.compressed == (fixture != "dmg_udro"));
+        const ByteCount rawSize = std::stoull(o["raw_size"]);
+        CHECK((*dev)->size() >= rawSize);
+        std::vector<std::byte> all(static_cast<std::size_t>(rawSize));
+        REQUIRE((*dev)->readAt(0, all));
+        // hdiutil may drop unpartitioned space ("ignored" chunks read as zeros), so the
+        // byte-exact oracle is the raw disk restricted to the partition table and the partitions.
+        auto rawMem = SparseFile::loadIntoMemory(std::string(STEIN_FIXTURE_DIR) + "/vdisk/vhd_fixed.sparse");
+        REQUIRE(rawMem);
+        std::vector<std::byte> raw(static_cast<std::size_t>(rawSize));
+        REQUIRE((*rawMem)->readAt(0, raw));
+        auto tree = probe::probe(*dev);
+        REQUIRE(tree);
+        REQUIRE(tree->table);
+        REQUIRE(tree->table->partitions().size() == 2);
+        std::vector<Region> regions{Region{0, 34 * 512}};
+        for (const auto& part : tree->table->partitions()) regions.push_back(part.region(512));
+        for (const auto& r : regions) {
+            CAPTURE(r.offset);
+            CHECK(std::memcmp(all.data() + r.offset, raw.data() + r.offset, static_cast<std::size_t>(r.length)) == 0);
+        }
+        (void)o;   // the oracle's sha256 describes the raw source; hdiutil drops the free tail from every variant
+        std::mt19937_64 rng(11);
+        for (int i = 0; i < 30; ++i) {
+            const ByteCount off = rng() % (rawSize - 200000);
+            const std::size_t n = 1 + static_cast<std::size_t>(rng() % 199999);
+            std::vector<std::byte> win(n);
+            REQUIRE((*dev)->readAt(off, win));
+            CHECK(std::memcmp(win.data(), all.data() + off, n) == 0);
+        }
+        mem->reset();
+        rawMem->reset();
+    }
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}

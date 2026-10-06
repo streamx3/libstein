@@ -325,3 +325,39 @@ Expected<std::size_t> inflateGzip(std::span<const std::byte> in, std::span<std::
 }
 
 } // namespace stein::compress
+
+namespace stein::compress {
+
+Expected<std::size_t> adcDecompress(std::span<const std::byte> in, std::span<std::byte> out) {
+    std::size_t ip = 0, op = 0;
+    while (ip < in.size()) {
+        const auto b = std::to_integer<std::uint8_t>(in[ip]);
+        std::size_t len = 0, dist = 0;
+        if (b & 0x80) {
+            len = (b & 0x7F) + 1;
+            if (ip + 1 + len > in.size() || op + len > out.size()) return fail(ErrorCategory::InvalidFormat, "ADC literal run overruns a buffer");
+            std::memcpy(out.data() + op, in.data() + ip + 1, len);
+            ip += 1 + len;
+            op += len;
+            continue;
+        }
+        if (b & 0x40) {
+            if (ip + 3 > in.size()) return fail(ErrorCategory::InvalidFormat, "ADC long reference truncated");
+            len = (b & 0x3F) + 4;
+            dist = (static_cast<std::size_t>(std::to_integer<std::uint8_t>(in[ip + 1])) << 8 | std::to_integer<std::uint8_t>(in[ip + 2])) + 1;
+            ip += 3;
+        } else {
+            if (ip + 2 > in.size()) return fail(ErrorCategory::InvalidFormat, "ADC short reference truncated");
+            len = ((b & 0x3F) >> 2) + 3;
+            dist = (static_cast<std::size_t>(b & 0x03) << 8 | std::to_integer<std::uint8_t>(in[ip + 1])) + 1;
+            ip += 2;
+        }
+        if (dist > op) return fail(ErrorCategory::InvalidFormat, "ADC reference before the start of the output");
+        if (op + len > out.size()) return fail(ErrorCategory::OutOfRange, "ADC output buffer too small");
+        for (std::size_t i = 0; i < len; ++i) out[op + i] = out[op - dist + i];
+        op += len;
+    }
+    return op;
+}
+
+} // namespace stein::compress
