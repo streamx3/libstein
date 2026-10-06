@@ -72,6 +72,24 @@ std::filesystem::path pathFromUtf8(const std::string& s) {
     return std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(s.data()), s.size()));
 }
 
+// Windows limits ordinary paths to 260 characters; filesystems allow 255-byte names at any
+// depth, so the destination is written as an extended-length path ("\\?\C:\...", backslashes,
+// no "." or ".." components), which the file APIs accept up to 32767 characters.
+std::filesystem::path hostDestination(const std::filesystem::path& destination) {
+#if defined(_WIN32)
+    std::error_code ec;
+    std::filesystem::path p = std::filesystem::absolute(destination, ec);
+    if (ec) return destination;
+    p = p.lexically_normal();
+    p.make_preferred();
+    const auto& s = p.native();
+    if (s.size() >= 3 && s[1] == L':' && s[2] == L'\\') return std::filesystem::path(L"\\\\?\\" + s);
+    return p;
+#else
+    return destination;
+#endif
+}
+
 Expected<void> copyFile(Reader& reader, const Inode& file, const Stat& st, const std::filesystem::path& dest, const CopyTreeOptions& options, Progress* progress, CopyTreeStats& stats) {
     std::error_code ec;
     if (!options.overwrite && std::filesystem::exists(dest, ec)) return fail(ErrorCategory::InvalidArgument, dest.string() + " exists");
@@ -156,7 +174,7 @@ Expected<void> copyEntry(Reader& reader, const Inode& inode, const std::filesyst
 
 Expected<CopyTreeStats> copyTree(Reader& reader, const Inode& source, const std::filesystem::path& destination, const CopyTreeOptions& options, Progress* progress) {
     CopyTreeStats stats;
-    auto r = copyEntry(reader, source, destination, options, progress, stats, 0);
+    auto r = copyEntry(reader, source, hostDestination(destination), options, progress, stats, 0);
     if (!r) return fail(r.error());
     return stats;
 }

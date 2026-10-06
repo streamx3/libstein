@@ -123,17 +123,25 @@ TEST_CASE("luks: anti-forensic merge of a known split") {
     CHECK_FALSE(container::afMerge(split, 32, stripes, "md4"));
 }
 
-TEST_CASE("tcrypt: VeraCrypt (sha512 default, sha256/blake2s/ripemd160 with PIM, hidden volume) and TrueCrypt (sha512, ripemd160) volumes open by trial decryption") {
-    struct Case { const char* name; const char* passphrase; std::uint32_t pim; const char* variant; const char* prf; const char* label; bool hidden; ByteCount payloadOffset, payloadSize; };
+TEST_CASE("tcrypt: VeraCrypt and TrueCrypt volumes open by trial decryption: every PRF, every cipher, cascades, PIM, hidden volume") {
+    struct Case { const char* name; const char* passphrase; std::uint32_t pim; const char* variant; const char* prf; const char* label; bool hidden; ByteCount payloadOffset, payloadSize; const char* cipher; bool restrictPrf; };
     const Case cases[] = {
-        {"veracrypt_sha512", "stein-vera", 0, "VeraCrypt", "sha512", "inside_vc", false, 131072, 262144},
-        {"veracrypt_sha256_pim", "stein-pim", 3, "VeraCrypt", "sha256", "inside_vc", false, 131072, 262144},
-        {"truecrypt_sha512", "stein-true", 0, "TrueCrypt", "sha512", "inside_vc", false, 131072, 262144},
-        {"veracrypt_hidden", "stein-outer", 1, "VeraCrypt", "sha512", "outer_vc", false, 131072, 524288},
-        {"veracrypt_hidden", "stein-hidden", 1, "VeraCrypt", "sha256", "hidden_vc", true, 393216, 262144},
-        {"truecrypt_ripemd160", "stein-rmd", 0, "TrueCrypt", "ripemd160", "inside_vc", false, 131072, 262144},
-        {"veracrypt_blake2s_pim", "stein-blake", 2, "VeraCrypt", "blake2s", "inside_vc", false, 131072, 262144},
-        {"veracrypt_ripemd160_pim", "stein-vrmd", 4, "VeraCrypt", "ripemd160", "inside_vc", false, 131072, 262144},
+        {"veracrypt_sha512", "stein-vera", 0, "VeraCrypt", "sha512", "inside_vc", false, 131072, 262144, "aes-xts-plain64", true},
+        {"veracrypt_sha256_pim", "stein-pim", 3, "VeraCrypt", "sha256", "inside_vc", false, 131072, 262144, "aes-xts-plain64", true},
+        {"truecrypt_sha512", "stein-true", 0, "TrueCrypt", "sha512", "inside_vc", false, 131072, 262144, "aes-xts-plain64", false},
+        {"veracrypt_hidden", "stein-outer", 1, "VeraCrypt", "sha512", "outer_vc", false, 131072, 524288, "aes-xts-plain64", true},
+        {"veracrypt_hidden", "stein-hidden", 1, "VeraCrypt", "sha256", "hidden_vc", true, 393216, 262144, "aes-xts-plain64", true},
+        {"truecrypt_ripemd160", "stein-rmd", 0, "TrueCrypt", "ripemd160", "inside_vc", false, 131072, 262144, "aes-xts-plain64", false},
+        {"veracrypt_blake2s_pim", "stein-blake", 2, "VeraCrypt", "blake2s", "inside_vc", false, 131072, 262144, "aes-xts-plain64", true},
+        {"veracrypt_ripemd160_pim", "stein-vrmd", 4, "VeraCrypt", "ripemd160", "inside_vc", false, 131072, 262144, "aes-xts-plain64", false},
+        {"veracrypt_serpent_pim", "stein-serp", 1, "VeraCrypt", "sha512", "inside_vc", false, 131072, 262144, "serpent-xts-plain64", true},
+        {"veracrypt_twofish_pim", "stein-two", 1, "VeraCrypt", "sha256", "inside_vc", false, 131072, 262144, "twofish-xts-plain64", true},
+        {"veracrypt_camellia_whirlpool_pim", "stein-cam", 1, "VeraCrypt", "whirlpool", "inside_vc", false, 131072, 262144, "camellia-xts-plain64", true},
+        {"veracrypt_kuznyechik_streebog_pim", "stein-kuz", 1, "VeraCrypt", "streebog", "inside_vc", false, 131072, 262144, "kuznyechik-xts-plain64", true},
+        {"veracrypt_aes_twofish_serpent_pim", "stein-cascade", 1, "VeraCrypt", "sha512", "inside_vc", false, 131072, 262144, "aes-twofish-serpent-xts-plain64", true},
+        {"veracrypt_kuznyechik_serpent_camellia_pim", "stein-gost", 1, "VeraCrypt", "blake2s", "inside_vc", false, 131072, 262144, "kuznyechik-serpent-camellia-xts-plain64", true},
+        {"truecrypt_whirlpool", "stein-whirl", 0, "TrueCrypt", "whirlpool", "inside_vc", false, 131072, 262144, "aes-xts-plain64", true},
+        {"truecrypt_serpent_twofish_aes", "stein-tcascade", 0, "TrueCrypt", "sha512", "inside_vc", false, 131072, 262144, "serpent-twofish-aes-xts-plain64", true},
     };
     for (const auto& c : cases) {
         const std::string fixture = c.name;
@@ -148,10 +156,13 @@ TEST_CASE("tcrypt: VeraCrypt (sha512 default, sha256/blake2s/ripemd160 with PIM,
         auto dev = loadSparseFixture("tcrypt/" + fixture + ".sparse");
         container::TcryptOptions opt;
         opt.pim = c.pim;
+        if (c.restrictPrf) opt.prf = c.prf;   // the full trial over all PRFs (six 192-byte derivations per header) runs on the TrueCrypt and ripemd160 volumes only
         auto t = container::Tcrypt::unlock(dev, c.passphrase, opt);
         REQUIRE_MESSAGE(t, (t ? std::string() : t.error().toString()));
         CHECK(t->info().variant == c.variant);
         CHECK(t->info().prf == c.prf);
+        CHECK(t->info().cipher == c.cipher);
+        CHECK(t->info().cascade.size() * 64 == t->masterKey().size());
         CHECK(t->info().hidden == c.hidden);
         CHECK_FALSE(t->info().backupHeader);
         CHECK(t->info().payloadOffset == c.payloadOffset);
@@ -178,10 +189,29 @@ TEST_CASE("tcrypt: VeraCrypt (sha512 default, sha256/blake2s/ripemd160 with PIM,
         if (fixture == "veracrypt_sha256_pim" || fixture == "truecrypt_sha512") {
             container::TcryptOptions wrongOpt = opt;
             wrongOpt.veracrypt = c.pim != 0;   // a pim of 0 would mean several 500000+-iteration VeraCrypt trials per header
+            wrongOpt.prf = c.prf;              // one PRF: a wrong passphrase costs the cascade-length derivation at every header location
             auto wrong = container::Tcrypt::unlock(dev, std::string(c.passphrase) + "x", wrongOpt);
             REQUIRE_FALSE(wrong);
             CHECK(wrong.error().category() == ErrorCategory::Integrity);
         }
+    }
+    // PRF restriction: the right one opens the volume, a wrong one fails like a wrong passphrase, an unknown one is rejected.
+    {
+        auto dev = loadSparseFixture("tcrypt/veracrypt_twofish_pim.sparse");
+        container::TcryptOptions opt;
+        opt.pim = 1;
+        opt.prf = "sha256";
+        REQUIRE(container::Tcrypt::unlock(dev, "stein-two", opt));
+        opt.prf = "whirlpool";
+        auto wrong = container::Tcrypt::unlock(dev, "stein-two", opt);
+        REQUIRE_FALSE(wrong);
+        CHECK(wrong.error().category() == ErrorCategory::Integrity);
+        opt.prf = "md4";
+        auto unknown = container::Tcrypt::unlock(dev, "stein-two", opt);
+        REQUIRE_FALSE(unknown);
+        CHECK(unknown.error().category() == ErrorCategory::InvalidArgument);
+        CHECK(container::Tcrypt::prfNames().size() == 6);
+        CHECK(container::Tcrypt::cipherNames().size() == 15);
     }
     // Backup header: damage the primary (and hidden) header areas, the copies at the end still open the volume.
     {
@@ -190,6 +220,7 @@ TEST_CASE("tcrypt: VeraCrypt (sha512 default, sha256/blake2s/ripemd160 with PIM,
         REQUIRE(dev->writeAt(0, junk));
         container::TcryptOptions opt;
         opt.pim = 3;
+        opt.prf = "sha256";   // the junk header area now costs a full trial per PRF and location
         auto t = container::Tcrypt::unlock(dev, "stein-pim", opt);
         REQUIRE_MESSAGE(t, (t ? std::string() : t.error().toString()));
         CHECK(t->info().backupHeader);

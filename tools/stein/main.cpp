@@ -86,8 +86,9 @@ int usage() {
                "  stein luks info    <image|device> [--part N]        header, cipher, key slots\n"
                "  stein luks unlock  <image|device> [--part N]        check a passphrase and probe the plaintext\n"
                "  stein luks extract <image|device> <out> [--part N]  decrypt the payload into a plain image\n"
-               "  stein tcrypt unlock  <image|device> [--part N] [--pim N]   VeraCrypt/TrueCrypt: find the header by trial decryption, probe the plaintext\n"
-               "  stein tcrypt extract <image|device> <out> [--part N] [--pim N]\n"
+               "  stein tcrypt unlock  <image|device> [--part N] [--pim N] [--prf sha512|sha256|blake2s|ripemd160|whirlpool|streebog]\n"
+               "                       VeraCrypt/TrueCrypt: find the header by trial decryption (any cipher or cascade), probe the plaintext\n"
+               "  stein tcrypt extract <image|device> <out> [--part N] [--pim N] [--prf NAME]\n"
                "      stein probe --passphrase P also descends into LUKS containers it can open\n"
                "  stein lvm list    <image|device> [--part N] [--doc]   volume group, PVs, LVs and how they map\n"
                "  stein lvm extract <image|device> <lv> <out> [--part N] copy a logical volume into a plain image\n"
@@ -123,6 +124,7 @@ struct Args {
     std::string start, size, end, type, name, index;
     std::string passphrase, passphraseFile, newPassphrase, kdf, lv;
     std::uint32_t pim = 0;
+    std::string prf;   // tcrypt: try only this PRF
     std::string port, format;
     bool raw = false, noMount = false;
     std::uint32_t kdfCost = 0, kdfMemoryKiB = 0;
@@ -153,6 +155,7 @@ Args parse(int argc, char** argv) {
         else if (s == "--lv" && i + 1 < argc) a.lv = argv[++i];
         else if (s == "--allow-other") a.allowOther = true;
         else if (s == "--pim" && i + 1 < argc) a.pim = static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 10));
+        else if (s == "--prf" && i + 1 < argc) a.prf = argv[++i];
         else if (s == "--port" && i + 1 < argc) a.port = argv[++i];
         else if (s == "--format" && i + 1 < argc) a.format = argv[++i];
         else if (s == "--raw") a.raw = true;
@@ -1128,6 +1131,7 @@ Expected<std::shared_ptr<BlockDevice>> resolveDevice(const Args& a, const std::s
             if (!g_passphrase.empty() && target->size() >= 256 * KiB) {
                 container::TcryptOptions to;
                 to.pim = a.pim;
+                to.prf = a.prf;
                 if (auto t = container::Tcrypt::unlock(target, g_passphrase, to)) {
                     auto payload = t->openPayload(true);
                     if (!payload) return fail(payload.error());
@@ -1366,6 +1370,7 @@ int cmdTcrypt(const Args& a) {
     const std::string pass = g_passphrase.empty() ? readPassphrase(a, "Volume passphrase: ") : g_passphrase;
     container::TcryptOptions to;
     to.pim = a.pim;
+    to.prf = a.prf;
     auto t = container::Tcrypt::unlock(*dev, pass, to);
     if (!t) return die(t.error());
     const auto& info = t->info();

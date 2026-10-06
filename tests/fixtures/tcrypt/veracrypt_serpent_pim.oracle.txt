@@ -1,0 +1,2 @@
+password stein-serp
+VERA serpent sha512 pim=1 iterations=16000 payload=262144

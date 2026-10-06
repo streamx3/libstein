@@ -247,7 +247,7 @@ Expected<std::vector<std::uint8_t>> Luks::trySlot(const Slot& slot, const std::s
     } else {
         return fail(ErrorCategory::Unsupported, "kdf " + slot.kdf);
     }
-    auto xts = crypto::AesXts::create(areaKey);
+    auto xts = crypto::Xts::create(crypto::CipherAlgorithm::Aes, areaKey);
     if (!xts) return fail(xts.error());
     const ByteCount materialBytes = ByteCount{slot.stripes} * m_info.keyBytes;
     if (slot.areaSize && materialBytes > slot.areaSize) return fail(ErrorCategory::InvalidFormat, "key material larger than its area");
@@ -287,7 +287,7 @@ Expected<std::shared_ptr<BlockDevice>> Luks::openPayload(std::span<const std::ui
     if (!m_info.supported) return fail(ErrorCategory::Unsupported, m_info.unsupportedWhy);
     if (masterKey.size() != m_info.keyBytes) return fail(ErrorCategory::InvalidArgument, "master key must be " + std::to_string(m_info.keyBytes) + " bytes");
     if (!digestMatches(masterKey)) return fail(ErrorCategory::Integrity, "master key does not match the header digest");
-    auto xts = crypto::AesXts::create(masterKey);
+    auto xts = crypto::Xts::create(crypto::CipherAlgorithm::Aes, masterKey);
     if (!xts) return fail(xts.error());
     if (m_info.payloadSize == 0 || m_info.payloadOffset + m_info.payloadSize > m_device->size()) return fail(ErrorCategory::OutOfRange, "payload outside the device");
     return std::shared_ptr<BlockDevice>(std::make_shared<detail::XtsDevice>(m_device, Region{m_info.payloadOffset, m_info.payloadSize}, m_info.sectorSize, m_info.ivTweak, std::move(*xts), readOnly, "luks"));

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
-// Decrypting/encrypting view over an AES-XTS payload (LUKS aes-xts-plain64,
-// VeraCrypt/TrueCrypt): one tweak per sector, starting at ivTweak.
+// Decrypting/encrypting view over an XTS payload (LUKS aes-xts-plain64,
+// VeraCrypt/TrueCrypt ciphers and cascades): one tweak per sector, starting at ivTweak.
 #pragma once
 
 #include "stein/block/block_device.hpp"
-#include "stein/core/aes.hpp"
+#include "stein/core/cipher.hpp"
 
 #include <cstring>
 #include <string>
@@ -14,7 +14,7 @@ namespace stein::container::detail {
 // Decrypting view over the payload: one XTS tweak per sector.
 class XtsDevice final : public BlockDevice {
 public:
-    XtsDevice(std::shared_ptr<BlockDevice> parent, Region region, std::uint32_t sectorSize, std::uint64_t ivTweak, crypto::AesXts xts, bool readOnly, std::string label)
+    XtsDevice(std::shared_ptr<BlockDevice> parent, Region region, std::uint32_t sectorSize, std::uint64_t ivTweak, crypto::Xts xts, bool readOnly, std::string label)
         : m_parent(std::move(parent)), m_region(region), m_sectorSize(sectorSize), m_ivTweak(ivTweak), m_xts(std::move(xts)), m_readOnly(readOnly), m_label(std::move(label)) {
         m_geometry = m_parent->geometry();
         m_geometry.sizeBytes = region.length;
@@ -62,7 +62,7 @@ private:
     Region m_region;
     std::uint32_t m_sectorSize;
     std::uint64_t m_ivTweak;
-    crypto::AesXts m_xts;
+    crypto::Xts m_xts;
     bool m_readOnly;
     std::string m_label;
     Geometry m_geometry;

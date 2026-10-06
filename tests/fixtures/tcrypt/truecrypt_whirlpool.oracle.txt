@@ -1,0 +1,2 @@
+password stein-whirl
+TRUE aes whirlpool pim=0 iterations=1000 payload=262144

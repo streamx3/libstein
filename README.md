@@ -96,7 +96,7 @@ to the OS (Linux: FUSE, Windows: WinFsp, macOS: built-in NFS loopback).
 |---|---|---|---|
 | LUKS1 | ✓ | ✓ PBKDF2, AF-splitter, aes-xts-plain64 | – |
 | LUKS2 | ✓ | ✓ Argon2id / PBKDF2 key slots, AES-XTS; integrity volumes refused | – |
-| VeraCrypt / TrueCrypt | ✓ by trial decryption | ✓ AES-XTS; SHA-512, SHA-256, BLAKE2s-256, RIPEMD-160 with PIM; normal, hidden and backup headers; cascades and Whirlpool/Streebog – | – |
+| VeraCrypt / TrueCrypt | ✓ by trial decryption | ✓ all ciphers and cascades (AES, Serpent, Twofish, Camellia, Kuznyechik in XTS), all PRFs (SHA-512, SHA-256, BLAKE2s-256, RIPEMD-160, Whirlpool, Streebog) with PIM; normal, hidden and backup headers; system encryption – | – |
 | BitLocker | ✓ | – | – |
 | LVM2 | ✓ PV, VG | ✓ linear and striped logical volumes, multi-segment | – |
 | mdraid 0.9 / 1.x | ✓ | – | – |

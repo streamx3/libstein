@@ -915,7 +915,16 @@ TEST_CASE("copyTree: the ext4 fixture copied out to the host matches the oracle 
     REQUIRE(probed);
     auto reader = (*probed)->openReader();
     REQUIRE(reader);
-    const auto dir = std::filesystem::temp_directory_path() / ("stein_copytree_" + std::to_string(std::random_device{}()));
+    std::filesystem::path dir = std::filesystem::temp_directory_path() / ("stein_copytree_" + std::to_string(std::random_device{}()));
+#if defined(_WIN32)
+    // 255-character names overflow MAX_PATH; read back through the same extended-length form copyTree writes.
+    dir = std::filesystem::path(L"\\\\?\\" + std::filesystem::absolute(dir).lexically_normal().make_preferred().native());
+#endif
+    auto hostPath = [&](const std::string& rel) {
+        std::filesystem::path p = dir / std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(rel.data()), rel.size()));
+        p.make_preferred();
+        return p;
+    };
     auto stats = fs::copyTree(**reader, *(*reader)->root(), dir);
     REQUIRE_MESSAGE(stats, (stats ? std::string() : stats.error().toString()));
     CHECK(stats->files > 300);
@@ -923,7 +932,7 @@ TEST_CASE("copyTree: the ext4 fixture copied out to the host matches the oracle 
     const auto o = loadExtOracle("ext4");
     for (const auto& [path, h] : o.sha) {
         CAPTURE(path);
-        std::ifstream f(dir / std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(path.data()), path.size())), std::ios::binary);
+        std::ifstream f(hostPath(path), std::ios::binary);
         REQUIRE(f);
         std::string data((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
         CHECK(Hasher::hex(Hasher::digest(HashAlgorithm::Sha256, std::span<const std::byte>(reinterpret_cast<const std::byte*>(data.data()), data.size()))) == h);
@@ -932,7 +941,7 @@ TEST_CASE("copyTree: the ext4 fixture copied out to the host matches the oracle 
     for (const auto& [path, t] : o.links) {
         CAPTURE(path);
         std::error_code ec;
-        CHECK(std::filesystem::read_symlink(dir / path, ec).generic_string() == t);
+        CHECK(std::filesystem::read_symlink(hostPath(path), ec).generic_string() == t);
     }
     CHECK(stats->symlinks == o.links.size());
 #endif

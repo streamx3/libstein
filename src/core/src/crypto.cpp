@@ -700,10 +700,11 @@ struct HmacState {
 };
 
 template <class H>
-void pbkdf2With(std::span<const std::byte> password, std::span<const std::byte> salt, std::uint32_t iterations, std::span<std::uint8_t> out) {
+void pbkdf2With(std::span<const std::byte> password, std::span<const std::byte> salt, std::uint32_t iterations, std::span<std::uint8_t> out, std::size_t offset = 0) {
     const HmacState<H> prf(password);
     const std::size_t hLen = H().digestSize();
-    std::uint32_t block = 1;
+    std::uint32_t block = static_cast<std::uint32_t>(offset / hLen) + 1;
+    std::size_t skip = offset % hLen;
     std::size_t done = 0;
     while (done < out.size()) {
         std::vector<std::byte> first(salt.begin(), salt.end());
@@ -718,8 +719,9 @@ void pbkdf2With(std::span<const std::byte> password, std::span<const std::byte> 
             u = prf.mac(std::span<const std::byte>(reinterpret_cast<const std::byte*>(u.data()), u.size()));
             for (std::size_t j = 0; j < hLen; ++j) t[j] ^= u[j];
         }
-        const std::size_t take = std::min(hLen, out.size() - done);
-        std::memcpy(out.data() + done, t.data(), take);
+        const std::size_t take = std::min(hLen - skip, out.size() - done);
+        std::memcpy(out.data() + done, t.data() + skip, take);
+        skip = 0;
         done += take;
         ++block;
     }
@@ -737,18 +739,26 @@ std::vector<std::uint8_t> hmac(HashAlgorithm hash, std::span<const std::byte> ke
     case HashAlgorithm::Md5: return HmacState<Md5>(key).mac(message);
     case HashAlgorithm::Ripemd160: return HmacState<Ripemd160>(key).mac(message);
     case HashAlgorithm::Blake2s256: return HmacState<Blake2s256>(key).mac(message);
+    case HashAlgorithm::Whirlpool: return HmacState<Whirlpool>(key).mac(message);
+    case HashAlgorithm::Streebog512: return HmacState<Streebog512>(key).mac(message);
     }
     return {};
 }
 
 void pbkdf2(HashAlgorithm hash, std::span<const std::byte> password, std::span<const std::byte> salt, std::uint32_t iterations, std::span<std::uint8_t> out) {
+    pbkdf2Range(hash, password, salt, iterations, 0, out);
+}
+
+void pbkdf2Range(HashAlgorithm hash, std::span<const std::byte> password, std::span<const std::byte> salt, std::uint32_t iterations, std::size_t offset, std::span<std::uint8_t> out) {
     switch (hash) {
-    case HashAlgorithm::Sha256: pbkdf2Sha256(password, salt, iterations, out); return;
-    case HashAlgorithm::Sha512: pbkdf2With<Sha512>(password, salt, iterations, out); return;
-    case HashAlgorithm::Sha1: pbkdf2With<Sha1>(password, salt, iterations, out); return;
-    case HashAlgorithm::Md5: pbkdf2With<Md5>(password, salt, iterations, out); return;
-    case HashAlgorithm::Ripemd160: pbkdf2With<Ripemd160>(password, salt, iterations, out); return;
-    case HashAlgorithm::Blake2s256: pbkdf2With<Blake2s256>(password, salt, iterations, out); return;
+    case HashAlgorithm::Sha256: pbkdf2With<Sha256>(password, salt, iterations, out, offset); return;
+    case HashAlgorithm::Sha512: pbkdf2With<Sha512>(password, salt, iterations, out, offset); return;
+    case HashAlgorithm::Sha1: pbkdf2With<Sha1>(password, salt, iterations, out, offset); return;
+    case HashAlgorithm::Md5: pbkdf2With<Md5>(password, salt, iterations, out, offset); return;
+    case HashAlgorithm::Ripemd160: pbkdf2With<Ripemd160>(password, salt, iterations, out, offset); return;
+    case HashAlgorithm::Blake2s256: pbkdf2With<Blake2s256>(password, salt, iterations, out, offset); return;
+    case HashAlgorithm::Whirlpool: pbkdf2With<Whirlpool>(password, salt, iterations, out, offset); return;
+    case HashAlgorithm::Streebog512: pbkdf2With<Streebog512>(password, salt, iterations, out, offset); return;
     }
 }
 

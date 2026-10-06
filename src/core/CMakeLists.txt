@@ -23,6 +23,13 @@ stein_add_module(core
     src/lzfse.cpp
     src/aes.cpp
     src/aes_hw.cpp
+    src/cipher.cpp
+    src/serpent.cpp
+    src/twofish.cpp
+    src/camellia.cpp
+    src/kuznyechik.cpp
+    src/whirlpool.cpp
+    src/streebog.cpp
     src/keys.cpp)
 
 # The hardware kernels are compiled with their ISA extension enabled; they run

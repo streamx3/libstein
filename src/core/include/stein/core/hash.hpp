@@ -14,7 +14,7 @@
 
 namespace stein {
 
-enum class HashAlgorithm : std::uint8_t { Md5, Sha1, Sha256, Sha512, Ripemd160, Blake2s256 };
+enum class HashAlgorithm : std::uint8_t { Md5, Sha1, Sha256, Sha512, Ripemd160, Blake2s256, Whirlpool, Streebog512 };
 
 std::string_view toString(HashAlgorithm a);
 
@@ -136,6 +136,41 @@ private:
     void compress(const std::uint8_t block[64], bool last);
     std::array<std::uint32_t, 8> m_h{};
     std::uint64_t m_counter = 0;
+    std::array<std::uint8_t, 64> m_buffer{};
+    std::size_t m_bufferLen = 0;
+};
+
+// Whirlpool (ISO/IEC 10118-3); a VeraCrypt and TrueCrypt PRF.
+class Whirlpool final : public Hasher {
+public:
+    Whirlpool() { reset(); }
+    HashAlgorithm algorithm() const override { return HashAlgorithm::Whirlpool; }
+    std::size_t digestSize() const override { return 64; }
+    void update(std::span<const std::byte> data) override;
+    std::vector<std::uint8_t> finish() override;
+    void reset() override;
+
+private:
+    void transform(const std::uint8_t block[64]);
+    std::array<std::uint64_t, 8> m_state{};
+    std::uint64_t m_bits = 0;
+    std::array<std::uint8_t, 64> m_buffer{};
+    std::size_t m_bufferLen = 0;
+};
+
+// Streebog-512 (GOST R 34.11-2012, RFC 6986); the VeraCrypt PRF for GOST volumes.
+class Streebog512 final : public Hasher {
+public:
+    Streebog512() { reset(); }
+    HashAlgorithm algorithm() const override { return HashAlgorithm::Streebog512; }
+    std::size_t digestSize() const override { return 64; }
+    void update(std::span<const std::byte> data) override;
+    std::vector<std::uint8_t> finish() override;
+    void reset() override;
+
+private:
+    void transform(const std::uint8_t block[64]);
+    std::array<std::uint64_t, 8> m_h{}, m_n{}, m_sigma{};
     std::array<std::uint8_t, 64> m_buffer{};
     std::size_t m_bufferLen = 0;
 };

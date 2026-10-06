@@ -19,6 +19,8 @@ std::string_view toString(HashAlgorithm a) {
     case HashAlgorithm::Sha512: return "sha512";
     case HashAlgorithm::Ripemd160: return "ripemd160";
     case HashAlgorithm::Blake2s256: return "blake2s256";
+    case HashAlgorithm::Whirlpool: return "whirlpool";
+    case HashAlgorithm::Streebog512: return "streebog512";
     }
     return "?";
 }
@@ -31,6 +33,8 @@ std::unique_ptr<Hasher> Hasher::create(HashAlgorithm a) {
     case HashAlgorithm::Sha512: return std::make_unique<Sha512>();
     case HashAlgorithm::Ripemd160: return std::make_unique<Ripemd160>();
     case HashAlgorithm::Blake2s256: return std::make_unique<Blake2s256>();
+    case HashAlgorithm::Whirlpool: return std::make_unique<Whirlpool>();
+    case HashAlgorithm::Streebog512: return std::make_unique<Streebog512>();
     }
     return nullptr;
 }

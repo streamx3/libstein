@@ -523,3 +523,122 @@ TEST_CASE("lzfse: Apple encoder vectors (raw, lzvn and FSE v2 blocks, multi-bloc
         CHECK_FALSE(t);   // the end block is gone
     }
 }
+
+#include "cipher_vectors.hpp"
+#include "stein/core/cipher.hpp"
+
+static std::vector<std::uint8_t> u8Bytes(const char* hex) {
+    auto b = hexBytes(hex);
+    std::vector<std::uint8_t> out(b.size());
+    for (std::size_t i = 0; i < b.size(); ++i) out[i] = std::to_integer<std::uint8_t>(b[i]);
+    return out;
+}
+
+TEST_CASE("serpent, twofish, camellia-256, kuznyechik: Botan/GOST block and XTS vectors, round trips") {
+    for (const auto& v : test::vectors::cipher::kBlocks) {
+        const std::string cipherName = v.cipher, keyHex = v.key;
+        CAPTURE(cipherName);
+        CAPTURE(keyHex);
+        auto alg = crypto::cipherFromString(v.cipher);
+        REQUIRE(alg);
+        auto c = crypto::BlockCipher::create(*alg, u8Bytes(v.key));
+        REQUIRE_MESSAGE(c, (c ? std::string() : c.error().toString()));
+        const auto pt = u8Bytes(v.plain);
+        std::uint8_t out[16], back[16];
+        (*c)->encryptBlock(pt.data(), out);
+        CHECK(Hasher::hex(out) == v.cipherText);
+        (*c)->decryptBlock(out, back);
+        CHECK(std::memcmp(back, pt.data(), 16) == 0);
+    }
+    for (const auto& v : test::vectors::cipher::kXts) {
+        const std::string cipherName = v.cipher;
+        CAPTURE(cipherName);
+        CAPTURE(v.sector);
+        auto alg = crypto::cipherFromString(v.cipher);
+        REQUIRE(alg);
+        auto xts = crypto::Xts::create(*alg, u8Bytes(v.key));
+        REQUIRE_MESSAGE(xts, (xts ? std::string() : xts.error().toString()));
+        const auto pt = hexBytes(v.plain);
+        std::vector<std::byte> ct(pt.size()), back(pt.size());
+        REQUIRE(xts->encrypt(v.sector, pt, ct));
+        CHECK(hexOf(ct) == v.cipherText);
+        REQUIRE(xts->decrypt(v.sector, ct, back));
+        CHECK(back == pt);
+    }
+    // Bad keys.
+    std::vector<std::uint8_t> k32(32, 1), k64(64, 2);
+    CHECK_FALSE(crypto::BlockCipher::create(crypto::CipherAlgorithm::Camellia, std::span<const std::uint8_t>(k32).first(16)));
+    CHECK_FALSE(crypto::BlockCipher::create(crypto::CipherAlgorithm::Kuznyechik, std::span<const std::uint8_t>(k32).first(24)));
+    CHECK_FALSE(crypto::Xts::create(crypto::CipherAlgorithm::Serpent, k32));   // Serpent-XTS needs two 256-bit keys
+    CHECK_FALSE(crypto::Xts::create(crypto::CipherAlgorithm::Serpent, k64));   // identical halves
+}
+
+TEST_CASE("xts cascades compose layer by layer in VeraCrypt order; pbkdf2Range matches the full derivation") {
+    std::vector<std::uint8_t> key(192);
+    for (std::size_t i = 0; i < key.size(); ++i) key[i] = static_cast<std::uint8_t>(i * 7 + 3);
+    const crypto::CipherAlgorithm order[3] = {crypto::CipherAlgorithm::Aes, crypto::CipherAlgorithm::Twofish, crypto::CipherAlgorithm::Serpent};
+    auto cascade = crypto::Xts::create(order, key);
+    REQUIRE(cascade);
+    CHECK(cascade->layers() == 3);
+    // Primary keys are the first 96 bytes in table order, tweak keys the next 96.
+    auto layer = [&](int i) {
+        std::vector<std::uint8_t> k(key.begin() + 32 * i, key.begin() + 32 * i + 32);
+        k.insert(k.end(), key.begin() + 96 + 32 * i, key.begin() + 96 + 32 * i + 32);
+        auto x = crypto::Xts::create(order[i], k);
+        REQUIRE(x);
+        return std::move(*x);
+    };
+    const auto aes = layer(0), twofish = layer(1), serpent = layer(2);
+    std::vector<std::byte> plain(1024), a(1024), b(1024), c(1024), all(1024), back(1024);
+    for (std::size_t i = 0; i < plain.size(); ++i) plain[i] = std::byte(i * 13 + 1);
+    // "AES-Twofish-Serpent" encrypts with Serpent, then Twofish, then AES.
+    REQUIRE(serpent.encryptSectors(77, 512, plain, a));
+    REQUIRE(twofish.encryptSectors(77, 512, a, b));
+    REQUIRE(aes.encryptSectors(77, 512, b, c));
+    REQUIRE(cascade->encryptSectors(77, 512, plain, all));
+    CHECK(all == c);
+    REQUIRE(cascade->decryptSectors(77, 512, all, back));
+    CHECK(back == plain);
+    CHECK(crypto::Xts::keySize(order) == 192);
+    CHECK_FALSE(crypto::Xts::create(order, std::span<const std::uint8_t>(key).first(128)));
+
+    auto bytes = [](std::string_view s) { return std::span<const std::byte>(reinterpret_cast<const std::byte*>(s.data()), s.size()); };
+    for (HashAlgorithm h : {HashAlgorithm::Sha512, HashAlgorithm::Sha256, HashAlgorithm::Whirlpool, HashAlgorithm::Ripemd160}) {
+        std::vector<std::uint8_t> full(192), part(192 - 50);
+        crypto::pbkdf2(h, bytes("pw"), bytes("salt"), 37, full);
+        crypto::pbkdf2Range(h, bytes("pw"), bytes("salt"), 37, 50, part);
+        CHECK(std::equal(part.begin(), part.end(), full.begin() + 50));
+        std::vector<std::uint8_t> head(64);
+        crypto::pbkdf2Range(h, bytes("pw"), bytes("salt"), 37, 0, head);
+        CHECK(std::equal(head.begin(), head.end(), full.begin()));
+    }
+}
+
+TEST_CASE("whirlpool and streebog-512: digests, HMAC and PBKDF2 agree with Botan") {
+    auto alg = [](const std::string& n) { return n == "whirlpool" ? HashAlgorithm::Whirlpool : n == "streebog512" ? HashAlgorithm::Streebog512 : HashAlgorithm::Sha512; };
+    auto bytes = [](std::string_view s) { return std::span<const std::byte>(reinterpret_cast<const std::byte*>(s.data()), s.size()); };
+    for (const auto& v : test::vectors::cipher::kHashes) {
+        CAPTURE(v.algorithm);
+        CAPTURE(v.messageHex);
+        const auto m = hexBytes(v.messageHex);
+        CHECK(Hasher::hex(Hasher::digest(alg(v.algorithm), m)) == v.digest);
+        auto h = Hasher::create(alg(v.algorithm));
+        for (std::size_t i = 0; i < m.size(); i += 7) h->update(std::span<const std::byte>(m).subspan(i, std::min<std::size_t>(7, m.size() - i)));
+        CHECK(Hasher::hex(h->finish()) == v.digest);
+        h->reset();
+        h->update(m);
+        CHECK(Hasher::hex(h->finish()) == v.digest);
+        CHECK(h->blockSize() == 64);
+    }
+    for (const auto& v : test::vectors::cipher::kHmacJefe) CHECK(Hasher::hex(crypto::hmac(alg(v.algorithm), bytes("Jefe"), bytes("what do ya want for nothing?"))) == v.hex);
+    const std::string longKey(131, '\xaa');
+    for (const auto& v : test::vectors::cipher::kHmacLongKey) CHECK(Hasher::hex(crypto::hmac(alg(v.algorithm), bytes(longKey), bytes("Test Using Larger Than Block-Size Key - Hash Key First"))) == v.hex);
+    for (const auto& v : test::vectors::cipher::kPbkdf2) {
+        CAPTURE(v.algorithm);
+        std::vector<std::uint8_t> dk(192);
+        crypto::pbkdf2(alg(v.algorithm), bytes("password"), bytes("salt"), 2000, dk);
+        CHECK(Hasher::hex(dk) == v.hex);
+    }
+    CHECK(toString(HashAlgorithm::Whirlpool) == "whirlpool");
+    CHECK(toString(HashAlgorithm::Streebog512) == "streebog512");
+}

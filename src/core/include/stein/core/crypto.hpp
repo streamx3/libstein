@@ -35,6 +35,9 @@ void pbkdf2Sha256(std::span<const std::byte> password, std::span<const std::byte
 // Generic HMAC / PBKDF2 over any Hasher (SHA-1, SHA-512, ...); SHA-256 takes the fast path above.
 std::vector<std::uint8_t> hmac(HashAlgorithm hash, std::span<const std::byte> key, std::span<const std::byte> message);
 void pbkdf2(HashAlgorithm hash, std::span<const std::byte> password, std::span<const std::byte> salt, std::uint32_t iterations, std::span<std::uint8_t> out);
+// Bytes [offset, offset + out.size()) of the PBKDF2 output: PBKDF2 blocks are independent, so a
+// caller can derive a key's first part, test it, and derive the rest only when needed.
+void pbkdf2Range(HashAlgorithm hash, std::span<const std::byte> password, std::span<const std::byte> salt, std::uint32_t iterations, std::size_t offset, std::span<std::uint8_t> out);
 
 // BLAKE2b (RFC 7693): 1..64 byte digest, optional key up to 64 bytes.
 void blake2b(std::span<std::uint8_t> out, std::span<const std::byte> message, std::span<const std::byte> key = {});
