@@ -29,6 +29,9 @@ void skipOrFail(const std::string& why) {
 } // namespace
 
 TEST_CASE("mount: an ext4 fixture mounted through FUSE reads like the kernel mount did") {
+#if defined(__APPLE__)
+    ::setenv("STEIN_NFS_DEBUG", "1", 0);   // the request trace shows in the log when mount_nfs fails
+#endif
     if (!mount::Mount::available()) {
         skipOrFail("no usable FUSE/WinFsp on this machine; skipping");
         return;

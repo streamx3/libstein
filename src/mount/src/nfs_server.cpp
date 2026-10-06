@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -140,7 +142,8 @@ std::uint32_t nfsError(const Error& e) {
 
 struct NfsServer::Impl {
     std::unique_ptr<fs::Reader> reader;
-    SocketT listenSock = kBadSocket;
+    SocketT listenSock = kBadSocket, udpSock = kBadSocket;
+    bool debug = std::getenv("STEIN_NFS_DEBUG") != nullptr;
     std::uint16_t port = 0;
     std::thread acceptThread;
     std::vector<std::thread> clients;
@@ -487,6 +490,7 @@ struct NfsServer::Impl {
             std::lock_guard<std::mutex> lock(mutex);
             known = prog == kProgMount ? handleMount(proc, r, res) : handleNfs(proc, r, res);
         }
+        if (debug) std::fprintf(stderr, "nfs: %s proc %u -> %s status %u (%zu bytes)\n", prog == kProgMount ? "mount" : "nfs", proc, known ? "ok" : "unavailable", res.buf.size() >= 4 ? loadBe32(res.buf.data()) : 0u, res.buf.size());
         if (!known) {
             w.u32(3);   // PROC_UNAVAIL
             return std::move(w.buf);
@@ -537,9 +541,21 @@ struct NfsServer::Impl {
         }
     }
 
+    // Datagram RPC (no record marking) for clients whose MOUNT protocol defaults to UDP.
+    void serveDatagram() {
+        std::byte buf[65536];
+        sockaddr_in peer{};
+        socklen_t plen = sizeof peer;
+        const auto n = ::recvfrom(udpSock, reinterpret_cast<char*>(buf), sizeof buf, 0, reinterpret_cast<sockaddr*>(&peer), &plen);
+        if (n <= 0) return;
+        auto reply = dispatch(std::span<const std::byte>(buf, static_cast<std::size_t>(n)));
+        if (!reply.empty()) ::sendto(udpSock, reinterpret_cast<const char*>(reply.data()), static_cast<int>(reply.size()), 0, reinterpret_cast<sockaddr*>(&peer), plen);
+    }
+
     void acceptLoop() {
         while (!stopping.load()) {
-            const int pr = pollOne(listenSock, 200);
+            if (udpSock != kBadSocket && pollOne(udpSock, 0) > 0) serveDatagram();
+            const int pr = pollOne(listenSock, 100);
             if (pr <= 0) continue;
             sockaddr_in peer{};
             socklen_t len = sizeof peer;
@@ -594,6 +610,15 @@ Expected<std::unique_ptr<NfsServer>> NfsServer::start(std::unique_ptr<fs::Reader
     socklen_t blen = sizeof bound;
     ::getsockname(im.listenSock, reinterpret_cast<sockaddr*>(&bound), &blen);
     im.port = ntohs(bound.sin_port);
+    // The same port over UDP, for MOUNT/NFS clients that default to datagrams.
+    im.udpSock = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (im.udpSock != kBadSocket) {
+        ::setsockopt(im.udpSock, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&one), sizeof one);
+        if (::bind(im.udpSock, reinterpret_cast<sockaddr*>(&bound), sizeof bound) != 0) {
+            closeSocket(im.udpSock);
+            im.udpSock = kBadSocket;
+        }
+    }
     im.acceptThread = std::thread([&im] { im.acceptLoop(); });
     return s;
 }
@@ -607,6 +632,10 @@ void NfsServer::stop() {
     if (m_impl->listenSock != kBadSocket) {
         closeSocket(m_impl->listenSock);
         m_impl->listenSock = kBadSocket;
+    }
+    if (m_impl->udpSock != kBadSocket) {
+        closeSocket(m_impl->udpSock);
+        m_impl->udpSock = kBadSocket;
     }
     std::vector<std::thread> clients;
     {
