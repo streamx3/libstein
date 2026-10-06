@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <random>
 #include <map>
 
 using namespace stein;
@@ -906,6 +907,44 @@ TEST_CASE("erofs reader: mkfs.erofs fixtures (plain, chunk-based, lz4 compact/le
         CHECK(*n == 5000);
         CHECK(std::equal(part.begin(), part.end(), whole->begin() + 65536 - 2500));
     }
+}
+
+TEST_CASE("copyTree: the ext4 fixture copied out to the host matches the oracle (files, directories, symlinks)") {
+    auto dev = loadSparseFixture("extfs/ext4.sparse");
+    auto probed = fs::probe(dev);
+    REQUIRE(probed);
+    auto reader = (*probed)->openReader();
+    REQUIRE(reader);
+    const auto dir = std::filesystem::temp_directory_path() / ("stein_copytree_" + std::to_string(std::random_device{}()));
+    auto stats = fs::copyTree(**reader, *(*reader)->root(), dir);
+    REQUIRE_MESSAGE(stats, (stats ? std::string() : stats.error().toString()));
+    CHECK(stats->files > 300);
+    CHECK(stats->directories >= 5);
+    const auto o = loadExtOracle("ext4");
+    for (const auto& [path, h] : o.sha) {
+        CAPTURE(path);
+        std::ifstream f(dir / std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(path.data()), path.size())), std::ios::binary);
+        REQUIRE(f);
+        std::string data((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        CHECK(Hasher::hex(Hasher::digest(HashAlgorithm::Sha256, std::span<const std::byte>(reinterpret_cast<const std::byte*>(data.data()), data.size()))) == h);
+    }
+#if !defined(_WIN32)
+    for (const auto& [path, t] : o.links) {
+        CAPTURE(path);
+        std::error_code ec;
+        CHECK(std::filesystem::read_symlink(dir / path, ec).generic_string() == t);
+    }
+    CHECK(stats->symlinks == o.links.size());
+#endif
+    // A single file to a path, and a directory subtree.
+    auto one = fs::resolvePath(**reader, "hello.txt");
+    REQUIRE(one);
+    auto s1 = fs::copyTree(**reader, *one, dir / "copy_of_hello.txt");
+    REQUIRE(s1);
+    CHECK(s1->files == 1);
+    CHECK(std::filesystem::file_size(dir / "copy_of_hello.txt") == (*reader)->stat(*one)->size);
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
 }
 
 TEST_CASE("udf reader: genisoimage UDF 1.02 (bridge and UDF-only) read back exactly; mkudffs 2.50 metadata partition opens") {

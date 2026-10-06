@@ -29,3 +29,10 @@ else()
       $<$<CONFIG:Debug>:-fsanitize=address,undefined>)
   endif()
 endif()
+
+# The library version, for format writers that record what produced a file.
+target_compile_definitions(stein_compiler_flags INTERFACE
+  STEIN_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+  STEIN_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+  STEIN_VERSION_PATCH=${PROJECT_VERSION_PATCH}
+  STEIN_VERSION_STRING="${PROJECT_VERSION}")

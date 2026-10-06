@@ -39,11 +39,14 @@ ctest --preset debug
 ./build/debug/tools/stein/stein image create /dev/sdb backup.stein --compress lz4 --used-only --passphrase ...   # encrypted, free space skipped
 ./build/debug/tools/stein/stein probe backup.stein        # an image is a disk; so is vm.qcow2 / .vhdx / .vmdk / .vdi / .vhd / evidence.E01 / mac.dmg
 ./build/debug/tools/stein/stein image restore backup.stein /dev/sdc
+./build/debug/tools/stein/stein image create /dev/sdb disk.img && ./build/debug/tools/stein/stein image restore vm.qcow2 /dev/sdc   # raw (dd / GNOME Disks) in and out
+./build/debug/tools/stein/stein image info backup.stein        # format 1.1, writer version, feature bits, completeness
 ./build/debug/tools/stein/stein app init office.json /dev/sdb /backups/office.stein   # dr_stein-style profile
 ./build/debug/tools/stein/stein app status office.json && ./build/debug/tools/stein/stein app restore office.json
 ./build/debug/tools/stein/stein media test /dev/sdX --force    # fake-flash capacity test (destructive); `media scan` is read-only
 ./build/debug/tools/stein/stein ls backup.stein --part 2 /home              # browse ext4/NTFS/FAT/exFAT/HFS+/APFS/ISO/UDF/XFS/btrfs/squashfs/erofs inside an image, partition,
 ./build/debug/tools/stein/stein cp disk.img --passphrase ... --lv root /etc/fstab fstab   # LUKS container or LVM volume
+./build/debug/tools/stein/stein cp backup.stein --part 2 /home/alice ./alice   # whole directory trees copied out, no mount
 ./build/debug/tools/stein/stein luks info /dev/sdb2 && ./build/debug/tools/stein/stein lvm list /dev/sdb3
 ./build/debug/tools/stein/stein tcrypt unlock vault.hc --passphrase ... --pim 0   # VeraCrypt/TrueCrypt: header found by trial decryption
 ./build/debug/tools/stein/stein mount backup.stein /mnt/old --part 2     # Linux: FUSE mount of a partition inside an image
@@ -103,7 +106,7 @@ to the OS (Linux: FUSE, Windows: WinFsp, macOS: built-in NFS loopback).
 | Format | Open (probe, read, mount as a disk) | Create |
 |---|---|---|
 | raw, split raw | ✓ | ✓ |
-| `.stein` (own format) | ✓ LZ4, split segments, used-block-only, ChaCha20-Poly1305 encryption with Argon2id key slots, verification | ✓ |
+| `.stein` (own format) | ✓ LZ4, split segments, used-block-only, ChaCha20-Poly1305 encryption with Argon2id key slots, verification; versioned (major/minor + feature masks, see `doc/spec/stein-image-v1.md`) | ✓ |
 | E01 / EWF (EnCase 5/6) | ✓ segments, deflate chunks, stored MD5/SHA-1 | – |
 | VHD (fixed, dynamic) | ✓ | – |
 | VHDX (dynamic) | ✓ log must be clean | – |

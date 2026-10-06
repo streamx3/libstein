@@ -5,6 +5,8 @@
 #include "stein/core/hash.hpp"
 #include "stein/fs/filesystem.hpp"
 #include "stein/image/operations.hpp"
+
+#include <array>
 #include "stein/image/stein_format.hpp"
 #include "stein/probe/topology.hpp"
 
@@ -137,6 +139,55 @@ TEST_CASE("stein image: create, info, open as device, probe through it, verify, 
     CHECK(*small.read(0, 512) == *src->read(0, 512));
     if (dev) dev->reset();
     stein::test::removeTree(dir);
+}
+
+TEST_CASE("stein header: versioning and feature masks (minor versions and compat bits open, incompat bits and a new major refuse)") {
+    using image::SegmentHeader;
+    SegmentHeader h;
+    h.chunkSize = 1 * MiB;
+    h.totalSize = 8 * MiB;
+    std::array<std::byte, SegmentHeader::kSize> raw{};
+    h.encode(raw);
+    auto back = SegmentHeader::decode(raw);
+    REQUIRE(back);
+    CHECK(back->version == SegmentHeader::kVersionMajor);
+    CHECK(back->versionMinor == SegmentHeader::kVersionMinor);
+    CHECK(back->writerVersion == image::currentWriterVersion());
+    CHECK(back->writerVersionText() == STEIN_VERSION_STRING);
+    CHECK_FALSE(back->unknownRoCompat());
+    // A file from a 1.0 writer: reserved bytes are zero.
+    std::fill(raw.begin() + 96, raw.end(), std::byte{0});
+    auto old = SegmentHeader::decode(raw);
+    REQUIRE(old);
+    CHECK(old->versionMinor == 0);
+    CHECK(old->writerVersionText().empty());
+    // A newer minor version with unknown compat and ro_compat bits still opens.
+    h.versionMinor = 9;
+    h.featuresCompat = 0x80000000u;
+    h.featuresRoCompat = 0x4;
+    h.encode(raw);
+    auto newer = SegmentHeader::decode(raw);
+    REQUIRE(newer);
+    CHECK(newer->versionMinor == 9);
+    CHECK(newer->unknownRoCompat());
+    // An unknown incompat bit refuses the file and names the bit and the writer.
+    h.featuresRoCompat = 0;
+    h.featuresIncompat = 0x10;
+    h.writerVersion = (2u << 16) | (3u << 8) | 4u;
+    h.encode(raw);
+    auto refused = SegmentHeader::decode(raw);
+    REQUIRE_FALSE(refused);
+    CHECK(refused.error().category() == ErrorCategory::Unsupported);
+    CHECK(std::string(refused.error().message()).find("bit(s) 4") != std::string::npos);
+    CHECK(std::string(refused.error().message()).find("2.3.4") != std::string::npos);
+    // A new major version refuses with the format numbers in the message.
+    h.featuresIncompat = 0;
+    h.version = 2;
+    h.encode(raw);
+    auto major = SegmentHeader::decode(raw);
+    REQUIRE_FALSE(major);
+    CHECK(major.error().category() == ErrorCategory::Unsupported);
+    CHECK(std::string(major.error().message()).find("format 2.x") != std::string::npos);
 }
 
 TEST_CASE("stein image: split segments, uncompressed, corruption detection, recovery without trailer") {

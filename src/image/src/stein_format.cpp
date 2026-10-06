@@ -108,14 +108,40 @@ void SegmentHeader::encode(std::span<std::byte, kSize> o) const {
     storeLe64(o.data() + 72, splitSize);
     storeLe64(o.data() + 80, keysOffset);
     storeLe64(o.data() + 88, keysLength);
+    storeLe16(o.data() + 96, versionMinor);
+    storeLe32(o.data() + 100, featuresCompat);
+    storeLe32(o.data() + 104, featuresIncompat);
+    storeLe32(o.data() + 108, featuresRoCompat);
+    storeLe32(o.data() + 112, writerVersion ? writerVersion : currentWriterVersion());
+}
+
+std::uint32_t currentWriterVersion() { return (std::uint32_t{STEIN_VERSION_MAJOR} << 16) | (std::uint32_t{STEIN_VERSION_MINOR} << 8) | std::uint32_t{STEIN_VERSION_PATCH}; }
+
+std::string SegmentHeader::writerVersionText() const {
+    if (!writerVersion) return {};
+    return std::to_string(writerVersion >> 16) + "." + std::to_string((writerVersion >> 8) & 0xFF) + "." + std::to_string(writerVersion & 0xFF);
 }
 
 Expected<SegmentHeader> SegmentHeader::decode(std::span<const std::byte> i) {
     if (i.size() < kSize || std::memcmp(i.data(), kMagic, 8) != 0) return fail(ErrorCategory::InvalidFormat, "not a stein image (bad magic)");
     SegmentHeader h;
     h.version = loadLe16(i.data() + 8);
-    if (h.version != 1) return fail(ErrorCategory::Unsupported, "stein image version " + std::to_string(h.version) + " is not supported");
+    if (h.version != kVersionMajor)
+        return fail(ErrorCategory::Unsupported, "stein image format " + std::to_string(h.version) + ".x cannot be read by this version of libstein (" STEIN_VERSION_STRING ", format " +
+                                                    std::to_string(kVersionMajor) + "." + std::to_string(kVersionMinor) + "); a newer release is needed");
     if (loadLe16(i.data() + 10) != kSize) return fail(ErrorCategory::InvalidFormat, "unexpected header size");
+    h.versionMinor = loadLe16(i.data() + 96);
+    h.featuresCompat = loadLe32(i.data() + 100);
+    h.featuresIncompat = loadLe32(i.data() + 104);
+    h.featuresRoCompat = loadLe32(i.data() + 108);
+    h.writerVersion = loadLe32(i.data() + 112);
+    if (const std::uint32_t unknown = h.featuresIncompat & ~kKnownIncompat; unknown) {
+        std::string bits;
+        for (int b = 0; b < 32; ++b)
+            if (unknown & (1u << b)) bits += (bits.empty() ? "" : ",") + std::to_string(b);
+        return fail(ErrorCategory::Unsupported, "stein image uses incompatible feature bit(s) " + bits + " that this libstein (" STEIN_VERSION_STRING ") does not know" +
+                                                    (h.writerVersion ? "; it was written by libstein " + h.writerVersionText() : std::string()));
+    }
     h.flags = loadLe32(i.data() + 12);
     h.imageUuid = Uuid::fromRfcBytes(std::span<const std::byte, 16>(i.data() + 16, 16));
     h.segmentIndex = loadLe32(i.data() + 32);
@@ -245,7 +271,8 @@ Expected<void> SteinWriter::openSegment(std::uint32_t index) {
         json::Value m = m_options.manifest;
         m.set("format", "stein-image");
         m.set("version", 1);
-        m.set("tool", "libstein 0.1.0");
+        m.set("version_minor", static_cast<std::int64_t>(SegmentHeader::kVersionMinor));
+        m.set("tool", "libstein " STEIN_VERSION_STRING);
         {
             const auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
             char buf[32];

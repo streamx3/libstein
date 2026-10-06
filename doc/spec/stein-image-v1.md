@@ -1,4 +1,4 @@
-# `.stein` image format, version 1
+# `.stein` image format, version 1 (1.1)
 
 Status: implemented in `stein_image` (M1). Little-endian throughout. All
 multi-byte integers are unsigned unless stated. Offsets are absolute within
@@ -31,7 +31,44 @@ matched and ordered by `segment_index`.
 | 56 | 8 | `manifest_offset` | segment 0: byte offset of the manifest (128); else 0 |
 | 64 | 8 | `manifest_length` | bytes of UTF-8 JSON |
 | 72 | 8 | `split_size` | maximum bytes per segment; 0 = unlimited |
-| 80 | 48 | reserved | 0 |
+| 80 | 8 | `keys_offset` | encrypted images: key area offset (segment 0), see §Encryption |
+| 88 | 8 | `keys_length` | encrypted images: key area length |
+| 96 | 2 | `version_minor` | 1 (see §Versioning); 0 in files from format 1.0 writers |
+| 98 | 2 | reserved | 0 |
+| 100 | 4 | `features_compat` | feature bits a reader may ignore |
+| 104 | 4 | `features_incompat` | feature bits a reader must understand or refuse the file |
+| 108 | 4 | `features_ro_compat` | feature bits a reader may ignore when it does not write |
+| 112 | 4 | `writer_version` | libstein that wrote the segment: `(major << 16) \| (minor << 8) \| patch`; 0 = unknown (format 1.0 writers) |
+| 116 | 12 | reserved | 0 |
+
+## Versioning and compatibility
+
+The format changes in three ways, each with its own signal, so that any
+reader can tell a file it understands from one it does not and say so
+precisely:
+
+- **`version` (major)** changes only when the layout changes so that an old
+  reader could misread the file. Readers refuse any major they do not know
+  with a message naming the file's version and their own.
+- **`version_minor`** counts compatible additions (new header fields taken
+  from the reserved area, new manifest keys, new optional records). A reader
+  that knows minor *n* reads files with any minor; fields it does not know
+  are zero-filled in older files and ignored in newer ones. Format 1.0
+  writers (libstein before the field existed) leave the field 0, which
+  readers treat as 1.0.
+- **Feature bits** follow the ext4 model. `features_incompat`: the reader
+  must know every set bit or refuse the file (the error lists the unknown
+  bits and the writer version). `features_ro_compat`: unknown bits are fine
+  for reading, and a writer that does not know them must not modify the
+  file. `features_compat`: unknown bits are ignored. No bits are assigned
+  yet; the first use of each mask will be documented here with the minor
+  version that introduced it.
+- **`writer_version`** records which libstein produced the segment, for
+  diagnostics and for support ("this image came from 0.3.1").
+
+The manifest repeats `"version": 1` and adds `"version_minor"` and `"tool"`
+so the same information is readable without decoding the binary header.
+Minor and feature changes never move or reinterpret existing fields.
 
 ## Manifest (segment 0, right after the header)
 
@@ -39,7 +76,7 @@ UTF-8 JSON object:
 
 ```json
 {
-  "format": "stein-image", "version": 1,
+  "format": "stein-image", "version": 1, "version_minor": 1,
   "created": "2026-10-06T01:20:00Z", "tool": "libstein 0.1.0",
   "source": { "name": "/dev/sdb", "identity": "wwn:...", "size": 16777216,
               "sector_size": 512, "physical_sector_size": 4096, "model": "...", "serial": "..." },

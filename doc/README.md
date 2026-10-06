@@ -25,6 +25,7 @@ Reading order:
 | [`design/16-platform.md`](design/16-platform.md) | Platform layer interfaces, per-OS API mapping, privilege model |
 | [`design/17-capability-matrix.md`](design/17-capability-matrix.md) | What is planned at which level in which milestone |
 | [`design/18-structure-layouts.md`](design/18-structure-layouts.md) | Format manifests, generated layout classes, the hexinator-style `LayoutTree` |
+| [`design/19-gui-brief.md`](design/19-gui-brief.md) | What the library can do today, as objects, operations and screens, for designing the GUI |
 | [`spec/stein-image-v1.md`](spec/stein-image-v1.md) | The `.stein` image container: segments, chunks, index, trailer, encryption |
 | [`20-roadmap.md`](20-roadmap.md) | Milestones M0–M4, status, risks |
 | [`reports/`](reports/) | Dated progress reports (`2026-10-05` design, `2026-10-06` M1 status) |

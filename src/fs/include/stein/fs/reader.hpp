@@ -5,8 +5,10 @@
 #pragma once
 
 #include "stein/core/error.hpp"
+#include "stein/core/progress.hpp"
 
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <span>
 #include <string>
@@ -55,6 +57,25 @@ public:
 // Walk `path` ("/a/b/c" or "a/b/c") from the root, following symlinks inside the filesystem when asked.
 Expected<Inode> resolvePath(Reader& reader, std::string_view path, bool followSymlinks = true);
 // Read a whole file (bounded by maxBytes).
+struct CopyTreeOptions {
+    bool followSymlinks = false;     // false: recreate symlinks (where the host allows), true: copy their targets
+    bool preserveTimes = true;       // set the destination's modification time from the source
+    bool overwrite = true;           // replace existing destination files
+    std::uint64_t maxFileBytes = ~std::uint64_t{0};
+};
+
+struct CopyTreeStats {
+    std::uint64_t files = 0, directories = 0, symlinks = 0, bytes = 0, skipped = 0;
+    std::vector<std::string> warnings;   // per entry that could not be copied, with the reason
+};
+
+// Copy a file or a whole directory tree out of the reader into `destination` on the host
+// filesystem (the directory itself is created at `destination`; a file is written to that path).
+// The building block for "drag out of the image": a viewer hands over an inode and a drop target.
+// Progress counts bytes; `cancel` aborts between entries. Problems with single entries are
+// recorded as warnings, errors that stop the copy are returned.
+Expected<CopyTreeStats> copyTree(Reader& reader, const Inode& source, const std::filesystem::path& destination, const CopyTreeOptions& options = {}, Progress* progress = nullptr);
+
 Expected<std::vector<std::byte>> readAll(Reader& reader, const Inode& file, std::uint64_t maxBytes = 1ull << 31);
 
 } // namespace stein::fs

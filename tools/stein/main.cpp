@@ -68,7 +68,8 @@ int usage() {
                "  stein pt wipe    <image> [<index>]       zero filesystem/table signatures (whole device or one partition)\n"
                "      every edit prints the pending operations and the resulting layout; --dry-run stops there;\n"
                "      --force is required for destructive edits on a real block device\n"
-               "  stein image create  <device|file> <out.stein> [--compress lz4|none] [--chunk 4M] [--split 2G] [--used-only]\n"
+               "  stein image create  <device|file> <out.stein|out.img> [--format stein|raw] [--compress lz4|none] [--chunk 4M] [--split 2G] [--used-only]\n"
+               "      a .img/.raw/.dd name (or --format raw) writes a plain dd-style image; restore accepts both\n"
                "  stein image restore <in.stein> <device|file> [--no-verify] [--force]\n"
                "  stein image verify  <in.stein> [--level 1|2|3]\n"
                "  stein image info    <in.stein|vm.qcow2|.vhd|.vhdx|.vmdk|.vdi|.E01|.dmg>\n"
@@ -122,7 +123,7 @@ struct Args {
     std::string start, size, end, type, name, index;
     std::string passphrase, passphraseFile, newPassphrase, kdf, lv;
     std::uint32_t pim = 0;
-    std::string port;
+    std::string port, format;
     bool raw = false, noMount = false;
     std::uint32_t kdfCost = 0, kdfMemoryKiB = 0;
     std::uint32_t quick = 0;
@@ -153,6 +154,7 @@ Args parse(int argc, char** argv) {
         else if (s == "--allow-other") a.allowOther = true;
         else if (s == "--pim" && i + 1 < argc) a.pim = static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 10));
         else if (s == "--port" && i + 1 < argc) a.port = argv[++i];
+        else if (s == "--format" && i + 1 < argc) a.format = argv[++i];
         else if (s == "--raw") a.raw = true;
         else if (s == "--no-mount") a.noMount = true;
         else if (s == "--no-wipe") a.noWipe = true;
@@ -291,6 +293,23 @@ int cmdImage(const Args& a) {
         if (a.positional.size() < 4) return usage();
         auto dev = openImage(a.positional[2], false, a.sectorSize);
         if (!dev) return die(dev.error());
+        {
+            // Plain raw image (what dd and GNOME Disks produce): --format raw, or a .img/.raw/.dd name.
+            const std::string ext = std::filesystem::path(a.positional[3]).extension().string();
+            const bool raw = a.format == "raw" || (a.format.empty() && (ext == ".img" || ext == ".raw" || ext == ".dd"));
+            if (raw) {
+                if (a.format.empty()) std::fprintf(stderr, "note: writing a raw image because of the %s extension (use --format stein for a .stein image)\n", ext.c_str());
+                auto target = FileDevice::create(a.positional[3], (*dev)->size());
+                if (!target) return die(target.error());
+                image::CopyOptions cpo;
+                cpo.badSectors = image::BadSectorPolicy::SkipZero;
+                auto r = image::copyDevice(**dev, **target, cpo, progress);
+                if (!r) return die(r.error());
+                std::printf("raw image %s: %s copied\n", a.positional[3].c_str(), formatSize(r->bytesRead).c_str());
+                if (r->unreadableSectors) std::printf("WARNING: %llu unreadable sectors were zero-filled\n", static_cast<unsigned long long>(r->unreadableSectors));
+                return r->unreadableSectors ? 1 : 0;
+            }
+        }
         image::CreateOptions co;
         if (!a.compress.empty()) {
             auto c = image::compressionFromString(a.compress);
@@ -322,6 +341,25 @@ int cmdImage(const Args& a) {
     }
     if (sub == "restore") {
         if (a.positional.size() < 4) return usage();
+        if (auto fmt = image::detectVdiskFormat(a.positional[2]); fmt && *fmt != image::VdiskFormat::Stein) {
+            // A raw image (dd, GNOME Disks) or another container: plain device-to-device copy.
+            auto src = openImage(a.positional[2], false, a.sectorSize);
+            if (!src) return die(src.error());
+            std::error_code ec;
+            if (!platform::isDevicePath(a.positional[3]) && !std::filesystem::exists(a.positional[3], ec)) {
+                auto created = FileDevice::create(a.positional[3], (*src)->size());
+                if (!created) return die(created.error());
+            }
+            auto dst = openImage(a.positional[3], true, a.sectorSize);
+            if (!dst) return die(dst.error());
+            if ((*dst)->size() < (*src)->size() && !a.force) return die(Error(ErrorCategory::InvalidArgument, "target is smaller than the image (" + formatSize((*dst)->size()) + " < " + formatSize((*src)->size()) + "); --force writes what fits"));
+            image::CopyOptions cpo;
+            if ((*dst)->size() < (*src)->size()) cpo.limit = (*dst)->size();
+            auto r = image::copyDevice(**src, **dst, cpo, progress);
+            if (!r) return die(r.error());
+            std::printf("restored %s from %s image\n", formatSize(r->bytesRead).c_str(), std::string(image::toString(*fmt)).c_str());
+            return 0;
+        }
         {
             // A missing regular-file target is created at the image's size (restore into a new raw file).
             std::error_code ec;
@@ -373,7 +411,12 @@ int cmdImage(const Args& a) {
         }
         auto i = image::imageInfo(a.positional[2], g_passphrase);
         if (!i) return die(i.error());
-        std::printf("stein image v%u  uuid %s  %s\n", i->header.version, i->header.imageUuid.toString(false).c_str(), i->complete ? "complete" : "INCOMPLETE");
+        std::printf("stein image format %u.%u (this libstein reads %u.%u)%s  uuid %s  %s\n", i->header.version, i->header.versionMinor, image::SegmentHeader::kVersionMajor,
+                    image::SegmentHeader::kVersionMinor, i->header.writerVersion ? ("  written by libstein " + i->header.writerVersionText()).c_str() : "", i->header.imageUuid.toString(false).c_str(),
+                    i->complete ? "complete" : "INCOMPLETE");
+        if (i->header.featuresCompat || i->header.featuresIncompat || i->header.featuresRoCompat)
+            std::printf("features: compat 0x%x incompat 0x%x ro_compat 0x%x%s\n", i->header.featuresCompat, i->header.featuresIncompat, i->header.featuresRoCompat,
+                        i->header.unknownRoCompat() ? " (unknown ro_compat bits: this libstein must not modify the image)" : "");
         std::printf("source size %s, sector %u, chunk %s, compression %s, %llu/%llu chunks stored, %s on disk in %zu segment(s)\n",
                     formatSizeExact(i->header.totalSize).c_str(), i->header.sectorSize, formatSize(i->header.chunkSize).c_str(),
                     std::string(image::toString(i->header.compression)).c_str(), static_cast<unsigned long long>(i->chunksStored),
@@ -1183,7 +1226,20 @@ int cmdCat(const Args& a, bool toFile) {
     if (!inode) return die(inode.error());
     auto st = (*reader)->stat(*inode);
     if (!st) return die(st.error());
-    if (st->type == fs::FileType::Directory) return die(Error(ErrorCategory::InvalidArgument, a.positional[2] + " is a directory"));
+    if (st->type == fs::FileType::Directory) {
+        if (!toFile) return die(Error(ErrorCategory::InvalidArgument, a.positional[2] + " is a directory"));
+        // Whole tree out of the image: the viewer's drag-and-drop primitive.
+        TtyProgress tty;
+        Progress progress(tty);
+        fs::CopyTreeOptions co;
+        auto stats = fs::copyTree(**reader, *inode, a.positional[3], co, &progress);
+        if (!stats) return die(stats.error());
+        std::fprintf(stderr, "copied %llu files, %llu directories, %llu symlinks (%s) from %s:%s to %s\n", static_cast<unsigned long long>(stats->files),
+                     static_cast<unsigned long long>(stats->directories), static_cast<unsigned long long>(stats->symlinks), formatSize(stats->bytes).c_str(), where.c_str(),
+                     a.positional[2].c_str(), a.positional[3].c_str());
+        for (const auto& w : stats->warnings) std::fprintf(stderr, "  skipped %s\n", w.c_str());
+        return stats->warnings.empty() ? 0 : 1;
+    }
     std::FILE* out = toFile ? std::fopen(a.positional[3].c_str(), "wb") : stdout;
     if (!out) return die(Error(ErrorCategory::Io, "cannot create " + a.positional[3]));
     std::vector<std::byte> buf(4 * MiB);

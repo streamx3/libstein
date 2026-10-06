@@ -31,13 +31,26 @@ enum class Compression : std::uint8_t { None = 0, Lz4 = 1 };
 std::string_view toString(Compression c);
 std::optional<Compression> compressionFromString(std::string_view s);
 
+// The running library's version packed as (major << 16) | (minor << 8) | patch.
+std::uint32_t currentWriterVersion();
+
 struct SegmentHeader {
     static constexpr std::size_t kSize = 128;
     static constexpr std::uint32_t kFlagHasManifest = 1u << 0;
     static constexpr std::uint32_t kFlagEncrypted = 1u << 1;
     static constexpr std::uint32_t kFlagComplete = 1u << 2;
 
-    std::uint16_t version = 1;
+    // Versioning (spec §Versioning): `version` is the major format version and changes only when
+    // old readers must refuse the file; `versionMinor` counts compatible layout additions; the
+    // three feature masks follow the ext4 model. Readers refuse unknown incompat bits, open files
+    // with unknown ro_compat bits read-only, and ignore unknown compat bits.
+    static constexpr std::uint16_t kVersionMajor = 1, kVersionMinor = 1;
+    static constexpr std::uint32_t kKnownCompat = 0, kKnownIncompat = 0, kKnownRoCompat = 0;
+
+    std::uint16_t version = kVersionMajor;
+    std::uint16_t versionMinor = kVersionMinor;
+    std::uint32_t featuresCompat = 0, featuresIncompat = 0, featuresRoCompat = 0;
+    std::uint32_t writerVersion = 0;   // (major << 16) | (minor << 8) | patch of the libstein that wrote the segment
     std::uint32_t flags = 0;
     Uuid imageUuid;
     std::uint32_t segmentIndex = 0;
@@ -52,6 +65,8 @@ struct SegmentHeader {
     ByteCount keysOffset = 0, keysLength = 0;   // encrypted images: plaintext key-area JSON (segment 0)
 
     bool encrypted() const { return (flags & kFlagEncrypted) != 0; }
+    bool unknownRoCompat() const { return (featuresRoCompat & ~kKnownRoCompat) != 0; }
+    std::string writerVersionText() const;   // "0.1.0", or "" when the writer predates the field
     void encode(std::span<std::byte, kSize> out) const;
     static Expected<SegmentHeader> decode(std::span<const std::byte> in);
 };
