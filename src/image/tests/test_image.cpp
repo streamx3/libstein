@@ -8,6 +8,7 @@
 #include "stein/image/stein_format.hpp"
 #include "stein/probe/topology.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <filesystem>
 #include <fstream>

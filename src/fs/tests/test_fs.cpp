@@ -7,6 +7,7 @@
 #include "stein/core/strings.hpp"
 #include "stein/fs/filesystem.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <map>

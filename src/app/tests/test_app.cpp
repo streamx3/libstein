@@ -6,6 +6,7 @@
 #include "stein/block/file_device.hpp"
 #include "stein/pt/partition_table.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 
