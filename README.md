@@ -42,7 +42,18 @@ ctest --preset debug
 ./build/debug/tools/stein/stein app init office.json /dev/sdb /backups/office.stein   # dr_stein-style profile
 ./build/debug/tools/stein/stein app status office.json && ./build/debug/tools/stein/stein app restore office.json
 ./build/debug/tools/stein/stein media test /dev/sdX --force    # fake-flash capacity test (destructive); `media scan` is read-only
+./build/debug/tools/stein/stein ls backup.stein --part 2 /home              # browse ext4/NTFS/FAT inside an image, partition,
+./build/debug/tools/stein/stein cp disk.img --passphrase ... --lv root /etc/fstab fstab   # LUKS container or LVM volume
+./build/debug/tools/stein/stein luks info /dev/sdb2 && ./build/debug/tools/stein/stein lvm list /dev/sdb3
 ```
+
+What works today (all in-process, no kernel drivers, Linux/macOS/Windows):
+GPT/MBR/APM read, write and repair; 35 filesystems identified; allocation
+maps for ext/FAT/exFAT/NTFS/HFS+ (used-block imaging); `.stein` images with
+LZ4, split segments and ChaCha20-Poly1305 encryption (Argon2id key slots);
+LUKS1/2 unlock; LVM2 linear/striped volumes; file readers for ext2/3/4,
+NTFS and FAT; profile-driven one-button backup/restore; fake-flash and
+surface tests. See `doc/reports/` for the detailed status.
 
 Fixtures under `tests/fixtures/` are regenerated with
 `tools/fixtures/make_pt_fixtures.sh` (needs sgdisk, sfdisk, mkfs.vfat; root
