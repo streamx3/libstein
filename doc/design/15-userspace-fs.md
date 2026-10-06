@@ -108,13 +108,15 @@ filesystems from the first try" credible rather than reckless):
 **Status:** the Linux libfuse3 backend exists (`stein_mount`, read-only, high-level API, single
 thread, `stein mount`); the same source builds on Windows against WinFsp's fuse3-compatible
 layer (delay-loaded, so the binary runs without WinFsp and reports `Unsupported`), and CI
-mounts and reads the ext4 fixture through it. The `Vfs` layer below is not written yet — the
-backend talks to `fs::Reader` directly with a path → inode cache. macOS compiles a stub.
+mounts and reads the ext4 fixture through it. macOS mounts through the built-in NFSv3
+loopback server (`stein_mount::NfsServer`, below) and the system's `mount_nfs`: no kext, no
+third-party dependency. The `Vfs` layer below is not written yet — the backends talk to
+`fs::Reader` directly with a path → inode cache.
 
 - **Linux:** libfuse3 (LGPL, dynamic). Optional: our own NBD server + `nbd` kernel module for block export (`qemu-nbd` pattern), `ublk` later.
 - **Windows:** **WinFsp** through its fuse3-compatible layer (done; GPLv3 with the FLOSS exception, loaded at run time only, so the MIT core never requires it). Dokany was the original default but WinFsp's fuse3 layer let the Linux backend run unchanged. Block export via Virtual Disk API only for VHD/VHDX.
-- **macOS:** macFUSE if installed (optional, user must allow the kext); **own NFSv3 loopback server** as the kext-less default (the FUSE-T idea, re-implemented, since FUSE-T itself is proprietary); FSKit module later (Swift/ObjC glue lives in the platform layer).
-- **All:** WebDAV loopback as a last resort (no driver, no admin, limited semantics).
+- **macOS:** **own NFSv3 loopback server** (done) mounted with the stock `mount_nfs` on 127.0.0.1 with explicit `port`/`mountport`, so no portmapper, no kext, no admin rights and no third-party code (the FUSE-T idea, re-implemented, since FUSE-T itself is proprietary and macFUSE needs a kext the user must allow). Why not a "block device" API: macOS has no public way for a process to provide a block device (no NBD/ublk/loop-from-userspace); the only block-level path is `hdiutil attach` of a *file*, and a block device would only help for filesystems macOS already has drivers for. The NFS server covers that case too: `makeSingleFileReader` exports a decoded or decrypted disk as one file, and `hdiutil attach -imagekey diskimage-class=CRawDiskImage` on that file lets macOS mount HFS+/APFS/exFAT/FAT/NTFS(ro)/UDF/ISO inside a LUKS/VeraCrypt/LVM/qcow2/E01 container with its own drivers (`stein attach`). FSKit (macOS 15+, Apple's userspace filesystem API) remains the candidate for a native-feeling module later; it needs a signed app extension, so it belongs to a packaged app, not the CLI.
+- **All:** the NFS loopback server runs on every platform (`stein serve`), so Linux and Windows can use it as a fallback when FUSE/WinFsp are absent (with the OS NFS client). WebDAV loopback is no longer planned.
 
 `stein_mount::Vfs` sits between the backend and the fs module: path → inode resolution with a negative/positive dentry cache, open-handle table, page cache for reads with write-through, per-inode locking, and the policy for things backends need (Windows file IDs, macOS resource forks → ADS/xattr mapping).
 

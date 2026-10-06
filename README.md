@@ -55,7 +55,7 @@ Everything below runs in-process with no kernel drivers and the same code
 on Linux, macOS and Windows; only the last table differs per OS. Legend:
 **✓** done and covered by tests against the reference tools, **◐** partial
 (see note), **–** not yet. "Mount" means exposing the in-process reader
-to the OS (Linux: FUSE, Windows: WinFsp; macOS: in progress).
+to the OS (Linux: FUSE, Windows: WinFsp, macOS: built-in NFS loopback).
 
 ### Filesystems
 
@@ -123,7 +123,8 @@ ADC) is an own implementation checked against the reference tool.
 | Raw device access (read-only, exclusive read-write) | ✓ | ✓ | ✓ with volume lock and dismount |
 | List, unmount mounts; re-read partition table | ✓ | ✓ diskutil | ◐ (volumes dismount through the exclusive open) |
 | Attach an image as a block device for the OS | ✓ loop | ✓ hdiutil (raw) | – |
-| Mount an in-process reader (foreign filesystems, partitions inside images, LUKS, LVM) | ✓ FUSE (libfuse3) | – in progress | ✓ WinFsp |
+| Mount an in-process reader (foreign filesystems, partitions inside images, LUKS, LVM) | ✓ FUSE (libfuse3) | ✓ built-in NFS loopback + `mount_nfs` (no kext) | ✓ WinFsp |
+| Hand a decoded/decrypted disk to the OS's own filesystem drivers | ◐ raw image files via loop (NBD for decoded disks planned) | ✓ NFS loopback + `hdiutil attach` (`stein attach`) | – |
 | Media tests (fake-flash capacity, surface scan) | ✓ | ✓ | ✓ |
 | Profile-driven one-button backup / restore | ✓ | ✓ | ✓ |
 

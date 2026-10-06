@@ -25,6 +25,7 @@
 #include "stein/image/operations.hpp"
 #include "stein/image/vdisk.hpp"
 #include "stein/mount/mount.hpp"
+#include "stein/mount/nfs_server.hpp"
 #include "stein/ops/media_test.hpp"
 #include "stein/ops/stack.hpp"
 #include "stein/pt/gpt_table.hpp"
@@ -33,7 +34,11 @@
 #include "stein/probe/topology.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <csignal>
 #include <cstdio>
+#include <thread>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -89,7 +94,11 @@ int usage() {
                "  stein cat <image|device> <path> ...                                       print a file\n"
                "  stein cp  <image|device> <path> <out> ...                                 copy a file out (ext2/3/4 so far)\n"
                "  stein mount <image|device> <mountpoint> [--part N] [--lv NAME] [--passphrase P] [--allow-other]\n"
-               "      read-only FUSE mount of a filesystem inside an image / LUKS / LVM (Linux; fusermount3 -u to unmount)\n"
+               "      read-only mount of a filesystem inside an image / LUKS / LVM (Linux: FUSE, macOS: NFS loopback, Windows: WinFsp)\n"
+               "  stein serve <image|device> [--port N] [--raw] [--part N] [--lv NAME] [--passphrase P]\n"
+               "      serve the filesystem (or, with --raw, the decoded disk as one file) over NFSv3 on 127.0.0.1 for any NFS client\n"
+               "  stein attach <image|device> [--part N] [--lv NAME] [--passphrase P] [--no-mount]\n"
+               "      macOS: hand the decoded disk to the system's own filesystem drivers (NFS loopback + hdiutil attach)\n"
                "  stein types [gpt|mbr]\n"
                "  stein app init    <profile.json> <device> <image.stein>   write a profile for a disk (identity from the OS)\n"
                "  stein app status  <profile.json> [--unlock]\n"
@@ -113,6 +122,8 @@ struct Args {
     std::string start, size, end, type, name, index;
     std::string passphrase, passphraseFile, newPassphrase, kdf, lv;
     std::uint32_t pim = 0;
+    std::string port;
+    bool raw = false, noMount = false;
     std::uint32_t kdfCost = 0, kdfMemoryKiB = 0;
     std::uint32_t quick = 0;
     bool keep = false;
@@ -141,6 +152,9 @@ Args parse(int argc, char** argv) {
         else if (s == "--lv" && i + 1 < argc) a.lv = argv[++i];
         else if (s == "--allow-other") a.allowOther = true;
         else if (s == "--pim" && i + 1 < argc) a.pim = static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 10));
+        else if (s == "--port" && i + 1 < argc) a.port = argv[++i];
+        else if (s == "--raw") a.raw = true;
+        else if (s == "--no-mount") a.noMount = true;
         else if (s == "--no-wipe") a.noWipe = true;
         else if (s == "--unlock") a.unlock = true;
         else if (s == "--used-only") a.usedOnly = true;
@@ -1056,8 +1070,9 @@ int cmdLvm(const Args& a) {
 
 // ---- files inside filesystems (stein_fs L3) -----------------------------------
 
-// The filesystem to read: <image|device> [--part N] [--lv name], through LUKS with --passphrase.
-Expected<std::unique_ptr<fs::Reader>> openReaderFor(const Args& a, const std::string& path, std::string& where) {
+// The block device to read: <image|device> [--part N] [--lv name], through LUKS/VeraCrypt with
+// --passphrase and LVM with --lv, down to the layer that holds a filesystem (or nothing known).
+Expected<std::shared_ptr<BlockDevice>> resolveDevice(const Args& a, const std::string& path, std::string& where) {
     auto dev = deviceOrPartition(a, path);
     if (!dev) return fail(dev.error());
     std::shared_ptr<BlockDevice> target = *dev;
@@ -1078,7 +1093,7 @@ Expected<std::unique_ptr<fs::Reader>> openReaderFor(const Args& a, const std::st
                     continue;
                 }
             }
-            return fail(ErrorCategory::NotFound, where + ": no recognised filesystem");
+            return target;   // nothing recognised: the caller decides whether that is fine
         }
         const auto t = (*probed)->type();
         if (t == fs::FsType::Luks1 || t == fs::FsType::Luks2) {
@@ -1106,11 +1121,22 @@ Expected<std::unique_ptr<fs::Reader>> openReaderFor(const Args& a, const std::st
             where += " lv " + lvName;
             continue;
         }
-        if (!fs::has((*probed)->capabilities(), fs::Capability::Read))
-            return fail(ErrorCategory::Unsupported, where + ": " + std::string(fs::displayName(t)) + " cannot be read in-process yet");
-        return (*probed)->openReader();
+        return target;
     }
     return fail(ErrorCategory::Internal, "too many container layers");
+}
+
+// The filesystem reader at the end of that chain.
+Expected<std::unique_ptr<fs::Reader>> openReaderFor(const Args& a, const std::string& path, std::string& where) {
+    auto target = resolveDevice(a, path, where);
+    if (!target) return fail(target.error());
+    auto probed = fs::probe(*target);
+    if (!probed) return fail(probed.error());
+    if (!*probed) return fail(ErrorCategory::NotFound, where + ": no recognised filesystem");
+    const auto t = (*probed)->type();
+    if (!fs::has((*probed)->capabilities(), fs::Capability::Read))
+        return fail(ErrorCategory::Unsupported, where + ": " + std::string(fs::displayName(t)) + " cannot be read in-process yet");
+    return (*probed)->openReader();
 }
 
 std::string modeText(const fs::Stat& st) {
@@ -1190,9 +1216,90 @@ int cmdMount(const Args& a) {
     mo.fsName = "stein:" + std::filesystem::path(a.positional[1]).filename().string();
     auto m = mount::Mount::create(std::move(*reader), a.positional[2], mo);
     if (!m) return die(m.error());
-    std::fprintf(stderr, "mounted %s read-only at %s; unmount with: fusermount3 -u %s\n", where.c_str(), a.positional[2].c_str(), a.positional[2].c_str());
+#if defined(__APPLE__)
+    const char* how = "umount";
+#elif defined(_WIN32)
+    const char* how = "Ctrl-C here, or stein's process exit";
+#else
+    const char* how = "fusermount3 -u";
+#endif
+    std::fprintf(stderr, "mounted %s read-only at %s; unmount with: %s %s\n", where.c_str(), a.positional[2].c_str(), how, a.positional[2].c_str());
     if (auto r = (*m)->run(); !r) return die(r.error());
     return 0;
+}
+
+std::atomic<bool> g_interrupted{false};
+void onInterrupt(int) { g_interrupted.store(true); }
+
+// Block until Ctrl-C / SIGTERM.
+void waitForInterrupt() {
+    std::signal(SIGINT, onInterrupt);
+    std::signal(SIGTERM, onInterrupt);
+    while (!g_interrupted.load()) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+}
+
+int cmdServe(const Args& a) {
+    // stein serve <image|device> [--port N] [--raw] [--part N] [--lv NAME] [--passphrase P]
+    if (a.positional.size() < 2) return usage();
+    std::string where;
+    std::unique_ptr<fs::Reader> reader;
+    if (a.raw) {
+        auto dev = resolveDevice(a, a.positional[1], where);
+        if (!dev) return die(dev.error());
+        reader = mount::makeSingleFileReader(*dev, "disk.img");
+        where += " as disk.img";
+    } else {
+        auto r = openReaderFor(a, a.positional[1], where);
+        if (!r) return die(r.error());
+        reader = std::move(*r);
+    }
+    mount::NfsServerOptions so;
+    if (!a.port.empty()) so.port = static_cast<std::uint16_t>(std::strtoul(a.port.c_str(), nullptr, 10));
+    auto server = mount::NfsServer::start(std::move(reader), so);
+    if (!server) return die(server.error());
+    const std::string port = std::to_string((*server)->port());
+    std::fprintf(stderr, "serving %s read-only over NFSv3 on 127.0.0.1:%s (Ctrl-C to stop)\n", where.c_str(), port.c_str());
+    std::fprintf(stderr, "  macOS:   mount_nfs -o vers=3,tcp,port=%s,mountport=%s,locallocks,rdonly,noresvport 127.0.0.1:/ <dir>\n", port.c_str(), port.c_str());
+    std::fprintf(stderr, "  Linux:   sudo mount -t nfs -o vers=3,tcp,port=%s,mountport=%s,nolock,ro 127.0.0.1:/ <dir>\n", port.c_str(), port.c_str());
+    std::fprintf(stderr, "  Windows: the built-in NFS client needs a portmapper; use stein mount (WinFsp) there\n");
+    waitForInterrupt();
+    (*server)->stop();
+    return 0;
+}
+
+int cmdAttach(const Args& a) {
+    // stein attach <image|device> [--part N] [--lv NAME] [--passphrase P] [--no-mount]
+    if (a.positional.size() < 2) return usage();
+#if !defined(__APPLE__)
+    std::fprintf(stderr, "stein attach is for macOS (hdiutil); on Linux use stein mount or the platform attach, on Windows stein mount\n");
+    return 2;
+#else
+    std::string where;
+    auto dev = resolveDevice(a, a.positional[1], where);
+    if (!dev) return die(dev.error());
+    const auto dir = std::filesystem::temp_directory_path() / ("stein_attach_" + std::to_string(::getpid()));
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    auto m = mount::Mount::create(mount::makeSingleFileReader(*dev, "disk.img"), dir);
+    if (!m) return die(m.error());
+    std::thread loop([&] { (*m)->run(); });
+    const std::string image = (dir / "disk.img").string();
+    const std::string cmd = "hdiutil attach -imagekey diskimage-class=CRawDiskImage -readonly" + std::string(a.noMount ? " -nomount" : "") + " '" + image + "'";
+    std::fprintf(stderr, "%s exported at %s; running: %s\n", where.c_str(), image.c_str(), cmd.c_str());
+    const int rc = std::system(cmd.c_str());
+    if (rc != 0) {
+        (*m)->stop();
+        loop.join();
+        std::filesystem::remove(dir, ec);
+        return die(Error(ErrorCategory::Io, "hdiutil attach failed"));
+    }
+    std::fprintf(stderr, "attached; detach the disk in Finder or with hdiutil detach, then Ctrl-C here\n");
+    waitForInterrupt();
+    (*m)->stop();
+    loop.join();
+    std::filesystem::remove(dir, ec);
+    return 0;
+#endif
 }
 
 int cmdTcrypt(const Args& a) {
@@ -1276,6 +1383,8 @@ int main(int argc, char** argv) {
     if (cmd == "lvm") return cmdLvm(a);
     if (cmd == "ls") return cmdLs(a);
     if (cmd == "mount") return cmdMount(a);
+    if (cmd == "serve") return cmdServe(a);
+    if (cmd == "attach") return cmdAttach(a);
     if (cmd == "cat") return cmdCat(a, false);
     if (cmd == "cp") return cmdCat(a, true);
     return usage();

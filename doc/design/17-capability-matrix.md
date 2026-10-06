@@ -74,7 +74,7 @@ L0 detect/geometry/label/uuid · L1 used-block map · L2 offline metadata edit
 | Backend | read-only mount | writable mount | notes |
 |---|---|---|---|
 | Linux libfuse3 | **done** (`stein mount`, any `fs::Reader`: partitions inside images, LUKS, LVM) | v2 (needs fs writers) | optional at configure time (`pkg-config fuse3`) |
-| macOS NFS loopback / macFUSE | v1 | v2 | kext-less default per design doc 15 |
+| macOS NFS loopback | **done** (own NFSv3 server on 127.0.0.1 + `mount_nfs`; `stein attach` hands a decoded disk to macOS's own drivers via hdiutil) | v2 | no kext, no dependency; FSKit later for packaged apps |
 | Windows WinFsp | **done** (same libfuse3-API source over WinFsp's fuse3 layer, delay-loaded; drive letter or absent directory as mount point; CI mounts and reads the ext4 fixture through it) | v2 | WinFsp is optional at configure time and at run time (clear `Unsupported` when not installed); Dokany not pursued |
 
 ## Operations (stein_ops, M1)
