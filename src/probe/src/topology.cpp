@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 #include "stein/probe/topology.hpp"
 
+#include "stein/container/luks.hpp"
+
 #include "stein/block/slice_device.hpp"
 #include "stein/core/strings.hpp"
 #include "stein/pt/gpt_table.hpp"
@@ -83,15 +85,60 @@ void probeTable(Node& node, const Options& options, int depth) {
     }
 }
 
+// A LUKS container with a passphrase that opens it: descend into the plaintext.
+void probeLuks(Node& node, const Options& options, int depth) {
+    if (!node.content || options.passphrases.empty()) return;
+    const auto t = node.content->type();
+    if (t != fs::FsType::Luks1 && t != fs::FsType::Luks2) return;
+    auto luks = container::Luks::open(node.device);
+    if (!luks) {
+        node.notes.push_back(Note{Validity::Warning, "luks.header", luks.error().message()});
+        return;
+    }
+    if (!luks->info().supported) {
+        node.notes.push_back(Note{Validity::Info, "luks.unsupported", "cannot open in-process: " + luks->info().unsupportedWhy});
+        return;
+    }
+    for (const auto& pass : options.passphrases) {
+        auto payload = luks->openPayload(pass, true);
+        if (!payload) {
+            if (payload.error().category() != ErrorCategory::Integrity) node.notes.push_back(Note{Validity::Warning, "luks.unlock", payload.error().message()});
+            continue;
+        }
+        Node child;
+        child.kind = NodeKind::Decrypted;
+        child.name = "decrypted";
+        child.device = *payload;
+        child.region = Region{node.region.offset + luks->info().payloadOffset, (*payload)->size()};
+        // The plaintext may carry a table or a filesystem: probe it like a device.
+        Node tmp;
+        tmp.kind = NodeKind::Device;
+        tmp.device = child.device;
+        tmp.region = child.region;
+        probeInto(tmp, options, depth + 1);
+        child.table = std::move(tmp.table);
+        child.content = std::move(tmp.content);
+        child.children = std::move(tmp.children);
+        child.notes = std::move(tmp.notes);
+        node.children.push_back(std::move(child));
+        return;
+    }
+    node.notes.push_back(Note{Validity::Info, "luks.locked", "no supplied passphrase opens this container"});
+}
+
 void probeInto(Node& node, const Options& options, int depth) {
     if (depth > options.maxDepth) return;
     if (node.kind == NodeKind::Device) {
         probeTable(node, options, depth);
-        if (!node.table) probeContent(node);
+        if (!node.table) {
+            probeContent(node);
+            probeLuks(node, options, depth);
+        }
         return;
     }
     // Partition: content first; a nested table only when nothing else claims the bytes.
     probeContent(node);
+    probeLuks(node, options, depth);
     if (!node.content && options.nestedTables && node.device->size() >= 1 * MiB) {
         auto t = pt::PartitionTable::read(node.device);
         if (t && (*t)->type() != pt::TableType::None) {
@@ -142,7 +189,8 @@ std::string Node::summary() const {
         if (partition->isLogical) s += " [logical]";
         if (partition->type.scheme == pt::TableType::Mbr && (partition->attributes & pt::Partition::kMbrBootable)) s += " [boot]";
     } else {
-        s = (device ? device->name() : name) + "  " + sizeOf(region);
+        if (kind == NodeKind::Decrypted) s = "decrypted payload  " + sizeOf(region);
+        else s = (device ? device->name() : name) + "  " + sizeOf(region);
     }
     if (table) {
         s += "  " + std::string(pt::toString(table->type())) + " table";

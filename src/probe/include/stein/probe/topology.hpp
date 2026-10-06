@@ -23,6 +23,7 @@ enum class NodeKind : std::uint8_t {
     Partition,   // a partition entry of the parent's table
     Free,        // unallocated space inside a table's usable range
     Metadata,    // table metadata region (shown on request)
+    Decrypted,   // the plaintext payload of an unlocked container (LUKS)
 };
 
 struct Note {
@@ -52,6 +53,10 @@ struct Options {
     bool includeFree = true;
     ByteCount minFreeBytes = 1 * MiB;   // alignment gaps smaller than this are not shown
     int maxDepth = 3;
+    // Passphrases tried on every LUKS container found; an unlocked one gets a
+    // Decrypted child holding whatever the plaintext carries. Argon2 slots make
+    // each attempt cost real time, so pass only what the user typed.
+    std::vector<std::string> passphrases;
 };
 
 Expected<Node> probe(std::shared_ptr<BlockDevice> root, const Options& options = {});

@@ -72,9 +72,12 @@ void aesEncryptHardware(const std::uint32_t* rk, unsigned rounds, const std::uin
 }
 
 void aesDecryptHardware(const std::uint32_t* rk, unsigned rounds, const std::uint8_t in[16], std::uint8_t out[16]) {
+    // Equivalent inverse cipher: AESD folds AddRoundKey before InvShiftRows/InvSubBytes, so the
+    // middle-round keys must be InvMixColumns-transformed (the last key is used as is).
     uint8x16_t s = vld1q_u8(in);
-    for (unsigned r = rounds; r > 1; --r) s = vaesimcq_u8(vaesdq_u8(s, roundKey(rk, r)));
-    s = vaesdq_u8(s, roundKey(rk, 1));
+    s = vaesimcq_u8(vaesdq_u8(s, roundKey(rk, rounds)));
+    for (unsigned r = rounds - 1; r > 1; --r) s = vaesimcq_u8(vaesdq_u8(s, vaesimcq_u8(roundKey(rk, r))));
+    s = vaesdq_u8(s, vaesimcq_u8(roundKey(rk, 1)));
     s = veorq_u8(s, roundKey(rk, 0));
     vst1q_u8(out, s);
 }

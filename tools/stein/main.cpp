@@ -15,6 +15,7 @@
 // <image> is a regular file or (on Linux) a raw block device such as /dev/sdb.
 #include "stein/block/file_device.hpp"
 #include "stein/block/sparse_file.hpp"
+#include "stein/container/luks.hpp"
 #include "stein/core/strings.hpp"
 #include "stein/core/units.hpp"
 #include "stein/fs/filesystem.hpp"
@@ -72,6 +73,10 @@ int usage() {
                "  <image> may be a file, a .stein image, a split raw set (disk.img.000 ...) or a block device\n"
                "  stein media scan <device|file>                      read-only surface scan (unreadable sectors)\n"
                "  stein media test <device|file> [--quick N] [--keep] --force   DESTRUCTIVE capacity/fake-flash test\n"
+               "  stein luks info    <image|device> [--part N]        header, cipher, key slots\n"
+               "  stein luks unlock  <image|device> [--part N]        check a passphrase and probe the plaintext\n"
+               "  stein luks extract <image|device> <out> [--part N]  decrypt the payload into a plain image\n"
+               "      stein probe --passphrase P also descends into LUKS containers it can open\n"
                "  stein types [gpt|mbr]\n"
                "  stein app init    <profile.json> <device> <image.stein>   write a profile for a disk (identity from the OS)\n"
                "  stein app status  <profile.json> [--unlock]\n"
@@ -429,10 +434,80 @@ int cmdProbe(const Args& a) {
     if (a.positional.size() < 2) return usage();
     auto dev = openImage(a.positional[1], false, a.sectorSize);
     if (!dev) return die(dev.error());
-    auto tree = probe::probe(*dev);
+    probe::Options o;
+    if (!g_passphrase.empty()) o.passphrases.push_back(g_passphrase);
+    auto tree = probe::probe(*dev, o);
     if (!tree) return die(tree.error());
     std::fputs(probe::toText(*tree).c_str(), stdout);
     return tree->health() >= layout::Validity::Error ? 2 : 0;
+}
+
+// ---- LUKS containers (stein_container) --------------------------------------
+
+// Device for `<image> [--part N]`: the whole device or one partition's slice.
+Expected<std::shared_ptr<BlockDevice>> deviceOrPartition(const Args& a, const std::string& path) {
+    auto dev = openImage(path, false, a.sectorSize);
+    if (!dev) return dev;
+    if (a.index.empty()) return dev;
+    auto tree = probe::probe(*dev);
+    if (!tree) return fail(tree.error());
+    const auto want = static_cast<std::uint32_t>(std::stoul(a.index));
+    for (const auto& c : tree->children)
+        if (c.partition && c.partition->index == want) return c.device;
+    return fail(ErrorCategory::NotFound, "no partition " + a.index);
+}
+
+int cmdLuks(const Args& a) {
+    if (a.positional.size() < 3) return usage();
+    const std::string& sub = a.positional[1];
+    auto dev = deviceOrPartition(a, a.positional[2]);
+    if (!dev) return die(dev.error());
+    auto luks = container::Luks::open(*dev);
+    if (!luks) return die(luks.error());
+    const auto& info = luks->info();
+    if (sub == "info") {
+        std::printf("LUKS%d  %s-%s  %u-bit key  payload at %s (%s, %u-byte sectors)%s\n", info.version, info.cipher.c_str(), info.mode.c_str(), info.keyBytes * 8,
+                    formatSizeExact(info.payloadOffset).c_str(), formatSize(info.payloadSize).c_str(), info.sectorSize, info.supported ? "" : ("  [cannot open in-process: " + info.unsupportedWhy + "]").c_str());
+        if (!info.uuid.empty()) std::printf("UUID %s%s\n", info.uuid.c_str(), info.label.empty() ? "" : ("  label \"" + info.label + "\"").c_str());
+        if (!info.hash.empty()) std::printf("hash %s\n", info.hash.c_str());
+        for (const auto& sl : info.slots) std::printf("slot %d: %s%s%s\n", sl.id, sl.active ? "" : "inactive, ", sl.kdf.c_str(), sl.kdfDetail.empty() ? "" : (" (" + sl.kdfDetail + ")").c_str());
+        return 0;
+    }
+    const std::string pass = g_passphrase.empty() ? readPassphrase(a, "LUKS passphrase: ") : g_passphrase;
+    if (sub == "unlock") {
+        // Prove the passphrase opens the container and show what is inside.
+        auto payload = luks->openPayload(pass, true);
+        if (!payload) return die(payload.error());
+        auto tree = probe::probe(*payload);
+        if (!tree) return die(tree.error());
+        std::puts("unlocked; plaintext payload:");
+        std::fputs(probe::toText(*tree).c_str(), stdout);
+        return 0;
+    }
+    if (sub == "extract") {
+        // Decrypt the payload into a plain image file (or any writable device).
+        if (a.positional.size() < 4) return usage();
+        auto payload = luks->openPayload(pass, true);
+        if (!payload) return die(payload.error());
+        const std::string& outPath = a.positional[3];
+        std::error_code ec;
+        if (!platform::isDevicePath(outPath) && !std::filesystem::exists(outPath, ec)) {
+            auto created = FileDevice::create(outPath, (*payload)->size());
+            if (!created) return die(created.error());
+        }
+        auto target = openImage(outPath, true, a.sectorSize);
+        if (!target) return die(target.error());
+        if ((*target)->size() < (*payload)->size() && !a.force) return die(Error(ErrorCategory::OutOfRange, "target smaller than the payload (use --force to write what fits)"));
+        TtyProgress tty;
+        Progress progress(tty);
+        image::CopyOptions co;
+        co.limit = std::min((*payload)->size(), (*target)->size());
+        auto stats = image::copyDevice(**payload, **target, co, progress);
+        if (!stats) return die(stats.error());
+        std::printf("decrypted %s to %s\n", formatSize(stats->bytesRead).c_str(), outPath.c_str());
+        return 0;
+    }
+    return usage();
 }
 
 int cmdInspect(const Args& a) {
@@ -913,5 +988,6 @@ int main(int argc, char** argv) {
     if (cmd == "types") return cmdTypes(a);
     if (cmd == "app") return cmdApp(a);
     if (cmd == "media") return cmdMedia(a);
+    if (cmd == "luks") return cmdLuks(a);
     return usage();
 }

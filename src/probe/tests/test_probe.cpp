@@ -105,3 +105,33 @@ TEST_CASE("probe: MBR with extended and logicals, nested table inside a partitio
     CHECK(text.find("[extended]") != std::string::npos);
     CHECK(text.find("[logical]") != std::string::npos);
 }
+
+TEST_CASE("probe: a LUKS container opens with a passphrase and shows its plaintext content") {
+    auto disk = loadSparseFixture("luks/luks2.sparse");
+    probe::Options o;
+    auto locked = probe::probe(disk, o);
+    REQUIRE(locked);
+    REQUIRE(locked->content);
+    CHECK(locked->content->type() == fs::FsType::Luks2);
+    CHECK(locked->children.empty());
+    o.passphrases = {"wrong one", "luks test passphrase"};
+    auto open = probe::probe(disk, o);
+    REQUIRE(open);
+    REQUIRE(open->children.size() == 1);
+    const auto& d = open->children[0];
+    CHECK(d.kind == probe::NodeKind::Decrypted);
+    REQUIRE(d.content);
+    CHECK(d.content->type() == fs::FsType::Ext2);
+    CHECK(d.content->info().label == "inside_luks");
+    CHECK(d.region.offset == 1 * MiB);
+    auto text = probe::toText(*open);
+    CHECK(text.find("decrypted payload") != std::string::npos);
+    CHECK(text.find("inside_luks") != std::string::npos);
+    o.passphrases = {"nope"};
+    auto stillLocked = probe::probe(disk, o);
+    REQUIRE(stillLocked);
+    CHECK(stillLocked->children.empty());
+    bool noted = false;
+    for (const auto& n : stillLocked->notes) noted = noted || n.code == "luks.locked";
+    CHECK(noted);
+}
