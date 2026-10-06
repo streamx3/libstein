@@ -45,6 +45,7 @@ ctest --preset debug
 ./build/debug/tools/stein/stein ls backup.stein --part 2 /home              # browse ext4/NTFS/FAT inside an image, partition,
 ./build/debug/tools/stein/stein cp disk.img --passphrase ... --lv root /etc/fstab fstab   # LUKS container or LVM volume
 ./build/debug/tools/stein/stein luks info /dev/sdb2 && ./build/debug/tools/stein/stein lvm list /dev/sdb3
+./build/debug/tools/stein/stein mount backup.stein /mnt/old --part 2     # Linux: FUSE mount of a partition inside an image
 ```
 
 What works today (all in-process, no kernel drivers, Linux/macOS/Windows):
@@ -52,8 +53,8 @@ GPT/MBR/APM read, write and repair; 35 filesystems identified; allocation
 maps for ext/FAT/exFAT/NTFS/HFS+ (used-block imaging); `.stein` images with
 LZ4, split segments and ChaCha20-Poly1305 encryption (Argon2id key slots);
 LUKS1/2 unlock; LVM2 linear/striped volumes; file readers for ext2/3/4,
-NTFS and FAT; profile-driven one-button backup/restore; fake-flash and
-surface tests. See `doc/reports/` for the detailed status.
+NTFS and FAT, mountable through FUSE on Linux; profile-driven one-button
+backup/restore; fake-flash and surface tests. See `doc/reports/` for the detailed status.
 
 Fixtures under `tests/fixtures/` are regenerated with
 `tools/fixtures/make_pt_fixtures.sh` (needs sgdisk, sfdisk, mkfs.vfat; root

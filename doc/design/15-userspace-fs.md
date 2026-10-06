@@ -105,6 +105,10 @@ filesystems from the first try" credible rather than reckless):
 
 ## 4. Mount backends
 
+**Status:** the Linux libfuse3 backend exists (`stein_mount`, read-only, high-level API, single
+thread, `stein mount`); the `Vfs` layer below is not written yet — the backend talks to
+`fs::Reader` directly with a path → inode cache. macOS and Windows compile a stub.
+
 - **Linux:** libfuse3 (LGPL, dynamic). Optional: our own NBD server + `nbd` kernel module for block export (`qemu-nbd` pattern), `ublk` later.
 - **Windows:** **Dokany** (LGPL) by default via its FUSE-compatible shim or native API; **WinFsp** as an optional plugin with the FLOSS-exception notice (an MIT core must not require it). Block export via Virtual Disk API only for VHD/VHDX.
 - **macOS:** macFUSE if installed (optional, user must allow the kext); **own NFSv3 loopback server** as the kext-less default (the FUSE-T idea, re-implemented, since FUSE-T itself is proprietary); FSKit module later (Swift/ObjC glue lives in the platform layer).

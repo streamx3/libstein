@@ -66,6 +66,14 @@ L0 detect/geometry/label/uuid · L1 used-block map · L2 offline metadata edit
 | DMG/UDIF | v2 | – | v2 | zlib/bzip2/ADC/lzfse |
 | partclone/Clonezilla | v3 | – | v3 | |
 
+## Mount backends (stein_mount)
+
+| Backend | read-only mount | writable mount | notes |
+|---|---|---|---|
+| Linux libfuse3 | **done** (`stein mount`, any `fs::Reader`: partitions inside images, LUKS, LVM) | v2 (needs fs writers) | optional at configure time (`pkg-config fuse3`) |
+| macOS NFS loopback / macFUSE | v1 | v2 | kext-less default per design doc 15 |
+| Windows WinFsp / Dokany | v1 | v2 | |
+
 ## Operations (stein_ops, M1)
 
 | Operation | Status | Notes |

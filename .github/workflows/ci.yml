@@ -20,7 +20,7 @@ jobs:
           python-version: "3.12"
       - name: Install Ninja and ccache (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update -q && sudo apt-get install -y -q ninja-build ccache
+        run: sudo apt-get update -q && sudo apt-get install -y -q ninja-build ccache libfuse3-dev fuse3
       - name: Install Ninja and ccache (macOS)
         if: runner.os == 'macOS'
         run: brew install ninja ccache

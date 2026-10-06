@@ -39,7 +39,7 @@ endif()
 # ---------------------------------------------------------------------------
 # Modules (dependency order; see doc/design/10-architecture.md)
 # ---------------------------------------------------------------------------
-foreach(mod core layout block pt fs container volume probe platform image ops app)
+foreach(mod core layout block pt fs container volume probe platform image ops app mount)
   if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/${mod}/CMakeLists.txt)
     add_subdirectory(src/${mod})
   endif()

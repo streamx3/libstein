@@ -22,6 +22,7 @@
 #include "stein/fs/filesystem.hpp"
 #include "stein/app/scenario.hpp"
 #include "stein/image/operations.hpp"
+#include "stein/mount/mount.hpp"
 #include "stein/ops/media_test.hpp"
 #include "stein/ops/stack.hpp"
 #include "stein/pt/gpt_table.hpp"
@@ -83,6 +84,8 @@ int usage() {
                "  stein ls  <image|device> [path] [--part N] [--lv NAME] [--passphrase P]   list a directory in-process\n"
                "  stein cat <image|device> <path> ...                                       print a file\n"
                "  stein cp  <image|device> <path> <out> ...                                 copy a file out (ext2/3/4 so far)\n"
+               "  stein mount <image|device> <mountpoint> [--part N] [--lv NAME] [--passphrase P] [--allow-other]\n"
+               "      read-only FUSE mount of a filesystem inside an image / LUKS / LVM (Linux; fusermount3 -u to unmount)\n"
                "  stein types [gpt|mbr]\n"
                "  stein app init    <profile.json> <device> <image.stein>   write a profile for a disk (identity from the OS)\n"
                "  stein app status  <profile.json> [--unlock]\n"
@@ -100,7 +103,7 @@ int die(const Error& e) {
 
 struct Args {
     std::vector<std::string> positional;
-    bool doc = false, dryRun = false, noVerify = false, force = false, noWipe = false, unlock = false, usedOnly = false;
+    bool doc = false, dryRun = false, noVerify = false, force = false, noWipe = false, unlock = false, usedOnly = false, allowOther = false;
     int level = 0;
     std::string compress, split, chunk;
     std::string start, size, end, type, name, index;
@@ -131,6 +134,7 @@ Args parse(int argc, char** argv) {
         else if (s == "--name" && i + 1 < argc) a.name = argv[++i];
         else if ((s == "--index" || s == "--part") && i + 1 < argc) a.index = argv[++i];
         else if (s == "--lv" && i + 1 < argc) a.lv = argv[++i];
+        else if (s == "--allow-other") a.allowOther = true;
         else if (s == "--no-wipe") a.noWipe = true;
         else if (s == "--unlock") a.unlock = true;
         else if (s == "--used-only") a.usedOnly = true;
@@ -1127,6 +1131,22 @@ int cmdCat(const Args& a, bool toFile) {
     return 0;
 }
 
+int cmdMount(const Args& a) {
+    // stein mount <image|device> <mountpoint> [--part N] [--lv NAME] [--passphrase P] [--allow-other]
+    if (a.positional.size() < 3) return usage();
+    std::string where;
+    auto reader = openReaderFor(a, a.positional[1], where);
+    if (!reader) return die(reader.error());
+    mount::MountOptions mo;
+    mo.allowOther = a.allowOther;
+    mo.fsName = "stein:" + std::filesystem::path(a.positional[1]).filename().string();
+    auto m = mount::Mount::create(std::move(*reader), a.positional[2], mo);
+    if (!m) return die(m.error());
+    std::fprintf(stderr, "mounted %s read-only at %s; unmount with: fusermount3 -u %s\n", where.c_str(), a.positional[2].c_str(), a.positional[2].c_str());
+    if (auto r = (*m)->run(); !r) return die(r.error());
+    return 0;
+}
+
 int cmdTypes(const Args& a) {
     const std::string filter = a.positional.size() > 1 ? a.positional[1] : "";
     for (const auto& info : pt::types::all()) {
@@ -1160,6 +1180,7 @@ int main(int argc, char** argv) {
     if (cmd == "luks") return cmdLuks(a);
     if (cmd == "lvm") return cmdLvm(a);
     if (cmd == "ls") return cmdLs(a);
+    if (cmd == "mount") return cmdMount(a);
     if (cmd == "cat") return cmdCat(a, false);
     if (cmd == "cp") return cmdCat(a, true);
     return usage();
