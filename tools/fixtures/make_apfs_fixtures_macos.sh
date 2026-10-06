@@ -16,7 +16,13 @@ set -eu
 OUT=${1:-tests/fixtures/apfs}
 HERE=$(cd "$(dirname "$0")" && pwd)
 WORK=$(mktemp -d)
-trap 'for m in "$WORK"/mnt_*; do [ -d "$m" ] && hdiutil detach "$m" >/dev/null 2>&1; done; rm -rf "$WORK"' EXIT
+cleanup() {
+  for m in "$WORK"/mnt_*; do
+    if [ -d "$m" ]; then hdiutil detach "$m" >/dev/null 2>&1 || true; fi
+  done
+  rm -rf "$WORK" || true
+}
+trap cleanup EXIT
 mkdir -p "$OUT"
 
 fill() { # mountpoint
