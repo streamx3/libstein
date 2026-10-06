@@ -28,8 +28,7 @@ jobs:
       - name: Build HFS+ fixtures
         if: ${{ hashFiles('tests/fixtures/hfsfs/hfsplus.sparse') == '' }}
         run: tools/fixtures/make_hfsplus_fixtures_macos.sh tests/fixtures/hfsfs
-      - name: Build APFS fixtures
-        if: ${{ hashFiles('tests/fixtures/apfs/apfs.sparse') == '' }}
+      - name: Build APFS fixtures (the script keeps variants that already exist)
         run: tools/fixtures/make_apfs_fixtures_macos.sh tests/fixtures/apfs
       - name: Build DMG fixtures (the script keeps variants that already exist)
         run: tools/fixtures/make_dmg_fixtures_macos.sh tests/fixtures/dmg
