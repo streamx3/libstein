@@ -262,3 +262,23 @@ std::string hexDump(std::span<const std::byte> bytes, std::uint64_t base) {
 }
 
 } // namespace stein
+
+namespace stein {
+std::optional<std::vector<std::byte>> fromHex(std::string_view hex) {
+    if (hex.size() % 2) return std::nullopt;
+    auto nib = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    std::vector<std::byte> out;
+    out.reserve(hex.size() / 2);
+    for (std::size_t i = 0; i < hex.size(); i += 2) {
+        const int hi = nib(hex[i]), lo = nib(hex[i + 1]);
+        if (hi < 0 || lo < 0) return std::nullopt;
+        out.push_back(std::byte(static_cast<std::uint8_t>((hi << 4) | lo)));
+    }
+    return out;
+}
+} // namespace stein

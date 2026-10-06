@@ -124,11 +124,15 @@ Status status(const Profile& profile, const RunOptions& options) {
     std::error_code ec;
     s.imageExists = std::filesystem::is_regular_file(profile.image.path, ec) && std::filesystem::file_size(profile.image.path, ec) > 0;
     if (s.imageExists) {
-        if (auto info = image::imageInfo(profile.image.path)) {
+        if (auto info = image::imageInfo(profile.image.path, options.passphrase)) {
             s.imageComplete = info->complete;
             s.imageSourceBytes = info->header.totalSize;
             s.imageSourceName = info->manifest.get("source").get("name").asString();
             s.imageCreated = info->manifest.get("created").asString();
+            if (info->encrypted && !info->unlocked) {
+                s.imageSourceName = "(encrypted)";
+                s.warnings.push_back(options.passphrase.empty() ? "image is encrypted; a passphrase is needed to restore" : "the passphrase does not open the image");
+            }
             if (!info->complete) s.warnings.push_back("image is incomplete (no trailer): a backup was interrupted");
         } else {
             s.warnings.push_back("image unreadable: " + info.error().message());
@@ -167,6 +171,11 @@ Expected<ScenarioResult> backup(const Profile& profile, const RunOptions& option
     co.chunkSize = profile.image.chunkSize;
     co.splitSize = profile.image.splitSize;
     co.usedBlocksOnly = profile.image.usedOnly;
+    if (profile.image.encrypt) {
+        if (options.passphrase.empty()) return fail(ErrorCategory::InvalidArgument, "this profile encrypts its image; a passphrase is required");
+        co.passphrase = options.passphrase;
+        co.kdfIterations = profile.image.kdfIterations;
+    }
     co.sourceName = t->disk.model.empty() ? t->disk.osPath : t->disk.model + " (" + t->disk.osPath + ")";
     co.sourceIdentity = t->isFile ? std::string() : t->disk.identity();
     co.notes = "profile: " + profile.name;
@@ -191,7 +200,7 @@ Expected<ScenarioResult> backup(const Profile& profile, const RunOptions& option
     if (profile.policy.verifyAfterBackup) {
         auto& ver = r.report.addChild("Verify image checksums");
         ver.start();
-        auto v = image::verifyImage(profile.image.path, 2, progress);
+        auto v = image::verifyImage(profile.image.path, 2, progress, options.passphrase);
         if (!v || !v->structureOk || v->chunksBad) {
             ver.finish(ReportStatus::Error);
             ver.addLine(v ? std::to_string(v->chunksBad) + " bad chunks" : v.error().toString());
@@ -210,9 +219,10 @@ Expected<ScenarioResult> restore(const Profile& profile, const RunOptions& optio
     ScenarioResult r;
     r.report = Report("Restore: " + profile.name);
     r.report.start();
-    auto info = image::imageInfo(profile.image.path);
+    auto info = image::imageInfo(profile.image.path, options.passphrase);
     if (!info) return fail(Error(info.error().category(), "image " + profile.image.path.string() + ": " + info.error().message()));
     if (!info->complete) return fail(ErrorCategory::InvalidFormat, "image is incomplete (interrupted backup); refusing to restore from it");
+    if (info->encrypted && !info->unlocked) return fail(ErrorCategory::Permission, options.passphrase.empty() ? "image is encrypted; a passphrase is required" : "wrong passphrase for the image");
     auto t = resolveTarget(profile, options);
     if (!t) return fail(t.error());
     r.target = *t;
@@ -228,7 +238,7 @@ Expected<ScenarioResult> restore(const Profile& profile, const RunOptions& optio
     if (profile.policy.verifyBeforeRestore != VerifyLevel::None) {
         auto& ver = r.report.addChild("Verify image before writing (" + std::string(toString(profile.policy.verifyBeforeRestore)) + ")");
         ver.start();
-        auto v = image::verifyImage(profile.image.path, imageLevel(profile.policy.verifyBeforeRestore), progress);
+        auto v = image::verifyImage(profile.image.path, imageLevel(profile.policy.verifyBeforeRestore), progress, options.passphrase);
         const bool ok = v && v->structureOk && v->chunksBad == 0 && (!v->imageHashChecked || v->imageHashOk);
         if (!ok) {
             ver.finish(ReportStatus::Error);
@@ -282,7 +292,7 @@ Expected<ScenarioResult> restore(const Profile& profile, const RunOptions& optio
     wr.start();
     image::RestoreOptions ro;
     ro.allowSmallerTarget = profile.policy.allowSmallerTarget;
-    auto restored = image::restoreImage(profile.image.path, **dev, ro, progress);
+    auto restored = image::restoreImage(profile.image.path, **dev, ro, progress, options.passphrase);
     if (!restored) {
         wr.finish(ReportStatus::Error);
         wr.addLine(restored.error().toString());
@@ -340,11 +350,11 @@ Expected<ScenarioResult> restore(const Profile& profile, const RunOptions& optio
     return r;
 }
 
-Expected<ScenarioResult> verify(const Profile& profile, const RunOptions&, Progress& progress) {
+Expected<ScenarioResult> verify(const Profile& profile, const RunOptions& options, Progress& progress) {
     ScenarioResult r;
     r.report = Report("Verify: " + profile.name);
     r.report.start();
-    auto v = image::verifyImage(profile.image.path, 3, progress);
+    auto v = image::verifyImage(profile.image.path, 3, progress, options.passphrase);
     if (!v) {
         r.report.finish(ReportStatus::Error);
         return fail(v.error());

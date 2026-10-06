@@ -246,7 +246,9 @@ TEST_CASE("scenarios: backup, status, restore and verify on a file target") {
         REQUIRE(t);
         CHECK((*t)->health() != layout::Validity::Ok);
     }
-    auto dry = app::restore(p, app::RunOptions{.dryRun = true}, progress);
+    app::RunOptions dryOpts;
+    dryOpts.dryRun = true;
+    auto dry = app::restore(p, dryOpts, progress);
     REQUIRE(dry);
     CHECK(dry->ok);
     CHECK_FALSE(dry->restored);
@@ -382,5 +384,54 @@ TEST_CASE("scenarios: restore through a platform unmounts the target's volumes f
     CHECK(fake.rereads == 1);
     CHECK(r->report.toText().find("unmounted /mnt/efi") != std::string::npos);
     CHECK(std::equal(src->bytes().begin(), src->bytes().end(), fake.fakeDisk->bytes().begin()));
+    stein::test::removeTree(dir);
+}
+
+TEST_CASE("scenarios: encrypted profile needs the passphrase on both sides") {
+    auto dir = tmpDir("stein_test_app_enc");
+    auto src = loadSparseFixture("pt/gpt_basic.sparse");
+    const auto diskPath = dir / "disk.img";
+    {
+        std::ofstream out(diskPath, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(src->bytes().data()), static_cast<std::streamsize>(src->bytes().size()));
+    }
+    app::Profile p;
+    p.name = "enc";
+    p.target.osPath = diskPath.string();
+    p.target.allowVirtual = true;
+    p.image.path = dir / "enc.stein";
+    p.image.chunkSize = 1 * MiB;
+    p.image.encrypt = true;
+    p.image.kdfIterations = 1000;
+    REQUIRE(p.validate());
+    CHECK(app::Profile::fromJson(p.toJson())->image.encrypt);
+    NullProgressSink sink;
+    Progress progress(sink);
+    app::RunOptions none;
+    CHECK(app::backup(p, none, progress).error().category() == ErrorCategory::InvalidArgument);
+    app::RunOptions o;
+    o.passphrase = "pw";
+    auto b = app::backup(p, o, progress);
+    REQUIRE_MESSAGE(b, (b ? std::string() : b.error().toString()));
+    auto st = app::status(p, none);
+    CHECK(st.imageSourceName == "(encrypted)");
+    CHECK_FALSE(st.warnings.empty());
+    CHECK(app::describe(p, st).find("Restore: ready") != std::string::npos);   // size and completeness are known without the key
+    CHECK(app::restore(p, none, progress).error().category() == ErrorCategory::Permission);
+    app::RunOptions bad;
+    bad.passphrase = "nope";
+    CHECK_FALSE(app::restore(p, bad, progress));
+    std::fill(src->bytes().begin(), src->bytes().begin() + 512, std::byte{0});
+    {
+        std::fstream f(diskPath, std::ios::in | std::ios::out | std::ios::binary);
+        std::vector<char> zeros(1 * MiB, 0);
+        f.write(zeros.data(), static_cast<std::streamsize>(zeros.size()));
+    }
+    auto r = app::restore(p, o, progress);
+    REQUIRE_MESSAGE(r, (r ? std::string() : r.error().toString()));
+    CHECK(r->ok);
+    auto v = app::verify(p, o, progress);
+    REQUIRE(v);
+    CHECK(v->ok);
     stein::test::removeTree(dir);
 }

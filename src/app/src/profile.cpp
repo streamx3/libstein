@@ -102,6 +102,8 @@ Expected<Profile> Profile::fromJson(const json::Value& v) {
     if (!split) return fail(split.error());
     p.image.splitSize = *split;
     p.image.usedOnly = im.get("used_only").asBool(true);
+    p.image.encrypt = im.get("encrypt").asBool(false);
+    p.image.kdfIterations = static_cast<std::uint32_t>(im.get("kdf_iterations").asUInt(600000));
     const auto& po = v.get("policy");
     p.policy.lockTarget = po.get("lock_target").asBool(true);
     p.policy.requireElevated = po.get("require_elevated").asBool(false);
@@ -141,6 +143,8 @@ json::Value Profile::toJson() const {
     im.set("chunk_size", static_cast<std::uint64_t>(image.chunkSize));
     im.set("split_size", image.splitSize);
     im.set("used_only", image.usedOnly);
+    im.set("encrypt", image.encrypt);
+    if (image.encrypt) im.set("kdf_iterations", static_cast<std::uint64_t>(image.kdfIterations));
     v.set("image", std::move(im));
     json::Value po = json::Value::object();
     po.set("lock_target", policy.lockTarget);
@@ -187,6 +191,7 @@ Expected<void> Profile::validate() const {
     if (image.chunkSize < 64 * KiB || image.chunkSize > 64 * MiB || (image.chunkSize & (image.chunkSize - 1)))
         return fail(ErrorCategory::InvalidArgument, "image.chunk_size must be a power of two between 64K and 64M");
     if (image.splitSize && image.splitSize < image.chunkSize) return fail(ErrorCategory::InvalidArgument, "image.split_size smaller than a chunk");
+    if (image.encrypt && image.kdfIterations < 1000) return fail(ErrorCategory::InvalidArgument, "image.kdf_iterations must be at least 1000");
     if (target.sizeTolerance < 0 || target.sizeTolerance > 0.5) return fail(ErrorCategory::InvalidArgument, "target.size_tolerance must be within 0..0.5");
     return {};
 }

@@ -18,7 +18,7 @@ matched and ordered by `segment_index`.
 | 0 | 8 | `magic` | `"STEINIMG"` |
 | 8 | 2 | `version` | 1 |
 | 10 | 2 | `header_size` | 128 |
-| 12 | 4 | `flags` | bit 0: has manifest (segment 0); bit 1: encrypted (reserved, must be 0 in v1); bit 2: complete (writer finished the whole image) |
+| 12 | 4 | `flags` | bit 0: has manifest (segment 0); bit 1: encrypted (see §Encryption); bit 2: complete (writer finished the whole image) |
 | 16 | 16 | `image_uuid` | RFC 4122 byte order |
 | 32 | 4 | `segment_index` | 0-based |
 | 36 | 4 | `chunk_size` | bytes; power of two; ≥ 4096 |
@@ -110,3 +110,44 @@ incomplete.
 Encryption (header flag reserved; design in `doc/design/14-imaging.md` §2b),
 used-block-only maps (chunks are still omitted when all-zero), piece sets,
 incremental references, zstd.
+
+## Encryption (header flag bit 1)
+
+Header bytes 80..87 `keys_offset` and 88..95 `keys_length` (u64 each) locate
+the **key area** in segment 0: plaintext JSON, written right after the header
+and padded to a multiple of 4096 bytes so slots can be added or removed in
+place. The manifest follows the key area.
+
+```json
+{"version":1,"cipher":"chacha20-poly1305","kdf":"pbkdf2-hmac-sha256",
+ "digest":{"salt":"<16 bytes hex>","iterations":600000,"hash":"<32 bytes hex>"},
+ "slots":[{"id":0,"type":"passphrase","label":"...","salt":"<16 hex>","iterations":600000,
+           "nonce":"<12 hex>","wrapped":"<48 hex>"}]}
+```
+
+- One random 256-bit **master key** per image. `digest.hash` is
+  PBKDF2-HMAC-SHA256(master key, `digest.salt`, `digest.iterations`, 32) and
+  tells a wrong passphrase from a damaged slot.
+- A **slot** wraps the master key with AEAD_CHACHA20_POLY1305 under the key
+  PBKDF2-HMAC-SHA256(passphrase, `salt`, `iterations`, 32), nonce `nonce`,
+  additional data `"stein-key-slot"`; `wrapped` is ciphertext (32) + tag (16).
+  Up to 8 slots; the last one cannot be removed.
+- **Nonces** are 12 bytes: `le64(n) || tag`, where `tag` is `CHNK` with the
+  chunk index, `MANF` with 0 for the manifest, `HASH` with 0 for the image hash.
+  The master key is used for one image only, so every nonce is unique.
+- **Manifest**: `manifest_offset/length` point at AEAD(key, nonce MANF, aad
+  `"manifest"`, plaintext JSON); `manifest_length` includes the 16-byte tag.
+- **Chunks**: the stored payload (compressed or raw) is AEAD(key, nonce
+  CHNK(index), aad = `le64(index) || le32(flags) || le32(raw_length)`,
+  payload); `stored_length` includes the tag, `stored_crc` is the CRC-32C of the
+  ciphertext (verifiable without the key), `raw_crc` is 0 (a plaintext CRC
+  would leak; the tag authenticates the chunk). Zero chunks are still omitted
+  or flagged, so the zero pattern of the source is visible, as with discards
+  on LUKS volumes.
+- **Image hash**: the trailer's `image_hash` is SHA-256(plaintext image) XOR
+  the first 32 bytes of the ChaCha20 keystream for (key, nonce HASH, counter
+  0). Readers with the key recover and check it; readers without it see
+  random bytes. Keyless integrity comes from the per-chunk `stored_crc`.
+- Readers open an encrypted image **locked**: header, segments, chunk map and
+  stored CRCs work (`verify --level 2`); the manifest, chunk contents and the
+  image hash need a successful unlock.

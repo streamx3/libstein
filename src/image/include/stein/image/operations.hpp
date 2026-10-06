@@ -9,6 +9,7 @@
 #include "stein/core/json.hpp"
 #include "stein/core/progress.hpp"
 #include "stein/image/copy.hpp"
+#include "stein/image/keys.hpp"
 #include "stein/image/stein_format.hpp"
 
 #include <filesystem>
@@ -26,6 +27,8 @@ struct CreateOptions {
     bool computeImageHash = true;
     bool recordTopology = true;       // probe the source and store the tree in the manifest
     bool usedBlocksOnly = false;      // read allocation bitmaps and store free space as zero chunks
+    std::string passphrase;           // non-empty: encrypt (ChaCha20-Poly1305, key area with one passphrase slot)
+    std::uint32_t kdfIterations = Keys::kDefaultIterations;
     std::string sourceName;           // defaults to device->name()
     std::string sourceIdentity;       // platform identity when known
     std::string notes;
@@ -64,6 +67,9 @@ struct VerifyResult {
 
 struct ImageInfo {
     SegmentHeader header;
+    bool encrypted = false;
+    bool unlocked = false;            // manifest and hash below are only meaningful when !encrypted || unlocked
+    std::size_t keySlots = 0;
     json::Value manifest;
     std::vector<SegmentInfo> segments;
     std::uint64_t chunksTotal = 0, chunksStored = 0;
@@ -74,13 +80,19 @@ struct ImageInfo {
 
 Expected<CreateResult> createImage(std::shared_ptr<BlockDevice> source, const std::filesystem::path& out, const CreateOptions& options,
                                    Progress& progress);
+// `passphrase` unlocks encrypted images; empty leaves them locked (restore, level-3 verify
+// and openImage then fail with Permission; info and level-2 verify work without the key).
 Expected<RestoreResult> restoreImage(const std::filesystem::path& image, BlockDevice& target, const RestoreOptions& options,
-                                     Progress& progress);
+                                     Progress& progress, const std::string& passphrase = {});
 // level: 1 structure only, 2 stored CRCs, 3 full content (decompress + raw CRCs + SHA-256).
-Expected<VerifyResult> verifyImage(const std::filesystem::path& image, int level, Progress& progress);
-Expected<ImageInfo> imageInfo(const std::filesystem::path& image);
+Expected<VerifyResult> verifyImage(const std::filesystem::path& image, int level, Progress& progress, const std::string& passphrase = {});
+Expected<ImageInfo> imageInfo(const std::filesystem::path& image, const std::string& passphrase = {});
 // Open a .stein image as a read-only block device (R5d: images are devices).
-Expected<std::shared_ptr<BlockDevice>> openImage(const std::filesystem::path& image);
+Expected<std::shared_ptr<BlockDevice>> openImage(const std::filesystem::path& image, const std::string& passphrase = {});
+// Key slot management on an existing encrypted image (the file is rewritten in place).
+Expected<Keys> imageKeys(const std::filesystem::path& image);
+Expected<int> addImageKey(const std::filesystem::path& image, const std::string& passphrase, const std::string& newPassphrase, std::uint32_t iterations = Keys::kDefaultIterations, std::string label = {});
+Expected<void> removeImageKey(const std::filesystem::path& image, const std::string& passphrase, int slotId);
 
 // Split raw images: disk.img.000/.001/..., disk.img.001-based sets, or
 // `split -d` style disk.img.00/.01. `path` may be any member or the common

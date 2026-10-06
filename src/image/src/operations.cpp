@@ -76,6 +76,14 @@ Expected<CreateResult> createImage(std::shared_ptr<BlockDevice> source, const st
                                    Progress& progress) {
     if (!source) return fail(ErrorCategory::InvalidArgument, "null source");
     WriterOptions wo;
+    std::optional<Keys> keys;
+    if (!options.passphrase.empty()) {
+        auto k = Keys::create(options.passphrase, options.kdfIterations, "created with the image");
+        if (!k) return fail(k.error());
+        keys = std::move(*k);
+        wo.encryptionKey = keys->master();
+        wo.keysJson = keys->toJson();
+    }
     wo.chunkSize = options.chunkSize;
     wo.compression = options.compression;
     wo.splitSize = options.splitSize;
@@ -132,13 +140,29 @@ Expected<CreateResult> createImage(std::shared_ptr<BlockDevice> source, const st
     r.imageUuid = (*writer)->imageUuid();
     r.stats = *stats;
     r.storedBytes = (*writer)->bytesStored();
-    if (auto reader = SteinReader::open(out); reader && (*reader)->imageHash()) r.imageHashHex = hex32(*(*reader)->imageHash());
+    if (auto reader = SteinReader::open(out); reader) {
+        if (keys) (void)(*reader)->unlockWithKey(*keys->master());
+        if ((*reader)->imageHash()) r.imageHashHex = hex32(*(*reader)->imageHash());
+    }
     return r;
 }
 
-Expected<RestoreResult> restoreImage(const std::filesystem::path& image, BlockDevice& target, const RestoreOptions& options,
-                                     Progress& progress) {
+namespace {
+// Open and, when encrypted and a passphrase is given, unlock. `needContent` turns a
+// still-locked image into a Permission error.
+Expected<std::shared_ptr<SteinReader>> openReader(const std::filesystem::path& image, const std::string& passphrase, bool needContent) {
     auto reader = SteinReader::open(image);
+    if (!reader) return reader;
+    if ((*reader)->encrypted() && !passphrase.empty())
+        if (auto u = (*reader)->unlock(passphrase); !u) return fail(u.error());
+    if (needContent && (*reader)->locked()) return fail(ErrorCategory::Permission, "image " + image.string() + " is encrypted; a passphrase is required");
+    return reader;
+}
+} // namespace
+
+Expected<RestoreResult> restoreImage(const std::filesystem::path& image, BlockDevice& target, const RestoreOptions& options,
+                                     Progress& progress, const std::string& passphrase) {
+    auto reader = openReader(image, passphrase, true);
     if (!reader) return fail(reader.error());
     const auto& h = (*reader)->header();
     RestoreResult result;
@@ -174,9 +198,9 @@ Expected<RestoreResult> restoreImage(const std::filesystem::path& image, BlockDe
     return result;
 }
 
-Expected<VerifyResult> verifyImage(const std::filesystem::path& image, int level, Progress& progress) {
+Expected<VerifyResult> verifyImage(const std::filesystem::path& image, int level, Progress& progress, const std::string& passphrase) {
     VerifyResult v;
-    auto reader = SteinReader::open(image);
+    auto reader = openReader(image, passphrase, level >= 3);
     if (!reader) return fail(reader.error());
     v.structureOk = true;
     v.complete = (*reader)->complete();
@@ -219,11 +243,15 @@ Expected<VerifyResult> verifyImage(const std::filesystem::path& image, int level
     return v;
 }
 
-Expected<ImageInfo> imageInfo(const std::filesystem::path& image) {
-    auto reader = SteinReader::open(image);
+Expected<ImageInfo> imageInfo(const std::filesystem::path& image, const std::string& passphrase) {
+    auto reader = openReader(image, passphrase, false);
     if (!reader) return fail(reader.error());
     ImageInfo info;
     info.header = (*reader)->header();
+    info.encrypted = (*reader)->encrypted();
+    info.unlocked = info.encrypted && !(*reader)->locked();
+    if (info.encrypted)
+        if (auto k = Keys::fromJson((*reader)->keysJson())) info.keySlots = k->slots().size();
     info.manifest = (*reader)->manifest();
     info.segments = (*reader)->segments();
     info.chunksTotal = (*reader)->totalChunks();
@@ -234,10 +262,42 @@ Expected<ImageInfo> imageInfo(const std::filesystem::path& image) {
     return info;
 }
 
-Expected<std::shared_ptr<BlockDevice>> openImage(const std::filesystem::path& image) {
-    auto reader = SteinReader::open(image);
+Expected<std::shared_ptr<BlockDevice>> openImage(const std::filesystem::path& image, const std::string& passphrase) {
+    auto reader = openReader(image, passphrase, true);
     if (!reader) return fail(reader.error());
     return (*reader)->asDevice();
+}
+
+Expected<Keys> imageKeys(const std::filesystem::path& image) {
+    auto reader = SteinReader::open(image);
+    if (!reader) return fail(reader.error());
+    if (!(*reader)->encrypted()) return fail(ErrorCategory::InvalidArgument, "image is not encrypted");
+    return Keys::fromJson((*reader)->keysJson());
+}
+
+Expected<int> addImageKey(const std::filesystem::path& image, const std::string& passphrase, const std::string& newPassphrase, std::uint32_t iterations, std::string label) {
+    auto reader = SteinReader::open(image);
+    if (!reader) return fail(reader.error());
+    if (!(*reader)->encrypted()) return fail(ErrorCategory::InvalidArgument, "image is not encrypted");
+    auto keys = Keys::fromJson((*reader)->keysJson());
+    if (!keys) return fail(keys.error());
+    auto master = keys->unlock(passphrase);
+    if (!master) return fail(master.error());
+    auto id = keys->addSlot(*master, newPassphrase, iterations, std::move(label));
+    if (!id) return fail(id.error());
+    if (auto w = (*reader)->writeKeys(keys->toJson()); !w) return fail(w.error());
+    return *id;
+}
+
+Expected<void> removeImageKey(const std::filesystem::path& image, const std::string& passphrase, int slotId) {
+    auto reader = SteinReader::open(image);
+    if (!reader) return fail(reader.error());
+    if (!(*reader)->encrypted()) return fail(ErrorCategory::InvalidArgument, "image is not encrypted");
+    auto keys = Keys::fromJson((*reader)->keysJson());
+    if (!keys) return fail(keys.error());
+    if (auto master = keys->unlock(passphrase); !master) return fail(master.error());
+    if (auto r = keys->removeSlot(slotId); !r) return r;
+    return (*reader)->writeKeys(keys->toJson());
 }
 
 namespace {

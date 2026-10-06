@@ -30,6 +30,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <iostream>
 #include <string>
 #include <vector>
 
@@ -58,6 +60,9 @@ int usage() {
                "  stein image restore <in.stein> <device|file> [--no-verify] [--force]\n"
                "  stein image verify  <in.stein> [--level 1|2|3]\n"
                "  stein image info    <in.stein>\n"
+               "  stein image keys    <in.stein> list | add [--new-passphrase P] [--name LABEL] | remove <id>\n"
+               "      --passphrase P | --passphrase-file F | $STEIN_PASSPHRASE unlock encrypted images (else a prompt);\n"
+               "      image create with --passphrase encrypts (chacha20-poly1305, passphrase key slots)\n"
                "  stein fs      <image> [--doc]       filesystem / container signature, label, uuid\n"
                "  stein fs dump <image> <piece.sparse> [--part N]   save the filesystem's metadata regions alone\n"
                "  stein fs restore <piece.sparse> <image>\n"
@@ -83,6 +88,8 @@ struct Args {
     int level = 0;
     std::string compress, split, chunk;
     std::string start, size, end, type, name, index;
+    std::string passphrase, passphraseFile, newPassphrase;
+    std::uint32_t kdfIterations = 0;
     std::uint32_t sectorSize = 512;
 };
 
@@ -108,16 +115,73 @@ Args parse(int argc, char** argv) {
         else if (s == "--no-wipe") a.noWipe = true;
         else if (s == "--unlock") a.unlock = true;
         else if (s == "--used-only") a.usedOnly = true;
+        else if (s == "--passphrase" && i + 1 < argc) a.passphrase = argv[++i];
+        else if (s == "--passphrase-file" && i + 1 < argc) a.passphraseFile = argv[++i];
+        else if (s == "--new-passphrase" && i + 1 < argc) a.newPassphrase = argv[++i];
+        else if (s == "--kdf-iterations" && i + 1 < argc) a.kdfIterations = static_cast<std::uint32_t>(std::stoul(argv[++i]));
         else a.positional.push_back(s);
     }
     return a;
 }
 
+#if !defined(_WIN32)
+#include <termios.h>
+#include <unistd.h>
+#else
+#include <io.h>
+#include <windows.h>
+#endif
+
+// Passphrase: --passphrase, --passphrase-file, $STEIN_PASSPHRASE, else a no-echo prompt on a terminal.
+std::string readPassphrase(const Args& a, const char* prompt) {
+    if (!a.passphrase.empty()) return a.passphrase;
+    if (!a.passphraseFile.empty()) {
+        std::ifstream in(a.passphraseFile, std::ios::binary);
+        std::string line;
+        std::getline(in, line);
+        while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
+        return line;
+    }
+    if (const char* e = std::getenv("STEIN_PASSPHRASE"); e && *e) return e;
+    std::string line;
+#if !defined(_WIN32)
+    if (!isatty(STDIN_FILENO)) {
+        std::getline(std::cin, line);
+        return line;
+    }
+    std::fprintf(stderr, "%s", prompt);
+    termios old{};
+    tcgetattr(STDIN_FILENO, &old);
+    termios noecho = old;
+    noecho.c_lflag &= ~static_cast<tcflag_t>(ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &noecho);
+    std::getline(std::cin, line);
+    tcsetattr(STDIN_FILENO, TCSANOW, &old);
+    std::fputc('\n', stderr);
+#else
+    if (!_isatty(_fileno(stdin))) {
+        std::getline(std::cin, line);
+        return line;
+    }
+    std::fprintf(stderr, "%s", prompt);
+    HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode = 0;
+    GetConsoleMode(h, &mode);
+    SetConsoleMode(h, mode & ~static_cast<DWORD>(ENABLE_ECHO_INPUT));
+    std::getline(std::cin, line);
+    SetConsoleMode(h, mode);
+    std::fputc('\n', stderr);
+#endif
+    return line;
+}
+
+std::string g_passphrase;   // set from the arguments once; used when an encrypted image is opened as a device
+
 Expected<std::shared_ptr<BlockDevice>> openImage(const std::string& path, bool writable, std::uint32_t ss) {
     // A .stein image opens as a (read-only) device like any disk.
     std::error_code ec;
     if (platform::isDevicePath(path)) return platform::openAny(path, writable ? platform::OpenMode::ReadWrite : platform::OpenMode::ReadOnly, ss);
-    if (!writable && std::filesystem::is_regular_file(path, ec) && image::SteinReader::looksLikeStein(path)) return image::openImage(path);
+    if (!writable && std::filesystem::is_regular_file(path, ec) && image::SteinReader::looksLikeStein(path)) return image::openImage(path, g_passphrase);
     // Split raw sets (disk.img.000, .001, ...) open as one device, by any member or the prefix.
     if (!std::filesystem::is_block_file(path, ec) && image::findSplitRaw(path)) return image::openSplitRaw(path, writable, ss);
     return platform::openAny(path, writable ? platform::OpenMode::ReadWrite : platform::OpenMode::ReadOnly, ss);
@@ -168,6 +232,11 @@ int cmdImage(const Args& a) {
         if (!a.chunk.empty()) co.chunkSize = static_cast<std::uint32_t>(parseSize(a.chunk));
         co.sourceName = a.positional[2];
         co.usedBlocksOnly = a.usedOnly;
+        if (!a.passphrase.empty() || !a.passphraseFile.empty() || a.kdfIterations) {
+            co.passphrase = readPassphrase(a, "Passphrase for the new image: ");
+            if (co.passphrase.empty()) return die(Error(ErrorCategory::InvalidArgument, "empty passphrase"));
+            if (a.kdfIterations) co.kdfIterations = a.kdfIterations;
+        }
         if (auto d = platform::current().describe(a.positional[2])) co.sourceIdentity = d->identity();
         auto r = image::createImage(*dev, a.positional[3], co, progress);
         if (!r) return die(r.error());
@@ -197,7 +266,7 @@ int cmdImage(const Args& a) {
         image::RestoreOptions ro;
         ro.verifyPayloadFirst = !a.noVerify;
         ro.allowSmallerTarget = a.force;
-        auto r = image::restoreImage(a.positional[2], **dev, ro, progress);
+        auto r = image::restoreImage(a.positional[2], **dev, ro, progress, g_passphrase);
         if (!r) return die(r.error());
         std::printf("restored %s (%llu chunks)%s%s\n", formatSize(r->stats.bytesRead).c_str(), static_cast<unsigned long long>(r->stats.chunks),
                     r->targetLarger ? "; target is larger than the image" : "", r->targetSmaller ? "; target was SMALLER, image truncated" : "");
@@ -205,7 +274,7 @@ int cmdImage(const Args& a) {
     }
     if (sub == "verify") {
         const int level = a.level ? a.level : 3;
-        auto v = image::verifyImage(a.positional[2], level, progress);
+        auto v = image::verifyImage(a.positional[2], level, progress, g_passphrase);
         if (!v) return die(v.error());
         std::printf("structure %s, %s, %llu/%llu chunks stored, %llu checked, %llu bad", v->structureOk ? "ok" : "BAD", v->complete ? "complete" : "INCOMPLETE",
                     static_cast<unsigned long long>(v->chunksStored), static_cast<unsigned long long>(v->chunksTotal),
@@ -216,19 +285,54 @@ int cmdImage(const Args& a) {
         return (v->chunksBad || (v->imageHashChecked && !v->imageHashOk)) ? 2 : (v->complete ? 0 : 1);
     }
     if (sub == "info") {
-        auto i = image::imageInfo(a.positional[2]);
+        auto i = image::imageInfo(a.positional[2], g_passphrase);
         if (!i) return die(i.error());
         std::printf("stein image v%u  uuid %s  %s\n", i->header.version, i->header.imageUuid.toString(false).c_str(), i->complete ? "complete" : "INCOMPLETE");
         std::printf("source size %s, sector %u, chunk %s, compression %s, %llu/%llu chunks stored, %s on disk in %zu segment(s)\n",
                     formatSizeExact(i->header.totalSize).c_str(), i->header.sectorSize, formatSize(i->header.chunkSize).c_str(),
                     std::string(image::toString(i->header.compression)).c_str(), static_cast<unsigned long long>(i->chunksStored),
                     static_cast<unsigned long long>(i->chunksTotal), formatSize(i->storedBytes).c_str(), i->segments.size());
+        if (i->encrypted) std::printf("encrypted (chacha20-poly1305), %zu key slot(s), %s\n", i->keySlots, i->unlocked ? "unlocked" : "LOCKED - pass --passphrase for manifest and hash");
         if (i->imageHashHex) std::printf("sha256 %s\n", i->imageHashHex->c_str());
         for (const auto& s : i->segments)
             std::printf("  segment %u: %s (%s, %llu records%s)\n", s.header.segmentIndex, s.path.string().c_str(), formatSize(s.fileSize).c_str(),
                         static_cast<unsigned long long>(s.records), s.trailer ? "" : ", NO TRAILER - recovered by scanning");
-        std::printf("manifest:\n%s\n", i->manifest.dump(2).c_str());
+        if (!i->encrypted || i->unlocked) std::printf("manifest:\n%s\n", i->manifest.dump(2).c_str());
         return 0;
+    }
+    if (sub == "keys") {
+        // stein image keys <in.stein> list | add | remove <id>
+        if (a.positional.size() < 4) return usage();
+        const std::string& op = a.positional[3];
+        if (op == "list") {
+            auto k = image::imageKeys(a.positional[2]);
+            if (!k) return die(k.error());
+            for (const auto& slot : k->slots())
+                std::printf("slot %d: passphrase, pbkdf2-hmac-sha256 %u iterations%s\n", slot.id, slot.iterations, slot.label.empty() ? "" : (" \"" + slot.label + "\"").c_str());
+            return 0;
+        }
+        const std::string current = readPassphrase(a, "Current passphrase: ");
+        if (op == "add") {
+            std::string fresh = a.newPassphrase;
+            if (fresh.empty()) {
+                Args b = a;
+                b.passphrase.clear();
+                b.passphraseFile.clear();
+                fresh = readPassphrase(b, "New passphrase: ");
+            }
+            if (fresh.empty()) return die(Error(ErrorCategory::InvalidArgument, "empty new passphrase"));
+            auto id = image::addImageKey(a.positional[2], current, fresh, a.kdfIterations ? a.kdfIterations : image::Keys::kDefaultIterations, a.name);
+            if (!id) return die(id.error());
+            std::printf("added key slot %d\n", *id);
+            return 0;
+        }
+        if (op == "remove") {
+            if (a.positional.size() < 5) return usage();
+            if (auto r = image::removeImageKey(a.positional[2], current, std::stoi(a.positional[4])); !r) return die(r.error());
+            std::printf("removed key slot %s\n", a.positional[4].c_str());
+            return 0;
+        }
+        return usage();
     }
     return usage();
 }
@@ -695,6 +799,8 @@ int cmdApp(const Args& a) {
     app::RunOptions o;
     o.unlock = a.unlock;
     o.dryRun = a.dryRun;
+    o.passphrase = g_passphrase;
+    if (o.passphrase.empty() && profile->image.encrypt && (sub == "backup" || sub == "restore" || sub == "verify")) o.passphrase = readPassphrase(a, "Passphrase: ");
     if (sub == "status") {
         auto st = app::status(*profile, o);
         std::fputs(app::describe(*profile, st).c_str(), stdout);
@@ -727,6 +833,8 @@ int cmdTypes(const Args& a) {
 int main(int argc, char** argv) {
     Args a = parse(argc, argv);
     if (a.positional.empty()) return usage();
+    if (!a.passphrase.empty() || !a.passphraseFile.empty()) g_passphrase = readPassphrase(a, "Passphrase: ");
+    else if (const char* e = std::getenv("STEIN_PASSPHRASE"); e && *e) g_passphrase = e;
     const std::string& cmd = a.positional[0];
     if (cmd == "list") return cmdList(a);
     if (cmd == "probe") return cmdProbe(a);

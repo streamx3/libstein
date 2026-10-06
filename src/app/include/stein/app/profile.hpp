@@ -47,6 +47,8 @@ struct ImageSpec {
     std::uint32_t chunkSize = 4 * MiB;
     ByteCount splitSize = 0;
     bool usedOnly = true;              // skip free space of filesystems with readable allocation bitmaps
+    bool encrypt = false;              // the passphrase is never stored; RunOptions::passphrase supplies it
+    std::uint32_t kdfIterations = 600000;
 };
 
 struct Policy {

@@ -36,7 +36,7 @@ ctest --preset debug
 ./build/debug/tools/stein/stein repair disk.img --dry-run # GPT: rebuild a lost copy
 ./build/debug/tools/stein/stein pt create disk.img gpt     # edits are simulated, shown, then applied
 ./build/debug/tools/stein/stein pt add disk.img --size 512M --type EF00 --name EFI --dry-run
-./build/debug/tools/stein/stein image create /dev/sdb backup.stein --compress lz4
+./build/debug/tools/stein/stein image create /dev/sdb backup.stein --compress lz4 --used-only --passphrase ...   # encrypted, free space skipped
 ./build/debug/tools/stein/stein probe backup.stein        # an image is a disk
 ./build/debug/tools/stein/stein image restore backup.stein /dev/sdc
 ./build/debug/tools/stein/stein app init office.json /dev/sdb /backups/office.stein   # dr_stein-style profile

@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <span>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -43,6 +44,8 @@ bool iequals(std::string_view a, std::string_view b);
 
 // Hex dump helpers.
 std::string toHex(std::span<const std::byte> bytes, bool upper = false);
+// Inverse of toHex; nullopt on odd length or non-hex characters.
+std::optional<std::vector<std::byte>> fromHex(std::string_view hex);
 std::string toHex(std::uint64_t value, int minDigits = 0);   // "0x1A2B"
 // Multi-line "offset: hex  ascii" dump, 16 bytes per line, `base` added to offsets.
 std::string hexDump(std::span<const std::byte> bytes, std::uint64_t base = 0);

@@ -355,3 +355,114 @@ TEST_CASE("used-block-only imaging stores free space as zero chunks and restores
     CHECK(map2->usedBlocks() == map->usedBlocks());
     stein::test::removeTree(dir);
 }
+
+TEST_CASE("encrypted images: locked structure, unlock, wrong passphrase, tamper, key slots") {
+    auto dir = tmpDir("stein_test_image_enc");
+    auto src = makeSource();
+    NullProgressSink sink;
+    Progress progress(sink);
+    CreateOptions co;
+    co.chunkSize = 1 * MiB;
+    co.passphrase = "correct horse";
+    co.kdfIterations = 1000;   // fast for tests; the default is 600000
+    co.notes = "secret note";
+    auto created = createImage(src, dir / "enc.stein", co, progress);
+    REQUIRE_MESSAGE(created, (created ? std::string() : created.error().toString()));
+    CHECK(!created->imageHashHex.empty());
+
+    // Without a key: structure, stored CRCs and segment list are readable; contents are not.
+    auto locked = imageInfo(dir / "enc.stein");
+    REQUIRE(locked);
+    CHECK(locked->encrypted);
+    CHECK_FALSE(locked->unlocked);
+    CHECK(locked->keySlots == 1);
+    CHECK(locked->manifest.isNull());
+    CHECK_FALSE(locked->imageHashHex);
+    CHECK(locked->complete);
+    auto v2 = verifyImage(dir / "enc.stein", 2, progress);
+    REQUIRE(v2);
+    CHECK(v2->chunksBad == 0);
+    CHECK(verifyImage(dir / "enc.stein", 3, progress).error().category() == ErrorCategory::Permission);
+    CHECK(openImage(dir / "enc.stein").error().category() == ErrorCategory::Permission);
+    // Nothing from the manifest appears in clear in the file.
+    {
+        std::ifstream in(dir / "enc.stein", std::ios::binary);
+        std::string all((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        CHECK(all.find("secret note") == std::string::npos);
+        CHECK(all.find("stein-image") == std::string::npos);
+        CHECK(all.find("chacha20-poly1305") != std::string::npos);   // the key area is plaintext
+    }
+    // Wrong passphrase.
+    auto wrong = imageInfo(dir / "enc.stein", "wrong");
+    REQUIRE_FALSE(wrong);
+    CHECK(wrong.error().category() == ErrorCategory::Integrity);
+    // Right passphrase: manifest, hash, contents.
+    auto open = imageInfo(dir / "enc.stein", "correct horse");
+    REQUIRE(open);
+    CHECK(open->unlocked);
+    CHECK(open->manifest.get("notes").asString() == "secret note");
+    REQUIRE(open->imageHashHex);
+    CHECK(*open->imageHashHex == created->imageHashHex);
+    auto v3 = verifyImage(dir / "enc.stein", 3, progress, "correct horse");
+    REQUIRE(v3);
+    CHECK(v3->chunksBad == 0);
+    CHECK(v3->imageHashOk);
+    auto dev = openImage(dir / "enc.stein", "correct horse");
+    REQUIRE(dev);
+    auto all = (*dev)->read(0, (*dev)->size());
+    REQUIRE(all);
+    CHECK(std::equal(all->begin(), all->end(), src->bytes().begin()));
+    auto target = std::make_shared<MemoryDevice>(src->size(), 512);
+    REQUIRE(restoreImage(dir / "enc.stein", *target, RestoreOptions{}, progress, "correct horse"));
+    CHECK(std::equal(target->bytes().begin(), target->bytes().end(), src->bytes().begin()));
+    CHECK(restoreImage(dir / "enc.stein", *target, RestoreOptions{}, progress).error().category() == ErrorCategory::Permission);
+
+    // Key slots: add a second passphrase, open with it, remove the first, the first stops working.
+    auto id = addImageKey(dir / "enc.stein", "correct horse", "battery staple", 1000, "second");
+    REQUIRE_MESSAGE(id, (id ? std::string() : id.error().toString()));
+    CHECK(*id == 1);
+    CHECK(imageKeys(dir / "enc.stein")->slots().size() == 2);
+    CHECK(imageInfo(dir / "enc.stein", "battery staple")->unlocked);
+    CHECK_FALSE(addImageKey(dir / "enc.stein", "nope", "x", 1000));
+    REQUIRE(removeImageKey(dir / "enc.stein", "battery staple", 0));
+    CHECK_FALSE(imageInfo(dir / "enc.stein", "correct horse"));
+    CHECK(imageInfo(dir / "enc.stein", "battery staple")->unlocked);
+    CHECK(removeImageKey(dir / "enc.stein", "battery staple", 1).error().category() == ErrorCategory::InvalidArgument);   // last slot
+    auto v3b = verifyImage(dir / "enc.stein", 3, progress, "battery staple");
+    REQUIRE(v3b);
+    CHECK(v3b->imageHashOk);
+
+    // Tamper with one byte of a stored payload: the stored CRC catches it keyless, the tag with the key.
+    {
+        auto reader = SteinReader::open(dir / "enc.stein");
+        REQUIRE(reader);
+        std::uint64_t stored = 0;
+        for (std::uint64_t i = 0; i < (*reader)->totalChunks(); ++i)
+            if (auto rec = (*reader)->recordOf(i); rec && rec->storedLength) {
+                stored = i;
+                break;
+            }
+        auto rec = (*reader)->recordOf(stored);
+        REQUIRE(rec);
+        (void)rec;
+        reader->reset();
+        // Find the record by scanning for its index in the file via the reader map is internal; flip a byte in the first payload after the manifest instead.
+        std::fstream f(dir / "enc.stein", std::ios::in | std::ios::out | std::ios::binary);
+        f.seekg(0, std::ios::end);
+        const auto size = static_cast<std::streamoff>(f.tellg());
+        std::vector<char> bytes(static_cast<std::size_t>(size));
+        f.seekg(0);
+        f.read(bytes.data(), size);
+        const std::string magic = "CHNK";
+        auto pos = std::search(bytes.begin() + 4096, bytes.end(), magic.begin(), magic.end());
+        REQUIRE(pos != bytes.end());
+        const auto payloadPos = static_cast<std::streamoff>(std::distance(bytes.begin(), pos)) + 32 + 5;
+        f.seekp(payloadPos);
+        char c = bytes[static_cast<std::size_t>(payloadPos)] ^ 0x40;
+        f.write(&c, 1);
+    }
+    auto v2bad = verifyImage(dir / "enc.stein", 2, progress);
+    REQUIRE(v2bad);
+    CHECK(v2bad->chunksBad == 1);
+    stein::test::removeTree(dir);
+}

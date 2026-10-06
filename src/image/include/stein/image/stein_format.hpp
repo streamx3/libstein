@@ -5,6 +5,7 @@
 #include "stein/block/block_device.hpp"
 #include "stein/core/error.hpp"
 #include "stein/core/guid.hpp"
+#include "stein/core/crypto.hpp"
 #include "stein/core/hash.hpp"
 #include "stein/core/json.hpp"
 #include "stein/core/units.hpp"
@@ -42,7 +43,9 @@ struct SegmentHeader {
     std::uint8_t imageHash = 1;     // sha256
     ByteCount manifestOffset = 0, manifestLength = 0;
     ByteCount splitSize = 0;
+    ByteCount keysOffset = 0, keysLength = 0;   // encrypted images: plaintext key-area JSON (segment 0)
 
+    bool encrypted() const { return (flags & kFlagEncrypted) != 0; }
     void encode(std::span<std::byte, kSize> out) const;
     static Expected<SegmentHeader> decode(std::span<const std::byte> in);
 };
@@ -88,6 +91,10 @@ struct WriterOptions {
     bool omitZeroChunks = true;
     bool computeImageHash = true;
     json::Value manifest;                 // "source", "topology", "notes"... filled by the caller
+    // Encryption: the master key and the serialised key area (see keys.hpp). Manifest and
+    // chunk payloads are then AEAD-encrypted; the image hash is keyed.
+    std::optional<crypto::Key256> encryptionKey;
+    std::string keysJson;
 };
 
 // Sequential writer: writeChunk() in any order, finish() once.
@@ -128,6 +135,8 @@ private:
     std::unique_ptr<stein::Hasher> m_imageHasher;
     std::map<std::uint64_t, bool> m_seen;
     bool m_finished = false;
+    std::optional<crypto::Key256> m_key;
+    std::vector<std::byte> m_keysPadded;
 };
 
 struct ChunkLocation {
@@ -148,6 +157,16 @@ class SteinReader {
 public:
     static Expected<std::shared_ptr<SteinReader>> open(const std::filesystem::path& base);
     ~SteinReader();
+
+    // Encrypted images open locked: structure and stored CRCs are readable, chunk
+    // contents and the manifest are not until unlock() succeeds.
+    bool encrypted() const { return m_header.encrypted(); }
+    bool locked() const { return encrypted() && !m_key; }
+    const std::string& keysJson() const { return m_keysJson; }
+    Expected<void> unlock(const std::string& passphrase);
+    Expected<void> unlockWithKey(const crypto::Key256& key);
+    // Rewrite the key area in place (after adding/removing slots). Needs the file writable.
+    Expected<void> writeKeys(const std::string& keysJson);
 
     const SegmentHeader& header() const { return m_header; }
     const json::Value& manifest() const { return m_manifest; }
@@ -176,13 +195,20 @@ private:
     Expected<void> scanRecords(SegmentInfo& seg, std::FILE* f, ByteCount from);
     std::FILE* fileFor(std::uint32_t segment);
 
+    Expected<void> loadManifest();
+
     SegmentHeader m_header;
     json::Value m_manifest;
+    std::vector<std::byte> m_manifestRaw;      // as stored (ciphertext when encrypted)
+    std::string m_keysJson;
+    std::optional<crypto::Key256> m_key;
+    std::filesystem::path m_base;
     std::vector<SegmentInfo> m_segments;
     std::vector<std::FILE*> m_files;
     std::map<std::uint64_t, ChunkLocation> m_map;
     bool m_complete = false, m_zerosOmitted = false;
-    std::optional<std::array<std::uint8_t, 32>> m_imageHash;
+    std::optional<std::array<std::uint8_t, 32>> m_imageHash;         // plaintext hash (after unlock when encrypted)
+    std::optional<std::array<std::uint8_t, 32>> m_imageHashStored;   // as in the trailer
     std::uint64_t m_chunksTotal = 0;
     std::weak_ptr<SteinReader> m_self;
     friend class ImageDevice;

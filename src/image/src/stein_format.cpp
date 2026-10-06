@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 #include "stein/image/stein_format.hpp"
 
+#include "stein/image/keys.hpp"
+
 #include "stein/core/crc32.hpp"
 #include "stein/core/endian.hpp"
 #include "stein/core/hash.hpp"
@@ -19,6 +21,15 @@ namespace {
 constexpr char kMagic[8] = {'S', 'T', 'E', 'I', 'N', 'I', 'M', 'G'};
 constexpr char kChunkMagic[4] = {'C', 'H', 'N', 'K'};
 constexpr char kTrailerMagic[8] = {'S', 'T', 'E', 'I', 'N', 'I', 'D', 'X'};
+
+// Additional data bound to each chunk's ciphertext: index, flags and raw length.
+std::array<std::byte, 16> chunkAad(std::uint64_t index, std::uint32_t flags, std::uint32_t rawLength) {
+    std::array<std::byte, 16> aad{};
+    storeLe64(aad.data(), index);
+    storeLe32(aad.data() + 8, flags);
+    storeLe32(aad.data() + 12, rawLength);
+    return aad;
+}
 
 bool allZero(std::span<const std::byte> b) {
     std::size_t i = 0;
@@ -96,6 +107,8 @@ void SegmentHeader::encode(std::span<std::byte, kSize> o) const {
     storeLe64(o.data() + 56, manifestOffset);
     storeLe64(o.data() + 64, manifestLength);
     storeLe64(o.data() + 72, splitSize);
+    storeLe64(o.data() + 80, keysOffset);
+    storeLe64(o.data() + 88, keysLength);
 }
 
 Expected<SegmentHeader> SegmentHeader::decode(std::span<const std::byte> i) {
@@ -116,9 +129,12 @@ Expected<SegmentHeader> SegmentHeader::decode(std::span<const std::byte> i) {
     h.manifestOffset = loadLe64(i.data() + 56);
     h.manifestLength = loadLe64(i.data() + 64);
     h.splitSize = loadLe64(i.data() + 72);
+    h.keysOffset = loadLe64(i.data() + 80);
+    h.keysLength = loadLe64(i.data() + 88);
     if (h.chunkSize < 4096 || (h.chunkSize & (h.chunkSize - 1)) != 0) return fail(ErrorCategory::InvalidFormat, "bad chunk size");
     if (h.compression != Compression::None && h.compression != Compression::Lz4) return fail(ErrorCategory::Unsupported, "unknown compression");
-    if (h.flags & kFlagEncrypted) return fail(ErrorCategory::Unsupported, "encrypted images are not supported yet");
+    if ((h.flags & kFlagEncrypted) && h.segmentIndex == 0 && (h.keysLength == 0 || h.keysLength > 1 * MiB))
+        return fail(ErrorCategory::InvalidFormat, "encrypted image without a key area");
     return h;
 }
 
@@ -193,6 +209,11 @@ Expected<std::unique_ptr<SteinWriter>> SteinWriter::create(const std::filesystem
     w->m_header.compression = options.compression;
     w->m_header.imageHash = options.computeImageHash ? 1 : 0;
     w->m_header.splitSize = options.splitSize;
+    if (options.encryptionKey) {
+        if (options.keysJson.empty() || options.keysJson.size() > 1 * MiB) return fail(ErrorCategory::InvalidArgument, "encrypted image needs a key area");
+        w->m_key = options.encryptionKey;
+        w->m_header.flags |= SegmentHeader::kFlagEncrypted;
+    }
     w->m_totalChunks = (totalSize + options.chunkSize - 1) / options.chunkSize;
     if (options.computeImageHash) w->m_imageHasher = Hasher::create(HashAlgorithm::Sha256);
     if (auto r = w->openSegment(0); !r) return fail(r.error());
@@ -247,7 +268,23 @@ Expected<void> SteinWriter::openSegment(std::uint32_t index) {
         layout.set("sector_size", static_cast<std::uint64_t>(m_header.sectorSize));
         m.set("layout", std::move(layout));
         manifest = m.dump();
-        h.manifestOffset = SegmentHeader::kSize;
+        ByteCount pos = SegmentHeader::kSize;
+        if (m_key) {
+            // Key area (plaintext JSON) padded to its capacity so slots can be added later in place.
+            const ByteCount keysCapacity = std::max<ByteCount>(4096, (m_options.keysJson.size() + 4095) / 4096 * 4096);
+            h.keysOffset = pos;
+            h.keysLength = m_options.keysJson.size();
+            pos += keysCapacity;
+            // Manifest: AEAD-encrypted.
+            std::vector<std::byte> enc(manifest.size() + crypto::kTagSize);
+            const std::string aad = "manifest";
+            crypto::aeadEncrypt(*m_key, manifestNonce(), std::span<const std::byte>(reinterpret_cast<const std::byte*>(aad.data()), aad.size()),
+                                std::span<const std::byte>(reinterpret_cast<const std::byte*>(manifest.data()), manifest.size()), enc);
+            manifest.assign(reinterpret_cast<const char*>(enc.data()), enc.size());
+            m_keysPadded.assign(keysCapacity, std::byte{0});
+            std::memcpy(m_keysPadded.data(), m_options.keysJson.data(), m_options.keysJson.size());
+        }
+        h.manifestOffset = pos;
         h.manifestLength = manifest.size();
     } else {
         h.flags &= ~SegmentHeader::kFlagHasManifest;
@@ -255,8 +292,14 @@ Expected<void> SteinWriter::openSegment(std::uint32_t index) {
     std::array<std::byte, SegmentHeader::kSize> hb{};
     h.encode(hb);
     if (auto r = writeAll(hb); !r) return r;
+    if (index == 0 && m_key)
+        if (auto r = writeAll(m_keysPadded); !r) return r;
     if (!manifest.empty())
         if (auto r = writeAll(std::span<const std::byte>(reinterpret_cast<const std::byte*>(manifest.data()), manifest.size())); !r) return r;
+    if (index == 0) {
+        m_header.keysOffset = h.keysOffset;
+        m_header.keysLength = h.keysLength;
+    }
     return {};
 }
 
@@ -275,6 +318,13 @@ Expected<void> SteinWriter::closeSegment(bool last) {
     if (last && m_imageHasher) {
         auto d = m_imageHasher->finish();
         std::copy_n(d.begin(), 32, t.imageHash.begin());
+        if (m_key) {
+            // Hide the plaintext hash from readers without the key.
+            std::array<std::byte, 32> in{}, out{};
+            for (int k = 0; k < 32; ++k) in[static_cast<std::size_t>(k)] = std::byte(t.imageHash[static_cast<std::size_t>(k)]);
+            crypto::chacha20Xor(*m_key, imageHashNonce(), 0, in, out);
+            for (int k = 0; k < 32; ++k) t.imageHash[static_cast<std::size_t>(k)] = std::to_integer<std::uint8_t>(out[static_cast<std::size_t>(k)]);
+        }
         t.flags |= SegmentTrailer::kFlagImageHash;
     }
     t.indexCrc = Crc32c::compute(idx);
@@ -316,9 +366,15 @@ Expected<void> SteinWriter::writeChunk(std::uint64_t index, std::span<const std:
         } else {
             payload.assign(raw.begin(), raw.end());
         }
+        if (m_key) {
+            std::vector<std::byte> enc(payload.size() + crypto::kTagSize);
+            crypto::aeadEncrypt(*m_key, chunkNonce(index), chunkAad(index, rec.flags, rec.rawLength), payload, enc);
+            payload.swap(enc);
+        }
         rec.storedLength = static_cast<std::uint32_t>(payload.size());
         rec.storedCrc = Crc32c::compute(payload);
     }
+    if (m_key) rec.rawCrc = 0;   // a plaintext CRC would leak; the AEAD tag authenticates the chunk
     const ByteCount recordBytes = ChunkRecord::kHeaderSize + payload.size();
     // Split: start a new segment when this record would exceed the limit (leave room for index+trailer).
     const ByteCount reserve = (m_index.size() + 1) * 16 + SegmentTrailer::kSize;
@@ -352,6 +408,8 @@ Expected<void> SteinWriter::finish() {
         if (auto existing = SegmentHeader::decode(hb)) {
             h.manifestOffset = existing->manifestOffset;
             h.manifestLength = existing->manifestLength;
+            h.keysOffset = existing->keysOffset;
+            h.keysLength = existing->keysLength;
         }
     }
     h.encode(hb);
@@ -385,6 +443,7 @@ std::uint64_t SteinReader::totalChunks() const {
 Expected<std::shared_ptr<SteinReader>> SteinReader::open(const std::filesystem::path& base) {
     auto r = std::shared_ptr<SteinReader>(new SteinReader());
     r->m_self = r;
+    r->m_base = base;
     if (auto e = r->loadSegment(0, base); !e) return fail(e.error());
     // Further segments: name.NNN while they exist and the previous one was not the last.
     for (std::uint32_t i = 1;; ++i) {
@@ -420,13 +479,17 @@ Expected<void> SteinReader::loadSegment(std::uint32_t index, const std::filesyst
     if (h->segmentIndex != index) return fail(ErrorCategory::InvalidFormat, path.string() + " is segment " + std::to_string(h->segmentIndex) + ", expected " + std::to_string(index));
     if (index == 0) {
         m_header = *h;
+        if (h->encrypted()) {
+            std::vector<std::byte> kb(h->keysLength);
+            if (auto e = readExact(f, h->keysOffset, kb, "key area"); !e) return e;
+            m_keysJson.assign(reinterpret_cast<const char*>(kb.data()), kb.size());
+        }
         if (h->manifestLength) {
             if (h->manifestLength > 64 * MiB) return fail(ErrorCategory::InvalidFormat, "manifest too large");
-            std::vector<std::byte> mb(h->manifestLength);
-            if (auto e = readExact(f, h->manifestOffset, mb, "manifest"); !e) return e;
-            auto mj = json::Value::parse(std::string_view(reinterpret_cast<const char*>(mb.data()), mb.size()));
-            if (!mj) return fail(ErrorCategory::InvalidFormat, "manifest is not valid JSON: " + mj.error().message());
-            m_manifest = std::move(*mj);
+            m_manifestRaw.resize(h->manifestLength);
+            if (auto e = readExact(f, h->manifestOffset, m_manifestRaw, "manifest"); !e) return e;
+            if (!h->encrypted())
+                if (auto e = loadManifest(); !e) return e;
         }
     } else if (h->imageUuid != m_header.imageUuid) {
         return fail(ErrorCategory::InvalidFormat, path.string() + " belongs to a different image");
@@ -451,7 +514,10 @@ Expected<void> SteinReader::loadSegment(std::uint32_t index, const std::filesyst
                     haveTrailer = true;
                     if (t->chunksTotal) m_chunksTotal = t->chunksTotal;
                     if (t->flags & SegmentTrailer::kFlagZerosOmitted) m_zerosOmitted = true;
-                    if (t->flags & SegmentTrailer::kFlagImageHash) m_imageHash = t->imageHash;
+                    if (t->flags & SegmentTrailer::kFlagImageHash) {
+                        m_imageHashStored = t->imageHash;
+                        if (!m_header.encrypted()) m_imageHash = t->imageHash;
+                    }
                 }
             }
         }
@@ -462,6 +528,80 @@ Expected<void> SteinReader::loadSegment(std::uint32_t index, const std::filesyst
         m_zerosOmitted = true;   // conservative: unknown chunks read as zero
     }
     m_segments.push_back(std::move(seg));
+    return {};
+}
+
+Expected<void> SteinReader::loadManifest() {
+    std::vector<std::byte> plain;
+    std::span<const std::byte> text = m_manifestRaw;
+    if (m_header.encrypted()) {
+        if (!m_key) return fail(ErrorCategory::Permission, "image is encrypted; unlock it first");
+        if (m_manifestRaw.size() < crypto::kTagSize) return fail(ErrorCategory::InvalidFormat, "encrypted manifest too short");
+        plain.resize(m_manifestRaw.size() - crypto::kTagSize);
+        const std::string aad = "manifest";
+        if (auto d = crypto::aeadDecrypt(*m_key, manifestNonce(), std::span<const std::byte>(reinterpret_cast<const std::byte*>(aad.data()), aad.size()), m_manifestRaw, plain); !d)
+            return fail(Error(ErrorCategory::Integrity, "manifest: " + d.error().message()));
+        text = plain;
+    }
+    auto mj = json::Value::parse(std::string_view(reinterpret_cast<const char*>(text.data()), text.size()));
+    if (!mj) return fail(ErrorCategory::InvalidFormat, "manifest is not valid JSON: " + mj.error().message());
+    m_manifest = std::move(*mj);
+    return {};
+}
+
+Expected<void> SteinReader::unlockWithKey(const crypto::Key256& key) {
+    if (!encrypted()) return fail(ErrorCategory::InvalidArgument, "image is not encrypted");
+    auto keys = Keys::fromJson(m_keysJson);
+    if (!keys) return fail(keys.error());
+    if (!keys->verifyMaster(key)) return fail(ErrorCategory::Integrity, "key does not match this image");
+    m_key = key;
+    if (!m_manifestRaw.empty())
+        if (auto m = loadManifest(); !m) {
+            m_key.reset();
+            return m;
+        }
+    if (m_imageHashStored) {
+        std::array<std::byte, 32> in{}, out{};
+        for (int k = 0; k < 32; ++k) in[static_cast<std::size_t>(k)] = std::byte((*m_imageHashStored)[static_cast<std::size_t>(k)]);
+        crypto::chacha20Xor(key, imageHashNonce(), 0, in, out);
+        std::array<std::uint8_t, 32> h{};
+        for (int k = 0; k < 32; ++k) h[static_cast<std::size_t>(k)] = std::to_integer<std::uint8_t>(out[static_cast<std::size_t>(k)]);
+        m_imageHash = h;
+    }
+    return {};
+}
+
+Expected<void> SteinReader::unlock(const std::string& passphrase) {
+    if (!encrypted()) return fail(ErrorCategory::InvalidArgument, "image is not encrypted");
+    auto keys = Keys::fromJson(m_keysJson);
+    if (!keys) return fail(keys.error());
+    auto key = keys->unlock(passphrase);
+    if (!key) return fail(key.error());
+    return unlockWithKey(*key);
+}
+
+Expected<void> SteinReader::writeKeys(const std::string& keysJson) {
+    if (!encrypted()) return fail(ErrorCategory::InvalidArgument, "image is not encrypted");
+    const ByteCount capacity = m_header.manifestOffset - m_header.keysOffset;
+    if (keysJson.size() > capacity) return fail(ErrorCategory::OutOfRange, "key area too small for the new slots");
+    std::FILE* f = openFile(m_base, "r+b");
+    if (!f) return fail(ErrorCategory::Io, "cannot open " + m_base.string() + " for writing", errno);
+    std::vector<std::byte> padded(capacity, std::byte{0});
+    std::memcpy(padded.data(), keysJson.data(), keysJson.size());
+    bool ok = seekTo(f, m_header.keysOffset) && std::fwrite(padded.data(), 1, padded.size(), f) == padded.size();
+    if (ok) {
+        SegmentHeader h = m_header;
+        h.keysLength = keysJson.size();
+        std::array<std::byte, SegmentHeader::kSize> hb{};
+        h.encode(hb);
+        ok = seekTo(f, 0) && std::fwrite(hb.data(), 1, hb.size(), f) == hb.size() && std::fflush(f) == 0;
+        if (ok) {
+            m_header = h;
+            m_keysJson = keysJson;
+        }
+    }
+    std::fclose(f);
+    if (!ok) return fail(ErrorCategory::Io, "cannot rewrite the key area", errno);
     return {};
 }
 
@@ -534,6 +674,14 @@ Expected<void> SteinReader::readChunk(std::uint64_t index, std::span<std::byte> 
     std::vector<std::byte> payload(rec->storedLength);
     if (auto e = readExact(fileFor(it->second.segment), it->second.offset + ChunkRecord::kHeaderSize, payload, "payload"); !e) return e;
     if (Crc32c::compute(payload) != rec->storedCrc) return fail(ErrorCategory::Integrity, "chunk " + std::to_string(index) + ": stored payload CRC mismatch");
+    if (m_header.encrypted()) {
+        if (!m_key) return fail(ErrorCategory::Permission, "image is encrypted; unlock it first");
+        if (payload.size() < crypto::kTagSize) return fail(ErrorCategory::InvalidFormat, "encrypted payload too short");
+        std::vector<std::byte> plain(payload.size() - crypto::kTagSize);
+        if (auto d = crypto::aeadDecrypt(*m_key, chunkNonce(index), chunkAad(index, rec->flags, rec->rawLength), payload, plain); !d)
+            return fail(Error(ErrorCategory::Integrity, "chunk " + std::to_string(index) + ": " + d.error().message()));
+        payload.swap(plain);
+    }
     if (rec->flags & ChunkRecord::kFlagCompressed) {
         if (m_header.compression != Compression::Lz4) return fail(ErrorCategory::Unsupported, "unknown compression");
         if (auto d = lz4::decompress(payload, out); !d) return d;
@@ -541,7 +689,7 @@ Expected<void> SteinReader::readChunk(std::uint64_t index, std::span<std::byte> 
         if (payload.size() != out.size()) return fail(ErrorCategory::InvalidFormat, "uncompressed payload length mismatch");
         std::copy(payload.begin(), payload.end(), out.begin());
     }
-    if (Crc32c::compute(out) != rec->rawCrc) return fail(ErrorCategory::Integrity, "chunk " + std::to_string(index) + ": raw CRC mismatch after decompression");
+    if (!m_header.encrypted() && Crc32c::compute(out) != rec->rawCrc) return fail(ErrorCategory::Integrity, "chunk " + std::to_string(index) + ": raw CRC mismatch after decompression");
     return {};
 }
 

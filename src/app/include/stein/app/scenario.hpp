@@ -14,6 +14,7 @@ struct ResolvedTarget {
 };
 
 struct RunOptions {
+    std::string passphrase;            // for encrypted images (backup: required when image.encrypt)
     bool unlock = false;               // accept an osPath-only target despite policy.lockTarget
     bool dryRun = false;               // resolve and check, write nothing
     platform::Platform* platform = nullptr;   // override for tests; default platform::current()
