@@ -83,7 +83,7 @@ Node describeField(const FieldSpec& f, std::span<const std::byte> s, std::uint64
     if (isUnsignedType(f.type)) {
         const std::uint64_t v = readUnsigned(f, s);
         n.value = (f.type == FieldType::Crc32 || f.type == FieldType::Bits) ? hexOf(v, f.size) : std::to_string(v);
-        if (f.type != FieldType::Crc32 && f.type != FieldType::Bits && f.size >= 4 && !f.enums) n.pretty = hexOf(v, f.size);
+        if (f.type != FieldType::Crc32 && f.type != FieldType::Bits && f.size >= 2 && !f.enums) n.pretty = hexOf(v, f.size);
         if (f.enums) {
             bool known = false;
             for (std::size_t i = 0; i < f.enumCount; ++i)

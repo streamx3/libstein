@@ -30,13 +30,13 @@ L0 detect/geometry/label/uuid · L1 used-block map · L2 offline metadata edit
 
 | Table | read | diagnostics | write/edit | repair | notes |
 |---|---|---|---|---|---|
-| GPT (+ protective/hybrid MBR) | v1 | v1 (CRCs, header pairs, overlaps, out-of-bounds, backup location) | v1 | v1 (rebuild primary from backup and vice versa, fix CRCs, relocate backup, fix PMBR) | basis: FreeBSD `g_part_gpt.c` + UEFI 2.10 §5 |
-| MBR + EBR | v1 | v1 (overlap, CHS/LBA mismatch, extended chains) | v1 | v1 (rewrite EBR chain) | FreeBSD `g_part_mbr.c`/`g_part_ebr.c` |
+| GPT (+ protective/hybrid MBR) | **done** | **done** (CRCs, header pairs, overlaps, out-of-bounds, backup location, hybrid) | **done** | **done** (rebuild either copy, fix CRCs, relocate backup, fix PMBR) | own code from UEFI 2.10 §5; byte-identical with sgdisk |
+| MBR + EBR | **done** | **done** (overlap, chain loops/breaks, logical outside extended, protective leftovers) | **done** | v1 (rewrite EBR chain) | own code; byte-identical with sfdisk |
 | APM (+ DDM block0) | v1 | v1 | v2 | v2 | FreeBSD `g_part_apm.c`; required explicitly by R4 |
 | BSD disklabel (+ nested in MBR) | v1 | v1 | v2 | – | FreeBSD `g_part_bsd.c` |
 | Windows LDM (dynamic disks) | v1 | v1 | – | – | FreeBSD `g_part_ldm.c`; volumes via `stein_volume` |
 | Sun VTOC, SGI/DVH, Amiga RDB, PC98, AIX, Atari | v2 | v2 | v3 | – | specs + libparted as reference-only; libparted/libblkid list is the completeness bar |
-| none (whole-device fs) | v1 | v1 | v1 | – | |
+| none (whole-device fs) | **done** | **done** | n/a | – | |
 
 ## Containers and volume managers
 

@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  build-test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Ninja and ccache (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q ninja-build ccache
+      - name: Install Ninja and ccache (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja ccache
+      - name: Configure (Unix)
+        if: runner.os != 'Windows'
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DSTEIN_WERROR=ON -DSTEIN_SANITIZERS=${{ runner.os == 'Linux' && 'ON' || 'OFF' }}
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        run: cmake -S . -B build -DSTEIN_WERROR=ON
+      - name: Build
+        run: cmake --build build --config Debug --parallel
+      - name: Test
+        run: ctest --test-dir build --build-config Debug --output-on-failure
+      - name: Smoke-test the CLI on fixtures (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          python3 tools/fixtures/sparsify.py unpack tests/fixtures/pt/gpt_broken_primary.sparse /tmp/g.img
+          ./build/tools/stein/stein verify /tmp/g.img || true
+          ./build/tools/stein/stein repair /tmp/g.img
+          ./build/tools/stein/stein verify /tmp/g.img

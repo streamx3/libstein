@@ -26,7 +26,7 @@ Reading order:
 | [`design/17-capability-matrix.md`](design/17-capability-matrix.md) | What is planned at which level in which milestone |
 | [`design/18-structure-layouts.md`](design/18-structure-layouts.md) | Format manifests, generated layout classes, the hexinator-style `LayoutTree` |
 | [`20-roadmap.md`](20-roadmap.md) | Milestones M0–M4, risks |
-| [`reports/`](reports/) | Dated progress reports |
+| [`reports/`](reports/) | Dated progress reports (`2026-10-05` design, `2026-10-06` M1 status) |
 
 Conventions: design docs are numbered by layer (10–19); research docs by
 project (01–05); every requirement in `00-vision.md` has an `R#` that the

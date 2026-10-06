@@ -12,7 +12,27 @@ read/write access to foreign filesystems (open an ext4-inside-LUKS
 partition on Windows or macOS), disk images that can be split, compressed,
 verified and mounted anywhere, and proper GPT repair.
 
-Status: research and design (milestone M0). Start with
-[`doc/README.md`](doc/README.md).
+Status: milestone M1 in progress. Core types, block devices, the
+manifest-driven structure layer, and GPT/MBR partition tables with
+diagnostics and repair are implemented and tested; see
+[`doc/reports/`](doc/reports/) for progress and [`doc/README.md`](doc/README.md)
+for the design.
+
+## Building
+
+Requirements: CMake ≥ 3.25, a C++23 compiler (GCC 13+, Clang 17+, MSVC 2022
+17.8+), Python ≥ 3.11 at build time (for the layout generator), Ninja
+recommended, `ccache` used automatically when present.
+
+```sh
+cmake --preset debug      # or: release, ci, mono
+cmake --build --preset debug
+ctest --preset debug
+./build/debug/tools/stein/stein probe some-disk.img
+```
+
+Fixtures under `tests/fixtures/` are regenerated with
+`tools/fixtures/make_pt_fixtures.sh` (needs sgdisk, sfdisk, mkfs.vfat; root
+for the 4Kn loop-device case).
 
 License: MIT.

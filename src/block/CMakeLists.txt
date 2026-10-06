@@ -4,6 +4,7 @@ stein_add_module(block
     src/memory_device.cpp
     src/file_device.cpp
     src/slice_device.cpp
+    src/sparse_file.cpp
   PUBLIC_DEPS stein::core)
 
 stein_add_test(test_block

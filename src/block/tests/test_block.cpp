@@ -4,6 +4,7 @@
 #include "stein/block/file_device.hpp"
 #include "stein/block/memory_device.hpp"
 #include "stein/block/slice_device.hpp"
+#include "stein/block/sparse_file.hpp"
 
 #include <filesystem>
 
@@ -75,5 +76,29 @@ TEST_CASE("FileDevice create/open/sparse") {
         CHECK((*dev)->read(16 * MiB - 2, 4).error().category() == ErrorCategory::OutOfRange);
     }
     CHECK(!FileDevice::open(dir / "missing.img", FileDevice::Mode::ReadOnly));
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("SparseFile capture/write/read/apply") {
+    auto dir = std::filesystem::temp_directory_path() / "stein_test_sparse";
+    std::filesystem::create_directories(dir);
+    auto src = std::make_shared<MemoryDevice>(1 * MiB, 4096);
+    CHECK(src->writeAt(0, bytesOf("head")));
+    CHECK(src->writeAt(512 * KiB, bytesOf("middle")));
+    auto captured = SparseFile::capture(*src, {Region{0, 4096}, Region{512 * KiB, 4096}});
+    REQUIRE(captured);
+    CHECK(captured->runs.size() == 2);
+    CHECK(captured->sectorSize == 4096);
+    auto path = dir / "piece.sparse";
+    REQUIRE(SparseFile::write(path, *captured));
+    auto loaded = SparseFile::loadIntoMemory(path);
+    REQUIRE(loaded);
+    CHECK((*loaded)->size() == 1 * MiB);
+    CHECK((*loaded)->sectorSize() == 4096);
+    auto mid = (*loaded)->read(512 * KiB, 6);
+    CHECK(std::string(reinterpret_cast<const char*>(mid->data()), 6) == "middle");
+    MemoryDevice small(8 * KiB, 512);
+    CHECK(SparseFile::apply(*captured, small).error().category() == ErrorCategory::OutOfRange);
+    CHECK(SparseFile::read(dir / "nope.sparse").error().category() == ErrorCategory::NotFound);
     std::filesystem::remove_all(dir);
 }
