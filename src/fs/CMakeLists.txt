@@ -6,6 +6,7 @@ stein_add_module(fs
     src/fs_ext_reader.cpp
     src/fs_ntfs_reader.cpp
     src/fs_fat_reader.cpp
+    src/fs_exfat_reader.cpp
     src/registry.cpp
     src/fs_ext.cpp
     src/fs_fat.cpp

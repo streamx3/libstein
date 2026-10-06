@@ -3,6 +3,7 @@
 #include "stein/core/endian.hpp"
 #include "stein/core/strings.hpp"
 #include "stein/layout/gen/exfat.hpp"
+#include "stein/fs/exfat_reader.hpp"
 #include "stein/fs/fat_reader.hpp"
 #include "stein/layout/gen/fat.hpp"
 
@@ -281,6 +282,7 @@ Result detectExFat(Dev dev) {
         alloc->clusterCount = b.clusterCount();
         alloc->rootCluster = root;
         fs->setAllocationSource(std::move(alloc));
+        fs->setReaderSource(makeExfatReaderSource());
     }
     fs->setTreeName("exFAT filesystem");
     auto tree = b.describe(0);

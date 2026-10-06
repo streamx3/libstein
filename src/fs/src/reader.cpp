@@ -22,8 +22,11 @@ std::string_view toString(FileType t) {
 }
 
 Expected<Inode> resolvePath(Reader& reader, std::string_view path, bool followSymlinks) {
-    auto cur = reader.root();
-    if (!cur) return cur;
+    auto root = reader.root();
+    if (!root) return root;
+    // Ancestors of the current directory, root first: ".." pops instead of relying on a
+    // ".." directory entry, which exFAT, NTFS and HFS+ do not have.
+    std::vector<Inode> stack{*root};
     int hops = 0;
     std::vector<std::string> parts;
     for (const auto& p : split(path, '/'))
@@ -31,12 +34,10 @@ Expected<Inode> resolvePath(Reader& reader, std::string_view path, bool followSy
     for (std::size_t i = 0; i < parts.size(); ++i) {
         const auto& name = parts[i];
         if (name == "..") {
-            auto up = reader.lookup(*cur, "..");
-            if (!up) return up;
-            cur = up;
+            if (stack.size() > 1) stack.pop_back();
             continue;
         }
-        auto next = reader.lookup(*cur, name);
+        auto next = reader.lookup(stack.back(), name);
         if (!next) return next;
         if (followSymlinks) {
             auto st = reader.stat(*next);
@@ -53,16 +54,13 @@ Expected<Inode> resolvePath(Reader& reader, std::string_view path, bool followSy
                 tparts.insert(tparts.end(), rest.begin(), rest.end());
                 parts = std::move(tparts);
                 i = static_cast<std::size_t>(-1);
-                if (!target->empty() && (*target)[0] == '/') {
-                    cur = reader.root();
-                    if (!cur) return cur;
-                }
+                if (!target->empty() && (*target)[0] == '/') stack.assign(1, *root);
                 continue;
             }
         }
-        cur = next;
+        stack.push_back(*next);
     }
-    return cur;
+    return stack.back();
 }
 
 Expected<std::vector<std::byte>> readAll(Reader& reader, const Inode& file, std::uint64_t maxBytes) {

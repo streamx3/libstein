@@ -449,3 +449,54 @@ TEST_CASE("fat reader: FAT12/16/32 fixtures written by pyfatfs read back exactly
         CHECK((*reader)->stat(*big)->allocatedBytes >= 150 * 1024);
     }
 }
+
+TEST_CASE("exfat reader: exfat-fuse fixtures read back exactly (NoFatChain and fragmented files, Unicode and 255-char names, up-case lookup, timestamps)") {
+    const char* names[] = {"exfat", "exfat_32k"};
+    for (const char* name : names) {
+        const std::string fixture = name;
+        CAPTURE(fixture);
+        auto dev = loadSparseFixture("exfatfs/" + fixture + ".sparse");
+        auto probed = fs::probe(dev);
+        REQUIRE(probed);
+        REQUIRE(*probed);
+        CHECK((*probed)->info().type == fs::FsType::ExFat);
+        REQUIRE(fs::has((*probed)->capabilities(), fs::Capability::Read));
+        auto reader = (*probed)->openReader();
+        REQUIRE_MESSAGE(reader, (reader ? std::string() : reader.error().toString()));
+        auto root = (*reader)->root();
+        REQUIRE(root);
+        std::map<std::string, std::pair<char, std::uint64_t>> seen;
+        std::map<std::string, std::string> sha, links;
+        walk(**reader, *root, "", seen, sha, links);
+        const auto o = loadExtOracle(fixture, "exfatfs");
+        CHECK(seen.size() == o.entries.size());
+        for (const auto& [path, ts] : o.entries) {
+            CAPTURE(path);
+            REQUIRE(seen.count(path));
+            CHECK(seen[path].first == ts.first);
+            if (ts.first == 'f') CHECK(seen[path].second == ts.second);
+        }
+        for (const auto& [path, h] : o.sha) {
+            CAPTURE(path);
+            CHECK(sha[path] == h);
+        }
+        CHECK(*fs::resolvePath(**reader, "dir/upper.txt") == *fs::resolvePath(**reader, "DIR/UPPER.TXT"));
+        CHECK(*fs::resolvePath(**reader, "dir/\u00fcn\u00efc\u00f6d\u00e9 \u65e5\u672c\u8a9e.txt") ==
+              *fs::resolvePath(**reader, "dir/\u00dcN\u00cfC\u00d6D\u00c9 \u65e5\u672c\u8a9e.txt"));   // up-case table beyond ASCII
+        CHECK(*fs::resolvePath(**reader, "dir/nested/deep/../deep/leaf.txt") == *fs::resolvePath(**reader, "dir/nested/deep/leaf.txt"));
+        CHECK_FALSE(fs::resolvePath(**reader, "dir/missing.txt"));
+        CHECK((*reader)->readlink(*root).error().category() == ErrorCategory::InvalidArgument);
+        auto frag = fs::resolvePath(**reader, "frag.bin");
+        REQUIRE(frag);
+        CHECK((*reader)->stat(*frag)->allocatedBytes >= 200 * 1024);
+        auto hello = fs::resolvePath(**reader, "hello.txt");
+        REQUIRE(hello);
+        CHECK((*reader)->stat(*hello)->mtime == 1704164645);   // 2024-01-02 03:04:05 UTC, stored with the UTC-offset byte
+        // A stat without a prior listing of the parent exercises the in-place entry-set read.
+        auto fresh = (*probed)->openReader();
+        REQUIRE(fresh);
+        auto st = (*fresh)->stat(*hello);
+        REQUIRE(st);
+        CHECK(st->size == 20);
+    }
+}
