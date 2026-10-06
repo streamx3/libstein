@@ -46,3 +46,12 @@ jobs:
           ./build/tools/stein/stein verify /tmp/g.img || true
           ./build/tools/stein/stein repair /tmp/g.img
           ./build/tools/stein/stein verify /tmp/g.img
+      - name: Install and build a downstream consumer against the installed package
+        shell: bash
+        run: |
+          cmake --install build --config Debug --prefix "$PWD/prefix"
+          python3 tools/fixtures/sparsify.py unpack tests/fixtures/pt/gpt_broken_primary.sparse "$PWD/consumer.img"
+          cmake -S tests/consumer -B build-consumer -DCMAKE_BUILD_TYPE=Debug -DCMAKE_PREFIX_PATH="$PWD/prefix" \
+                -DSTEIN_CONSUMER_IMAGE="$PWD/consumer.img" -DSTEIN_CONSUMER_SANITIZE=${{ runner.os == 'Linux' && 'ON' || 'OFF' }}
+          cmake --build build-consumer --config Debug --parallel
+          ctest --test-dir build-consumer --build-config Debug --output-on-failure

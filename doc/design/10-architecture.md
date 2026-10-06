@@ -172,6 +172,14 @@ against a cloned tree.
   module (fast incremental builds, clear boundaries). `STEIN_MONOLITHIC=ON`
   links all enabled objects into a single `libstein` for deployment. The
   dependency DAG is enforced either way by target link rules.
+- **Installed package:** `cmake --install` puts the libraries, the public
+  headers (including the generated layout headers), the `stein` CLI and a
+  CMake package under `lib/cmake/stein` into the prefix; consumers write
+  `find_package(stein CONFIG)` and link `stein::<module>` (or `stein::stein`
+  for a monolithic build, whose module names alias it). `tests/consumer/` is
+  the downstream project CI builds against the installed package on every
+  platform. The GUI (`20-gui-toolkit.md`) consumes libstein this way, or as
+  a submodule with `add_subdirectory`.
 - `ccache` is picked up automatically (`CMAKE_CXX_COMPILER_LAUNCHER`) when
   present; CI and the cloud environment have it installed.
 - Toolchains: GCC ≥ 12, Clang ≥ 15, MSVC 2022. Sanitizers in CI.

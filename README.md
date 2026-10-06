@@ -52,6 +52,26 @@ ctest --preset debug
 ./build/debug/tools/stein/stein mount backup.stein /mnt/old --part 2     # Linux: FUSE mount of a partition inside an image
 ```
 
+## Using libstein from CMake
+
+```sh
+cmake --preset release && cmake --build --preset release
+cmake --install build/release --prefix /opt/stein          # libraries, headers, the stein CLI, lib/cmake/stein
+```
+
+```cmake
+find_package(stein 0.1 CONFIG REQUIRED)                     # -DCMAKE_PREFIX_PATH=/opt/stein
+target_link_libraries(my_app PRIVATE stein::probe stein::fs stein::image)
+```
+
+One target per module (`stein::core`, `stein::block`, `stein::pt`, `stein::fs`,
+`stein::container`, `stein::volume`, `stein::probe`, `stein::platform`,
+`stein::image`, `stein::ops`, `stein::app`, `stein::mount`), or `stein::stein`
+when built with `-DSTEIN_MONOLITHIC=ON` (the module names then alias it).
+`tests/consumer/` is a complete downstream project; CI installs the package and
+builds it on Linux, macOS and Windows on every push. A git submodule plus
+`add_subdirectory` works too.
+
 ## Support matrix
 
 Every row below is backed by tests against fixtures made with the reference

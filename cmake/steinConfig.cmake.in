@@ -1,0 +1,16 @@
+@PACKAGE_INIT@
+
+# libstein @PROJECT_VERSION@. Targets: stein::core, stein::layout, stein::block, stein::pt,
+# stein::fs, stein::container, stein::volume, stein::probe, stein::platform, stein::image,
+# stein::ops, stein::app, stein::mount (one shared library each), or stein::stein when the
+# package was built monolithic, in which case the module names are interfaces to it.
+include("${CMAKE_CURRENT_LIST_DIR}/steinTargets.cmake")
+
+if(TARGET stein::stein AND NOT TARGET stein::core)
+  foreach(mod @STEIN_MODULE_NAMES@)
+    add_library(stein::${mod} INTERFACE IMPORTED)
+    set_target_properties(stein::${mod} PROPERTIES INTERFACE_LINK_LIBRARIES stein::stein)
+  endforeach()
+endif()
+
+check_required_components(stein)

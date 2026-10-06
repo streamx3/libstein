@@ -50,3 +50,4 @@ if(STEIN_BUILD_TOOLS AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tools/stein/CMakeLis
 endif()
 
 stein_finalize_modules()
+stein_install_package()
