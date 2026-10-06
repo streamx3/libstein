@@ -2,9 +2,10 @@
 // VeraCrypt / TrueCrypt volumes ("tcrypt", the cryptsetup name). There is no
 // signature on disk: a header is found by trial decryption with the
 // passphrase, so open() needs it. Supported now: AES-XTS with PBKDF2-HMAC
-// SHA-512 or SHA-256 (VeraCrypt, with PIM) and SHA-512 (TrueCrypt), normal
-// and hidden volumes, primary and backup headers. Cascades, Whirlpool,
-// Streebog, RIPEMD-160, BLAKE2s and system encryption are reported, not opened.
+// SHA-512, SHA-256, BLAKE2s-256 or RIPEMD-160 (VeraCrypt, with PIM) and
+// RIPEMD-160 or SHA-512 (TrueCrypt), normal and hidden volumes, primary and
+// backup headers. Cascades, Whirlpool, Streebog and system encryption are
+// reported, not opened.
 #pragma once
 
 #include "stein/block/block_device.hpp"

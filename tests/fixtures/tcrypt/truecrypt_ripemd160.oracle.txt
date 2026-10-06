@@ -1,0 +1,2 @@
+password stein-rmd
+TRUE ripemd160 pim=0 iterations=2000 payload=262144

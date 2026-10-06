@@ -14,7 +14,7 @@
 
 namespace stein {
 
-enum class HashAlgorithm : std::uint8_t { Md5, Sha1, Sha256, Sha512 };
+enum class HashAlgorithm : std::uint8_t { Md5, Sha1, Sha256, Sha512, Ripemd160, Blake2s256 };
 
 std::string_view toString(HashAlgorithm a);
 
@@ -102,6 +102,41 @@ private:
     std::array<std::uint64_t, 8> m_state{};
     std::uint64_t m_bits = 0;
     std::array<std::uint8_t, 128> m_buffer{};
+    std::size_t m_bufferLen = 0;
+};
+
+class Ripemd160 final : public Hasher {
+public:
+    Ripemd160() { reset(); }
+    HashAlgorithm algorithm() const override { return HashAlgorithm::Ripemd160; }
+    std::size_t digestSize() const override { return 20; }
+    void update(std::span<const std::byte> data) override;
+    std::vector<std::uint8_t> finish() override;
+    void reset() override;
+
+private:
+    void transform(const std::uint8_t block[64]);
+    std::array<std::uint32_t, 5> m_state{};
+    std::uint64_t m_bits = 0;
+    std::array<std::uint8_t, 64> m_buffer{};
+    std::size_t m_bufferLen = 0;
+};
+
+// BLAKE2s-256 (RFC 7693), unkeyed; the VeraCrypt 1.26 PRF.
+class Blake2s256 final : public Hasher {
+public:
+    Blake2s256() { reset(); }
+    HashAlgorithm algorithm() const override { return HashAlgorithm::Blake2s256; }
+    std::size_t digestSize() const override { return 32; }
+    void update(std::span<const std::byte> data) override;
+    std::vector<std::uint8_t> finish() override;
+    void reset() override;
+
+private:
+    void compress(const std::uint8_t block[64], bool last);
+    std::array<std::uint32_t, 8> m_h{};
+    std::uint64_t m_counter = 0;
+    std::array<std::uint8_t, 64> m_buffer{};
     std::size_t m_bufferLen = 0;
 };
 

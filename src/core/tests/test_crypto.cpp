@@ -319,3 +319,26 @@ TEST_CASE("bunzip2: single and multi-block streams, long runs, truncation and sm
         CHECK_FALSE(t);
     }
 }
+
+#include "extra_hash_vectors.hpp"
+
+TEST_CASE("ripemd160 and blake2s256: digests, HMAC and PBKDF2 agree with Python") {
+    auto alg = [](const std::string& n) { return n == "ripemd160" ? HashAlgorithm::Ripemd160 : HashAlgorithm::Blake2s256; };
+    auto bytes = [](std::string_view s) { return std::span<const std::byte>(reinterpret_cast<const std::byte*>(s.data()), s.size()); };
+    for (const auto& v : test::vectors::kExtraHashes) {
+        CAPTURE(v.algorithm);
+        CAPTURE(v.message);
+        CHECK(Hasher::hex(Hasher::digest(alg(v.algorithm), bytes(v.message))) == v.digest);
+        // Incremental feeding must match one-shot.
+        auto h = Hasher::create(alg(v.algorithm));
+        const std::string m = v.message;
+        for (std::size_t i = 0; i < m.size(); i += 7) h->update(bytes(std::string_view(m).substr(i, 7)));
+        CHECK(Hasher::hex(h->finish()) == v.digest);
+    }
+    for (const auto& v : test::vectors::kExtraHmacJefe) CHECK(Hasher::hex(crypto::hmac(alg(v.algorithm), bytes("Jefe"), bytes("what do ya want for nothing?"))) == v.hex);
+    for (const auto& v : test::vectors::kExtraPbkdf2) {
+        std::vector<std::uint8_t> dk(64);
+        crypto::pbkdf2(alg(v.algorithm), bytes("password"), bytes("salt"), 2000, dk);
+        CHECK(Hasher::hex(dk) == v.hex);
+    }
+}

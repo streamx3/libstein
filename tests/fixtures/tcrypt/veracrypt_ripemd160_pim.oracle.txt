@@ -1,0 +1,2 @@
+password stein-vrmd
+VERA ripemd160 pim=4 iterations=19000 payload=262144

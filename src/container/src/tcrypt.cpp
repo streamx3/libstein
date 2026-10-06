@@ -25,15 +25,23 @@ struct Candidate {
     std::uint32_t iterations;
 };
 
-std::uint32_t veracryptIterations(std::uint32_t pim) { return pim == 0 ? 500000 : 15000 + pim * 1000; }
+std::uint32_t veracryptIterations(std::uint32_t pim, HashAlgorithm prf) {
+    if (pim != 0) return 15000 + pim * 1000;
+    return prf == HashAlgorithm::Ripemd160 ? 655331 : 500000;   // VeraCrypt defaults for non-system volumes
+}
 
 std::vector<Candidate> candidates(const TcryptOptions& o) {
     std::vector<Candidate> c;
-    // Cheapest first: a TrueCrypt trial costs 1000 iterations, a VeraCrypt one up to 500000.
-    if (o.truecrypt) c.push_back({"TrueCrypt", "TRUE", HashAlgorithm::Sha512, "sha512", 1000});
+    // Cheapest first: TrueCrypt trials cost 1000-2000 iterations, VeraCrypt ones up to 655331.
+    if (o.truecrypt) {
+        c.push_back({"TrueCrypt", "TRUE", HashAlgorithm::Ripemd160, "ripemd160", 2000});   // TrueCrypt's default PRF
+        c.push_back({"TrueCrypt", "TRUE", HashAlgorithm::Sha512, "sha512", 1000});
+    }
     if (o.veracrypt) {
-        c.push_back({"VeraCrypt", "VERA", HashAlgorithm::Sha512, "sha512", veracryptIterations(o.pim)});
-        c.push_back({"VeraCrypt", "VERA", HashAlgorithm::Sha256, "sha256", veracryptIterations(o.pim)});
+        c.push_back({"VeraCrypt", "VERA", HashAlgorithm::Sha512, "sha512", veracryptIterations(o.pim, HashAlgorithm::Sha512)});
+        c.push_back({"VeraCrypt", "VERA", HashAlgorithm::Sha256, "sha256", veracryptIterations(o.pim, HashAlgorithm::Sha256)});
+        c.push_back({"VeraCrypt", "VERA", HashAlgorithm::Blake2s256, "blake2s", veracryptIterations(o.pim, HashAlgorithm::Blake2s256)});   // 1.26+
+        c.push_back({"VeraCrypt", "VERA", HashAlgorithm::Ripemd160, "ripemd160", veracryptIterations(o.pim, HashAlgorithm::Ripemd160)});   // before 1.26
     }
     return c;
 }
@@ -103,7 +111,7 @@ Expected<Tcrypt> Tcrypt::unlock(std::shared_ptr<BlockDevice> device, const std::
             return t;
         }
     }
-    return fail(ErrorCategory::Integrity, "no VeraCrypt/TrueCrypt header opens with this passphrase (wrong passphrase or PIM, or a cipher/PRF other than AES-XTS with SHA-512/SHA-256)");
+    return fail(ErrorCategory::Integrity, "no VeraCrypt/TrueCrypt header opens with this passphrase (wrong passphrase or PIM, or a cipher/PRF other than AES-XTS with SHA-512/SHA-256/BLAKE2s/RIPEMD-160)");
 }
 
 Expected<std::shared_ptr<BlockDevice>> Tcrypt::openPayload(bool readOnly) const {

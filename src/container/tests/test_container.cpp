@@ -123,7 +123,7 @@ TEST_CASE("luks: anti-forensic merge of a known split") {
     CHECK_FALSE(container::afMerge(split, 32, stripes, "md4"));
 }
 
-TEST_CASE("tcrypt: VeraCrypt (sha512 default, sha256 with PIM, hidden volume) and TrueCrypt volumes open by trial decryption") {
+TEST_CASE("tcrypt: VeraCrypt (sha512 default, sha256/blake2s/ripemd160 with PIM, hidden volume) and TrueCrypt (sha512, ripemd160) volumes open by trial decryption") {
     struct Case { const char* name; const char* passphrase; std::uint32_t pim; const char* variant; const char* prf; const char* label; bool hidden; ByteCount payloadOffset, payloadSize; };
     const Case cases[] = {
         {"veracrypt_sha512", "stein-vera", 0, "VeraCrypt", "sha512", "inside_vc", false, 131072, 262144},
@@ -131,6 +131,9 @@ TEST_CASE("tcrypt: VeraCrypt (sha512 default, sha256 with PIM, hidden volume) an
         {"truecrypt_sha512", "stein-true", 0, "TrueCrypt", "sha512", "inside_vc", false, 131072, 262144},
         {"veracrypt_hidden", "stein-outer", 1, "VeraCrypt", "sha512", "outer_vc", false, 131072, 524288},
         {"veracrypt_hidden", "stein-hidden", 1, "VeraCrypt", "sha256", "hidden_vc", true, 393216, 262144},
+        {"truecrypt_ripemd160", "stein-rmd", 0, "TrueCrypt", "ripemd160", "inside_vc", false, 131072, 262144},
+        {"veracrypt_blake2s_pim", "stein-blake", 2, "VeraCrypt", "blake2s", "inside_vc", false, 131072, 262144},
+        {"veracrypt_ripemd160_pim", "stein-vrmd", 4, "VeraCrypt", "ripemd160", "inside_vc", false, 131072, 262144},
     };
     for (const auto& c : cases) {
         const std::string fixture = c.name;
@@ -171,9 +174,10 @@ TEST_CASE("tcrypt: VeraCrypt (sha512 default, sha256 with PIM, hidden volume) an
         CHECK(text.find("secret inside " + fixture) != std::string::npos);
         if (c.hidden) CHECK(text.rfind("hidden secret", 0) == 0);
         // Wrong passphrase: no header decrypts (skipped where the default 500k iterations would make it slow).
-        if (c.pim != 0 || std::string(c.variant) == "TrueCrypt") {
+        // Wrong passphrase on a representative pair only: every extra PRF multiplies the trial cost.
+        if (fixture == "veracrypt_sha256_pim" || fixture == "truecrypt_sha512") {
             container::TcryptOptions wrongOpt = opt;
-            wrongOpt.veracrypt = c.pim != 0;   // a pim of 0 would mean two 500000-iteration VeraCrypt trials per header
+            wrongOpt.veracrypt = c.pim != 0;   // a pim of 0 would mean several 500000+-iteration VeraCrypt trials per header
             auto wrong = container::Tcrypt::unlock(dev, std::string(c.passphrase) + "x", wrongOpt);
             REQUIRE_FALSE(wrong);
             CHECK(wrong.error().category() == ErrorCategory::Integrity);

@@ -735,6 +735,8 @@ std::vector<std::uint8_t> hmac(HashAlgorithm hash, std::span<const std::byte> ke
     case HashAlgorithm::Sha512: return HmacState<Sha512>(key).mac(message);
     case HashAlgorithm::Sha1: return HmacState<Sha1>(key).mac(message);
     case HashAlgorithm::Md5: return HmacState<Md5>(key).mac(message);
+    case HashAlgorithm::Ripemd160: return HmacState<Ripemd160>(key).mac(message);
+    case HashAlgorithm::Blake2s256: return HmacState<Blake2s256>(key).mac(message);
     }
     return {};
 }
@@ -745,6 +747,8 @@ void pbkdf2(HashAlgorithm hash, std::span<const std::byte> password, std::span<c
     case HashAlgorithm::Sha512: pbkdf2With<Sha512>(password, salt, iterations, out); return;
     case HashAlgorithm::Sha1: pbkdf2With<Sha1>(password, salt, iterations, out); return;
     case HashAlgorithm::Md5: pbkdf2With<Md5>(password, salt, iterations, out); return;
+    case HashAlgorithm::Ripemd160: pbkdf2With<Ripemd160>(password, salt, iterations, out); return;
+    case HashAlgorithm::Blake2s256: pbkdf2With<Blake2s256>(password, salt, iterations, out); return;
     }
 }
 

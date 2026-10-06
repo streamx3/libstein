@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 """
 VeraCrypt / TrueCrypt volume fixtures, written from the format description
-with an independent implementation (hashlib PBKDF2, `cryptography` AES-XTS,
+with an independent implementation (hashlib PBKDF2 over SHA-512/SHA-256/BLAKE2s/RIPEMD-160, `cryptography` AES-XTS,
 zlib CRC-32) so the C++ reader is checked against something it shares no
 code with. Payloads are small ext2 images filled with debugfs.
 
@@ -92,7 +92,7 @@ def iterations(variant, prf, pim):
     if variant == b"TRUE":
         return {"sha512": 1000, "ripemd160": 2000, "whirlpool": 1000}[prf]
     if pim == 0:
-        return 500000
+        return 655331 if prf == "ripemd160" else 500000
     return 15000 + pim * 1000
 
 
@@ -131,3 +131,6 @@ volume("veracrypt_sha512", "stein-vera", "sha512", 0)
 volume("veracrypt_sha256_pim", "stein-pim", "sha256", 3)
 volume("truecrypt_sha512", "stein-true", "sha512", 0, variant=b"TRUE")
 volume("veracrypt_hidden", "stein-outer", "sha512", 1, payload_size=512 * 1024, hidden=("stein-hidden", "sha256", 1, 256 * 1024))
+volume("truecrypt_ripemd160", "stein-rmd", "ripemd160", 0, variant=b"TRUE")
+volume("veracrypt_blake2s_pim", "stein-blake", "blake2s256", 2)
+volume("veracrypt_ripemd160_pim", "stein-vrmd", "ripemd160", 4)

@@ -17,6 +17,8 @@ std::string_view toString(HashAlgorithm a) {
     case HashAlgorithm::Sha1: return "sha1";
     case HashAlgorithm::Sha256: return "sha256";
     case HashAlgorithm::Sha512: return "sha512";
+    case HashAlgorithm::Ripemd160: return "ripemd160";
+    case HashAlgorithm::Blake2s256: return "blake2s256";
     }
     return "?";
 }
@@ -27,6 +29,8 @@ std::unique_ptr<Hasher> Hasher::create(HashAlgorithm a) {
     case HashAlgorithm::Sha1: return std::make_unique<Sha1>();
     case HashAlgorithm::Sha256: return std::make_unique<Sha256>();
     case HashAlgorithm::Sha512: return std::make_unique<Sha512>();
+    case HashAlgorithm::Ripemd160: return std::make_unique<Ripemd160>();
+    case HashAlgorithm::Blake2s256: return std::make_unique<Blake2s256>();
     }
     return nullptr;
 }
@@ -465,6 +469,201 @@ std::vector<std::uint8_t> Sha512::finish() {
     std::vector<std::uint8_t> out(64);
     for (int i = 0; i < 8; ++i)
         for (int j = 0; j < 8; ++j) out[i * 8 + j] = static_cast<std::uint8_t>((m_state[i] >> (56 - 8 * j)) & 0xff);
+    return out;
+}
+
+} // namespace stein
+
+// ----------------------------------------------------------------------------- RIPEMD-160
+
+namespace stein {
+
+namespace {
+constexpr std::uint8_t kRmdR[80] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 7, 4, 13, 1, 10, 6, 15, 3, 12, 0, 9, 5, 2, 14, 11, 8,
+                                    3, 10, 14, 4, 9, 15, 8, 1, 2, 7, 0, 6, 13, 11, 5, 12, 1, 9, 11, 10, 0, 8, 12, 4, 13, 3, 7, 15, 14, 5, 6, 2,
+                                    4, 0, 5, 9, 7, 12, 2, 10, 14, 1, 3, 8, 11, 6, 15, 13};
+constexpr std::uint8_t kRmdRp[80] = {5, 14, 7, 0, 9, 2, 11, 4, 13, 6, 15, 8, 1, 10, 3, 12, 6, 11, 3, 7, 0, 13, 5, 10, 14, 15, 8, 12, 4, 9, 1, 2,
+                                     15, 5, 1, 3, 7, 14, 6, 9, 11, 8, 12, 2, 10, 0, 4, 13, 8, 6, 4, 1, 3, 11, 15, 0, 5, 12, 2, 13, 9, 7, 10, 14,
+                                     12, 15, 10, 4, 1, 5, 8, 7, 6, 2, 13, 14, 0, 3, 9, 11};
+constexpr std::uint8_t kRmdS[80] = {11, 14, 15, 12, 5, 8, 7, 9, 11, 13, 14, 15, 6, 7, 9, 8, 7, 6, 8, 13, 11, 9, 7, 15, 7, 12, 15, 9, 11, 7, 13, 12,
+                                    11, 13, 6, 7, 14, 9, 13, 15, 14, 8, 13, 6, 5, 12, 7, 5, 11, 12, 14, 15, 14, 15, 9, 8, 9, 14, 5, 6, 8, 6, 5, 12,
+                                    9, 15, 5, 11, 6, 8, 13, 12, 5, 12, 13, 14, 11, 8, 5, 6};
+constexpr std::uint8_t kRmdSp[80] = {8, 9, 9, 11, 13, 15, 15, 5, 7, 7, 8, 11, 14, 14, 12, 6, 9, 13, 15, 7, 12, 8, 9, 11, 7, 7, 12, 7, 6, 15, 13, 11,
+                                     9, 7, 15, 11, 8, 6, 6, 14, 12, 13, 5, 14, 13, 13, 7, 5, 15, 5, 8, 11, 14, 14, 6, 14, 6, 9, 12, 9, 12, 5, 15, 8,
+                                     8, 5, 12, 9, 12, 5, 14, 6, 8, 13, 6, 5, 15, 13, 11, 11};
+constexpr std::uint32_t kRmdK[5] = {0x00000000u, 0x5A827999u, 0x6ED9EBA1u, 0x8F1BBCDCu, 0xA953FD4Eu};
+constexpr std::uint32_t kRmdKp[5] = {0x50A28BE6u, 0x5C4DD124u, 0x6D703EF3u, 0x7A6D76E9u, 0x00000000u};
+inline std::uint32_t rotl32(std::uint32_t x, unsigned n) { return (x << n) | (x >> (32 - n)); }
+inline std::uint32_t rmdF(int j, std::uint32_t x, std::uint32_t y, std::uint32_t z) {
+    switch (j / 16) {
+    case 0: return x ^ y ^ z;
+    case 1: return (x & y) | (~x & z);
+    case 2: return (x | ~y) ^ z;
+    case 3: return (x & z) | (y & ~z);
+    default: return x ^ (y | ~z);
+    }
+}
+} // namespace
+
+void Ripemd160::reset() {
+    m_state = {0x67452301u, 0xEFCDAB89u, 0x98BADCFEu, 0x10325476u, 0xC3D2E1F0u};
+    m_bits = 0;
+    m_bufferLen = 0;
+}
+
+void Ripemd160::transform(const std::uint8_t block[64]) {
+    std::uint32_t x[16];
+    for (int i = 0; i < 16; ++i)
+        x[i] = static_cast<std::uint32_t>(block[i * 4]) | (static_cast<std::uint32_t>(block[i * 4 + 1]) << 8) | (static_cast<std::uint32_t>(block[i * 4 + 2]) << 16) |
+               (static_cast<std::uint32_t>(block[i * 4 + 3]) << 24);
+    std::uint32_t al = m_state[0], bl = m_state[1], cl = m_state[2], dl = m_state[3], el = m_state[4];
+    std::uint32_t ar = al, br = bl, cr = cl, dr = dl, er = el;
+    for (int j = 0; j < 80; ++j) {
+        std::uint32_t t = rotl32(al + rmdF(j, bl, cl, dl) + x[kRmdR[j]] + kRmdK[j / 16], kRmdS[j]) + el;
+        al = el;
+        el = dl;
+        dl = rotl32(cl, 10);
+        cl = bl;
+        bl = t;
+        t = rotl32(ar + rmdF(79 - j, br, cr, dr) + x[kRmdRp[j]] + kRmdKp[j / 16], kRmdSp[j]) + er;
+        ar = er;
+        er = dr;
+        dr = rotl32(cr, 10);
+        cr = br;
+        br = t;
+    }
+    const std::uint32_t t = m_state[1] + cl + dr;
+    m_state[1] = m_state[2] + dl + er;
+    m_state[2] = m_state[3] + el + ar;
+    m_state[3] = m_state[4] + al + br;
+    m_state[4] = m_state[0] + bl + cr;
+    m_state[0] = t;
+}
+
+void Ripemd160::update(std::span<const std::byte> data) {
+    const std::uint8_t* p = reinterpret_cast<const std::uint8_t*>(data.data());
+    std::size_t n = data.size();
+    m_bits += static_cast<std::uint64_t>(n) * 8;
+    if (m_bufferLen) {
+        const std::size_t take = std::min(n, 64 - m_bufferLen);
+        std::memcpy(m_buffer.data() + m_bufferLen, p, take);
+        m_bufferLen += take;
+        p += take;
+        n -= take;
+        if (m_bufferLen == 64) {
+            transform(m_buffer.data());
+            m_bufferLen = 0;
+        }
+    }
+    while (n >= 64) {
+        transform(p);
+        p += 64;
+        n -= 64;
+    }
+    if (n) {
+        std::memcpy(m_buffer.data(), p, n);
+        m_bufferLen = n;
+    }
+}
+
+std::vector<std::uint8_t> Ripemd160::finish() {
+    const std::uint64_t bits = m_bits;
+    std::uint8_t pad = 0x80;
+    update(std::span<const std::byte>(reinterpret_cast<const std::byte*>(&pad), 1));
+    std::uint8_t zero = 0;
+    while (m_bufferLen != 56) update(std::span<const std::byte>(reinterpret_cast<const std::byte*>(&zero), 1));
+    std::uint8_t len[8];
+    for (int i = 0; i < 8; ++i) len[i] = static_cast<std::uint8_t>((bits >> (8 * i)) & 0xff);   // little-endian length
+    update(std::span<const std::byte>(reinterpret_cast<const std::byte*>(len), 8));
+    std::vector<std::uint8_t> out(20);
+    for (int i = 0; i < 5; ++i)
+        for (int j = 0; j < 4; ++j) out[i * 4 + j] = static_cast<std::uint8_t>((m_state[i] >> (8 * j)) & 0xff);
+    return out;
+}
+
+} // namespace stein
+
+// ----------------------------------------------------------------------------- BLAKE2s-256 (RFC 7693)
+
+namespace stein {
+
+namespace {
+constexpr std::uint32_t kBlake2sIv[8] = {0x6A09E667u, 0xBB67AE85u, 0x3C6EF372u, 0xA54FF53Au, 0x510E527Fu, 0x9B05688Cu, 0x1F83D9ABu, 0x5BE0CD19u};
+constexpr std::uint8_t kBlake2sSigma[10][16] = {
+    {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}, {14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3},
+    {11, 8, 12, 0, 5, 2, 15, 13, 10, 14, 3, 6, 7, 1, 9, 4}, {7, 9, 3, 1, 13, 12, 11, 14, 2, 6, 5, 10, 4, 0, 15, 8},
+    {9, 0, 5, 7, 2, 4, 10, 15, 14, 1, 11, 12, 6, 8, 3, 13}, {2, 12, 6, 10, 0, 11, 8, 3, 4, 13, 7, 5, 15, 14, 1, 9},
+    {12, 5, 1, 15, 14, 13, 4, 10, 0, 7, 6, 3, 9, 2, 8, 11}, {13, 11, 7, 14, 12, 1, 3, 9, 5, 0, 15, 4, 8, 6, 2, 10},
+    {6, 15, 14, 9, 11, 3, 0, 8, 12, 2, 13, 7, 1, 4, 10, 5},  {10, 2, 8, 4, 7, 6, 1, 5, 15, 11, 9, 14, 3, 12, 13, 0}};
+inline std::uint32_t rotr32(std::uint32_t x, unsigned n) { return (x >> n) | (x << (32 - n)); }
+} // namespace
+
+void Blake2s256::reset() {
+    for (int i = 0; i < 8; ++i) m_h[i] = kBlake2sIv[i];
+    m_h[0] ^= 0x01010000u ^ 32u;   // digest length 32, no key, fanout 1, depth 1
+    m_counter = 0;
+    m_bufferLen = 0;
+}
+
+void Blake2s256::compress(const std::uint8_t block[64], bool last) {
+    std::uint32_t m[16], v[16];
+    for (int i = 0; i < 16; ++i)
+        m[i] = static_cast<std::uint32_t>(block[i * 4]) | (static_cast<std::uint32_t>(block[i * 4 + 1]) << 8) | (static_cast<std::uint32_t>(block[i * 4 + 2]) << 16) |
+               (static_cast<std::uint32_t>(block[i * 4 + 3]) << 24);
+    for (int i = 0; i < 8; ++i) {
+        v[i] = m_h[i];
+        v[i + 8] = kBlake2sIv[i];
+    }
+    v[12] ^= static_cast<std::uint32_t>(m_counter);
+    v[13] ^= static_cast<std::uint32_t>(m_counter >> 32);
+    if (last) v[14] = ~v[14];
+    auto g = [&](int r, int i, int a, int b, int c, int d) {
+        v[a] = v[a] + v[b] + m[kBlake2sSigma[r][2 * i]];
+        v[d] = rotr32(v[d] ^ v[a], 16);
+        v[c] = v[c] + v[d];
+        v[b] = rotr32(v[b] ^ v[c], 12);
+        v[a] = v[a] + v[b] + m[kBlake2sSigma[r][2 * i + 1]];
+        v[d] = rotr32(v[d] ^ v[a], 8);
+        v[c] = v[c] + v[d];
+        v[b] = rotr32(v[b] ^ v[c], 7);
+    };
+    for (int r = 0; r < 10; ++r) {
+        g(r, 0, 0, 4, 8, 12);
+        g(r, 1, 1, 5, 9, 13);
+        g(r, 2, 2, 6, 10, 14);
+        g(r, 3, 3, 7, 11, 15);
+        g(r, 4, 0, 5, 10, 15);
+        g(r, 5, 1, 6, 11, 12);
+        g(r, 6, 2, 7, 8, 13);
+        g(r, 7, 3, 4, 9, 14);
+    }
+    for (int i = 0; i < 8; ++i) m_h[i] ^= v[i] ^ v[i + 8];
+}
+
+void Blake2s256::update(std::span<const std::byte> data) {
+    const std::uint8_t* p = reinterpret_cast<const std::uint8_t*>(data.data());
+    std::size_t n = data.size();
+    while (n > 0) {
+        if (m_bufferLen == 64) {   // a full buffer is only compressed once more data follows (the last block is flagged)
+            m_counter += 64;
+            compress(m_buffer.data(), false);
+            m_bufferLen = 0;
+        }
+        const std::size_t take = std::min(n, 64 - m_bufferLen);
+        std::memcpy(m_buffer.data() + m_bufferLen, p, take);
+        m_bufferLen += take;
+        p += take;
+        n -= take;
+    }
+}
+
+std::vector<std::uint8_t> Blake2s256::finish() {
+    m_counter += m_bufferLen;
+    std::memset(m_buffer.data() + m_bufferLen, 0, 64 - m_bufferLen);
+    compress(m_buffer.data(), true);
+    std::vector<std::uint8_t> out(32);
+    for (int i = 0; i < 8; ++i)
+        for (int j = 0; j < 4; ++j) out[i * 4 + j] = static_cast<std::uint8_t>((m_h[i] >> (8 * j)) & 0xff);
     return out;
 }
 
