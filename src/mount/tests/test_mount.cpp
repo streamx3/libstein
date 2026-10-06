@@ -211,7 +211,7 @@ public:
         put(proc);
         // AUTH_SYS credentials like a kernel client: stamp, machine name, uid, gid, no groups.
         put(1);
-        put(5 * 4 + 8);
+        put(6 * 4);      // body length: stamp, name length, name, uid, gid, gid count
         put(0);          // stamp
         put(4);          // machine name "test"
         put(0x74657374u);
