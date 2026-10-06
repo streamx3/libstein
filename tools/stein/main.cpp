@@ -66,7 +66,7 @@ int usage() {
                "  stein image create  <device|file> <out.stein> [--compress lz4|none] [--chunk 4M] [--split 2G] [--used-only]\n"
                "  stein image restore <in.stein> <device|file> [--no-verify] [--force]\n"
                "  stein image verify  <in.stein> [--level 1|2|3]\n"
-               "  stein image info    <in.stein>\n"
+               "  stein image info    <in.stein|vm.qcow2|.vhd|.vhdx|.vmdk|.vdi|.E01|.dmg>\n"
                "  stein image keys    <in.stein> list | add [--new-passphrase P] [--name LABEL] | remove <id>\n"
                "      --passphrase P | --passphrase-file F | $STEIN_PASSPHRASE unlock encrypted images (else a prompt);\n"
                "      image create with --passphrase encrypts (chacha20-poly1305, passphrase key slots);\n"
@@ -342,6 +342,21 @@ int cmdImage(const Args& a) {
         return (v->chunksBad || (v->imageHashChecked && !v->imageHashOk)) ? 2 : (v->complete ? 0 : 1);
     }
     if (sub == "info") {
+        // Other containers (qcow2, VHD, VHDX, VMDK, VDI, E01, DMG): describe what the reader found.
+        if (auto fmt = image::detectVdiskFormat(a.positional[2]); fmt && *fmt != image::VdiskFormat::Stein && *fmt != image::VdiskFormat::Raw) {
+            image::VdiskInfo vi;
+            auto dev = image::openVdisk(a.positional[2], &vi);
+            if (!dev) return die(dev.error());
+            std::printf("%s container%s%s  virtual size %s", std::string(image::toString(vi.format)).c_str(), vi.variant.empty() ? "" : (" (" + vi.variant + ")").c_str(),
+                        vi.compressed ? ", compressed" : "", formatSizeExact(vi.virtualSize).c_str());
+            if (vi.clusterSize) std::printf(", %s units", formatSize(vi.clusterSize).c_str());
+            std::printf("\n");
+            if (!vi.storedMd5.empty()) std::printf("stored md5 %s\n", vi.storedMd5.c_str());
+            if (!vi.storedSha1.empty()) std::printf("stored sha1 %s\n", vi.storedSha1.c_str());
+            for (const auto& f : vi.files) std::printf("  file %s\n", f.string().c_str());
+            for (const auto& n : vi.notes) std::printf("  note: %s\n", n.c_str());
+            return 0;
+        }
         auto i = image::imageInfo(a.positional[2], g_passphrase);
         if (!i) return die(i.error());
         std::printf("stein image v%u  uuid %s  %s\n", i->header.version, i->header.imageUuid.toString(false).c_str(), i->complete ? "complete" : "INCOMPLETE");
