@@ -16,7 +16,7 @@ set -eu
 OUT=${1:-tests/fixtures/apfs}
 HERE=$(cd "$(dirname "$0")" && pwd)
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+trap 'for m in "$WORK"/mnt_*; do [ -d "$m" ] && hdiutil detach "$m" >/dev/null 2>&1; done; rm -rf "$WORK"' EXIT
 mkdir -p "$OUT"
 
 fill() { # mountpoint
@@ -120,7 +120,10 @@ int main(int argc, char** argv) {
 }
 C
   cc -o "$WORK/mksnap" "$WORK/mksnap.c"
-  sudo "$WORK/mksnap" "$mnt" stein-snap
+  # fs_snapshot_create is refused on the GitHub runner even as root (EPERM); Time Machine's local
+  # snapshot works there, under its own name (com.apple.TimeMachine.<date>.local).
+  sudo "$WORK/mksnap" "$mnt" stein-snap || tmutil localsnapshot "$mnt" || sudo tmutil localsnapshot "$mnt"
+  diskutil apfs listSnapshots "$mnt" || true
   # Changes after the snapshot: a deletion, a rewrite, a growth, new files.
   rm "$mnt/tiny.txt"
   printf 'rewritten after the snapshot\n' > "$mnt/dir/upper.txt"
@@ -162,7 +165,6 @@ for c in d["Containers"]:
             print(c["ContainerReference"])
 ' "$mnt")
   echo "container: $container"
-  diskutil apfs listSnapshots "$mnt" || true
   diskutil apfs addVolume "$container" APFS rd_second -nomount >/dev/null
   local second
   second=$(diskutil apfs list -plist "$container" | python3 -c '
