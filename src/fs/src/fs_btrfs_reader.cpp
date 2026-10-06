@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: MIT
 // btrfs reader: superblock and chunk tree for logical -> physical mapping,
 // root tree for the subvolume roots, fs tree items (INODE_ITEM, DIR_INDEX,
-// EXTENT_DATA inline/regular/prealloc), range scans over the B-tree.
+// EXTENT_DATA inline/regular/prealloc, zlib and lzo compressed), range scans
+// over the B-tree.
 #include "detectors.hpp"
 #include "stein/core/endian.hpp"
+#include "stein/core/inflate.hpp"
+#include "stein/core/lzo.hpp"
 #include "stein/fs/btrfs_reader.hpp"
 
 #include <algorithm>
@@ -17,6 +20,7 @@ constexpr std::size_t kHeaderSize = 101, kItemSize = 25, kKeyPtrSize = 33;
 constexpr std::uint64_t kFsTreeObjectid = 5, kFirstChunkTreeObjectid = 256;
 constexpr std::uint8_t kInodeItem = 1, kDirIndex = 96, kExtentData = 108, kRootItem = 132, kChunkItem = 228;
 constexpr std::uint8_t kExtentInline = 0, kExtentPrealloc = 2;
+constexpr std::uint8_t kCompressZlib = 1, kCompressLzo = 2, kCompressZstd = 3;
 constexpr std::uint64_t kBlockGroupRaid0 = 1ull << 3, kBlockGroupRaid1 = 1ull << 4, kBlockGroupDup = 1ull << 5, kBlockGroupRaid10 = 1ull << 6, kBlockGroupRaid5 = 1ull << 7,
                         kBlockGroupRaid6 = 1ull << 8, kBlockGroupRaid1c3 = 1ull << 9, kBlockGroupRaid1c4 = 1ull << 10;
 
@@ -298,11 +302,13 @@ Expected<std::vector<BtrfsReader::ExtentItem>> BtrfsReader::extentsOf(std::uint6
         e.fileOffset = k.offset;
         e.compression = std::to_integer<std::uint8_t>(d[16]);
         e.type = std::to_integer<std::uint8_t>(d[20]);
+        e.ramBytes = loadLe64(d.data() + 8);
         if (e.type == kExtentInline) {
             e.inlineData.assign(d.begin() + 21, d.end());
-            e.numBytes = loadLe64(d.data() + 8);   // ram_bytes
+            e.numBytes = e.ramBytes;
         } else if (d.size() >= 53) {
             e.diskBytenr = loadLe64(d.data() + 21);
+            e.diskNumBytes = loadLe64(d.data() + 29);
             e.diskOffset = loadLe64(d.data() + 37);
             e.numBytes = loadLe64(d.data() + 45);
         } else {
@@ -376,6 +382,76 @@ Expected<Stat> BtrfsReader::stat(const Inode& inode) {
     return st;
 }
 
+Expected<void> BtrfsReader::readLogical(std::uint64_t logical, std::span<std::byte> dst) const {
+    std::uint64_t done = 0;
+    while (done < dst.size()) {
+        const std::uint64_t pos = logical + done;
+        std::uint64_t chunkLeft = dst.size() - done;
+        for (const auto& c : m_chunks)
+            if (pos >= c.logical && pos < c.logical + c.length) {
+                chunkLeft = std::min(chunkLeft, c.logical + c.length - pos);
+                if (c.stripeLen && (c.type & (kBlockGroupRaid0 | kBlockGroupRaid10))) chunkLeft = std::min(chunkLeft, c.stripeLen - (pos - c.logical) % c.stripeLen);
+            }
+        auto phys = logicalToPhysical(pos, chunkLeft);
+        if (!phys) return fail(phys.error());
+        if (auto rd = m_device->readAt(*phys, dst.subspan(static_cast<std::size_t>(done), static_cast<std::size_t>(chunkLeft))); !rd) return fail(rd.error());
+        done += chunkLeft;
+    }
+    return {};
+}
+
+namespace {
+
+// btrfs lzo framing: a 4-byte total length (header included), then segments of a 4-byte length
+// plus one lzo1x block each; a segment never decompresses past one sector, and a length field
+// that would cross a sector boundary is pushed to the next sector with zero padding.
+Expected<std::size_t> lzoExtent(std::span<const std::byte> in, std::span<std::byte> out, std::uint32_t sectorSize) {
+    if (in.size() < 4) return fail(ErrorCategory::InvalidFormat, "lzo extent shorter than its header");
+    const std::uint32_t total = loadLe32(in.data());
+    if (total < 4 || total > in.size()) return fail(ErrorCategory::InvalidFormat, "lzo extent length " + std::to_string(total) + " does not fit its " + std::to_string(in.size()) + " bytes");
+    std::size_t cur = 4, outPos = 0;
+    while (cur < total && outPos < out.size()) {
+        if (cur + 4 > total) return fail(ErrorCategory::InvalidFormat, "truncated lzo segment header");
+        const std::uint32_t segLen = loadLe32(in.data() + cur);
+        cur += 4;
+        if (segLen == 0 || cur + segLen > total) return fail(ErrorCategory::InvalidFormat, "lzo segment runs past the extent");
+        auto n = compress::lzo1xDecompress(in.subspan(cur, segLen), out.subspan(outPos, std::min<std::size_t>(out.size() - outPos, sectorSize)));
+        if (!n) return fail(ErrorCategory::InvalidFormat, "lzo segment: " + std::string(n.error().message()));
+        outPos += *n;
+        cur += segLen;
+        const std::size_t sectorLeft = sectorSize - cur % sectorSize;
+        if (sectorLeft < 4) cur += sectorLeft;
+    }
+    return outPos;
+}
+
+} // namespace
+
+Expected<std::span<const std::byte>> BtrfsReader::decompressed(std::uint64_t fileId, const ExtentItem& e) {
+    const std::uint64_t key = e.type == kExtentInline ? (fileId | (1ull << 63)) : e.diskBytenr;
+    if (key == m_decompKey) return std::span<const std::byte>(m_decompData);
+    if (e.compression == kCompressZstd) return fail(ErrorCategory::Unsupported, "zstd-compressed btrfs extents are not supported yet");
+    if (e.compression != kCompressZlib && e.compression != kCompressLzo) return fail(ErrorCategory::Unsupported, "unknown btrfs compression type " + std::to_string(e.compression));
+    if (e.ramBytes > (256u << 20)) return fail(ErrorCategory::InvalidFormat, "compressed extent claims " + std::to_string(e.ramBytes) + " decompressed bytes");
+    std::vector<std::byte> raw;
+    std::span<const std::byte> in;
+    if (e.type == kExtentInline) {
+        in = e.inlineData;
+    } else {
+        if (e.diskNumBytes == 0 || e.diskNumBytes > (128u << 20)) return fail(ErrorCategory::InvalidFormat, "bad compressed extent size on disk");
+        raw.resize(static_cast<std::size_t>(e.diskNumBytes));
+        if (auto r = readLogical(e.diskBytenr, raw); !r) return fail(r.error());
+        in = raw;
+    }
+    std::vector<std::byte> out(static_cast<std::size_t>(e.ramBytes));
+    Expected<std::size_t> n = e.compression == kCompressZlib ? compress::inflateZlib(in, out) : lzoExtent(in, out, m_sectorSize);
+    if (!n) return fail(n.error());
+    if (*n < out.size()) std::fill(out.begin() + static_cast<std::ptrdiff_t>(*n), out.end(), std::byte{0});
+    m_decompData = std::move(out);
+    m_decompKey = key;
+    return std::span<const std::byte>(m_decompData);
+}
+
 Expected<std::size_t> BtrfsReader::read(const Inode& file, std::uint64_t offset, std::span<std::byte> dst) {
     auto in = inodeItem(file.id);
     if (!in) return fail(in.error());
@@ -388,31 +464,21 @@ Expected<std::size_t> BtrfsReader::read(const Inode& file, std::uint64_t offset,
     for (const auto& e : *extents) {
         const std::uint64_t extentEnd = e.fileOffset + e.numBytes;
         if (extentEnd <= offset || e.fileOffset >= offset + n) continue;
-        if (e.compression != 0) return fail(ErrorCategory::Unsupported, "compressed btrfs extents (zlib/lzo/zstd) are not supported yet");
         const std::uint64_t from = std::max(offset, e.fileOffset), to = std::min(offset + n, extentEnd);
         auto window = dst.subspan(static_cast<std::size_t>(from - offset), static_cast<std::size_t>(to - from));
+        if (e.type == kExtentPrealloc || (e.type != kExtentInline && e.diskBytenr == 0)) continue;   // unwritten or hole: zeros
+        if (e.compression != 0) {
+            auto data = decompressed(file.id, e);
+            if (!data) return fail(data.error());
+            const std::uint64_t start = (e.type == kExtentInline ? 0 : e.diskOffset) + (from - e.fileOffset);
+            if (start < data->size()) std::memcpy(window.data(), data->data() + start, static_cast<std::size_t>(std::min<std::uint64_t>(window.size(), data->size() - start)));
+            continue;
+        }
         if (e.type == kExtentInline) {
             const std::uint64_t in0 = from - e.fileOffset;
             if (in0 < e.inlineData.size()) std::memcpy(window.data(), e.inlineData.data() + in0, static_cast<std::size_t>(std::min<std::uint64_t>(window.size(), e.inlineData.size() - in0)));
-        } else if (e.type == kExtentPrealloc || e.diskBytenr == 0) {
-            // unwritten or hole: zeros
         } else {
-            const std::uint64_t logical = e.diskBytenr + e.diskOffset + (from - e.fileOffset);
-            // Reads may cross chunk (or stripe) boundaries: map piecewise.
-            std::uint64_t done = 0;
-            while (done < window.size()) {
-                const std::uint64_t pos = logical + done;
-                std::uint64_t chunkLeft = window.size() - done;
-                for (const auto& c : m_chunks)
-                    if (pos >= c.logical && pos < c.logical + c.length) {
-                        chunkLeft = std::min(chunkLeft, c.logical + c.length - pos);
-                        if (c.stripeLen && (c.type & (kBlockGroupRaid0 | kBlockGroupRaid10))) chunkLeft = std::min(chunkLeft, c.stripeLen - (pos - c.logical) % c.stripeLen);
-                    }
-                auto phys = logicalToPhysical(pos, chunkLeft);
-                if (!phys) return fail(phys.error());
-                if (auto rd = m_device->readAt(*phys, window.subspan(static_cast<std::size_t>(done), static_cast<std::size_t>(chunkLeft))); !rd) return fail(rd.error());
-                done += chunkLeft;
-            }
+            if (auto r = readLogical(e.diskBytenr + e.diskOffset + (from - e.fileOffset), window); !r) return fail(r.error());
         }
     }
     return static_cast<std::size_t>(n);

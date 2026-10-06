@@ -49,7 +49,7 @@ private:
         std::int64_t atime = 0, ctime = 0, mtime = 0, otime = 0;
     };
     struct ExtentItem {
-        std::uint64_t fileOffset = 0, numBytes = 0, diskBytenr = 0, diskOffset = 0;
+        std::uint64_t fileOffset = 0, numBytes = 0, diskBytenr = 0, diskOffset = 0, diskNumBytes = 0, ramBytes = 0;
         std::uint8_t type = 0, compression = 0;
         std::vector<std::byte> inlineData;
     };
@@ -71,6 +71,11 @@ private:
     Expected<std::size_t> treeIndexFor(std::uint64_t subvolObjectid);
     Expected<InodeItem> inodeItem(std::uint64_t id);
     Expected<std::vector<ExtentItem>> extentsOf(std::uint64_t id);
+    // Read a logical byte range, crossing chunk and stripe boundaries piecewise.
+    Expected<void> readLogical(std::uint64_t logical, std::span<std::byte> dst) const;
+    // The whole decompressed content of a compressed extent (ram_bytes long), cached for the
+    // last extent so that sequential reads do not decompress it once per call.
+    Expected<std::span<const std::byte>> decompressed(std::uint64_t fileId, const ExtentItem& e);
 
     std::shared_ptr<BlockDevice> m_device;
     std::uint32_t m_nodeSize = 16384, m_sectorSize = 4096;
@@ -81,6 +86,8 @@ private:
     std::unordered_map<std::uint64_t, std::size_t> m_treeIndex;   // subvolume objectid -> index
     std::unordered_map<std::uint64_t, InodeItem> m_inodes;
     std::unordered_map<std::uint64_t, std::vector<DirEntry>> m_dirCache;
+    std::uint64_t m_decompKey = ~0ull;         // disk bytenr, or fileId | 1 << 63 for inline extents
+    std::vector<std::byte> m_decompData;
 };
 
 std::unique_ptr<ReaderSource> makeBtrfsReaderSource();

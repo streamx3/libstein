@@ -18,7 +18,7 @@ L0 detect/geometry/label/uuid · L1 used-block map · L2 offline metadata edit
 | HFS (classic) | **done** (incl. wrapper) | – | v1 | – | – | – | – | – |
 | APFS (container + volumes) | **done** (container) | v2 | v1 (name) | – | – | – | v2 | – |
 | XFS | **done** | v2 | v1 | x (grow) | x | x | **done** (reader: v4/v5 inodes, extents and bmbt forks, sf/block/leaf/node dirs) | – |
-| btrfs | **done** | v2 | v1 | x | x | x | **done** (reader: chunk map, fs/subvolume trees, inline/regular extents; compression refused) | – |
+| btrfs | **done** | v2 | v1 | x | x | x | **done** (reader: chunk map, fs/subvolume trees, inline/regular extents, zlib and lzo compression; zstd refused until a decoder exists) | – |
 | F2FS, JFS, nilfs2, bcachefs, reiser*, minix, ocfs2 | **done** (+erofs, squashfs) | – | v1 (read) | x | x | x | – | – |
 | UDF | **done** | – | v1 | – | – | x | **done** (reader: physical/sparable/metadata maps, FE/EFE, inline/short/long ADs, symlinks; VAT v2) | – |
 | ISO9660 | **done** (+Joliet) | v1 (used = everything) | v1 | – | – | – | **done** (reader: Rock Ridge names/links/relocation, Joliet, plain) | – |
@@ -73,7 +73,7 @@ L0 detect/geometry/label/uuid · L1 used-block map · L2 offline metadata edit
 |---|---|---|---|
 | Linux libfuse3 | **done** (`stein mount`, any `fs::Reader`: partitions inside images, LUKS, LVM) | v2 (needs fs writers) | optional at configure time (`pkg-config fuse3`) |
 | macOS NFS loopback / macFUSE | v1 | v2 | kext-less default per design doc 15 |
-| Windows WinFsp / Dokany | v1 | v2 | |
+| Windows WinFsp | **done** (same libfuse3-API source over WinFsp's fuse3 layer, delay-loaded; drive letter or absent directory as mount point; CI mounts and reads the ext4 fixture through it) | v2 | WinFsp is optional at configure time and at run time (clear `Unsupported` when not installed); Dokany not pursued |
 
 ## Operations (stein_ops, M1)
 

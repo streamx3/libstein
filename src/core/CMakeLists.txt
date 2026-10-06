@@ -17,6 +17,7 @@ stein_add_module(core
     src/crypto.cpp
     src/inflate.cpp
     src/bzip2.cpp
+    src/lzo.cpp
     src/aes.cpp
     src/aes_hw.cpp
     src/keys.cpp)

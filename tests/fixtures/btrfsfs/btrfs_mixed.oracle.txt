@@ -1,4 +1,5 @@
 f 204923 big.bin
+f 316000 compressible.txt
 d 4096 dir
 d 4096 dir/nested
 d 4096 dir/nested/deep
@@ -7,8 +8,8 @@ f 13 dir/nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
 f 10 dir/upper.txt
 f 8 dir/ünïcödé 日本語.txt
 f 0 empty.txt
-f 20 hardlink.txt
-f 20 hello.txt
+f 181 hardlink.txt
+f 181 hello.txt
 l 103 link_long
 l 9 link_short
 d 16384 many
@@ -412,16 +413,18 @@ f 10 many/file_396.txt
 f 10 many/file_397.txt
 f 10 many/file_398.txt
 f 10 many/file_399.txt
+f 216000 mixed.bin
 f 3145732 sparse.bin
 f 1 tiny.txt
-sha256 9e71ab36e9d39a41ddee5e69a2c04b63a683605c4b92726bac0ec683c0d2e765 big.bin
+sha256 03f3902531a43724e5b79886ac490cd8090005f7c046f5ffe1b28a0c3bb7d772 big.bin
+sha256 3de2802162cc002ce96e31a9d6afe73620d00c85b84d4fab82c0a87cf0b9044e compressible.txt
 sha256 26d0bac9f0c7a35b2f3322a0f4ad4517265f56b2c0f4b2ed7cb5cbd30c5868e2 dir/nested/deep/leaf.txt
 sha256 d36b7c1c4529f2b95e47ee49d2f0626a80537cea3da3bd2fbccec64da25ffbe6 dir/nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
 sha256 3c8ab9a029d935404be83f0021cd87e61bf58a54f422b35dc9afa031a7ac5225 dir/upper.txt
 sha256 ebc45fabefbabdd06424b3c476b11e93fec784069ff10844e7383d59f491f8cb dir/ünïcödé 日本語.txt
 sha256 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 empty.txt
-sha256 a78157f50d549dbd457281599cb9f3b76bb417358bc70acdf82a57725ae9e6e6 hardlink.txt
-sha256 a78157f50d549dbd457281599cb9f3b76bb417358bc70acdf82a57725ae9e6e6 hello.txt
+sha256 765ced392880a3c874135336a3ad2cbbc78fcccf2731413924dc58391ae384dc hardlink.txt
+sha256 765ced392880a3c874135336a3ad2cbbc78fcccf2731413924dc58391ae384dc hello.txt
 sha256 52e6666efd45b3ad6cf70c01c6186d992b448108428da618a8aca33a6dfc3d21 many/file_000.txt
 sha256 b9570baa2e2c981f9ebd0f7b21a0de79b3f9326a309a56da9aa16ceec23c295d many/file_001.txt
 sha256 8cc95317796dcd0143b598d7aaa0a636acd29b7aaf3107f64892fa22195bf1e4 many/file_002.txt
@@ -822,6 +825,7 @@ sha256 602ca58df788302f99edfe02561fa4ad75f42ed9f886e43532ce2c7c6d167d0e many/fil
 sha256 ceb4e5f76f7530a2ecf5e939bb4a6b37b6550396bca947392a25f3d10ff78972 many/file_397.txt
 sha256 899247ca516b9889be2cdba7f8c7b030602daf842eb2ed1e48dcd91504e36631 many/file_398.txt
 sha256 e2d57e63ff12dd837b25b27363acd679883ad0abc8bf47f28d082aa8ff7b2ef1 many/file_399.txt
+sha256 5c2573319bac0e9b72ccefa480850b18c7145cd2cd9810b006bd75b6703663a6 mixed.bin
 sha256 152a914fdd94014b4e97407a0f5f47be07cfde1297b2c3f427d9615eb75a1db3 sparse.bin
 sha256 2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881 tiny.txt
 link link_long -> dir/nested/deep/pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp/target

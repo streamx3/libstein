@@ -684,8 +684,8 @@ TEST_CASE("xfs reader: protofile-built v5 fixtures read back exactly (shortform/
     }
 }
 
-TEST_CASE("btrfs reader: mkfs.btrfs --rootdir fixtures read back exactly (inline and regular extents, holes, hard links, symlinks, mixed block groups)") {
-    const char* names[] = {"btrfs", "btrfs_mixed"};
+TEST_CASE("btrfs reader: mkfs.btrfs --rootdir fixtures read back exactly (inline and regular extents, holes, hard links, symlinks, mixed block groups, zlib and lzo compression)") {
+    const char* names[] = {"btrfs", "btrfs_mixed", "btrfs_zlib", "btrfs_lzo"};
     for (const char* name : names) {
         const std::string fixture = name;
         CAPTURE(fixture);
@@ -727,6 +727,30 @@ TEST_CASE("btrfs reader: mkfs.btrfs --rootdir fixtures read back exactly (inline
         CHECK_FALSE(fs::resolvePath(**reader, "HELLO.TXT"));
         CHECK((*reader)->readdir(*fs::resolvePath(**reader, "many"))->size() == 400);
         CHECK(*fs::resolvePath(**reader, "link_short") == *hl);
+        // Partial reads inside a compressed extent and across extent boundaries.
+        auto big = fs::resolvePath(**reader, "compressible.txt");
+        REQUIRE(big);
+        auto whole = fs::readAll(**reader, *big, 1 << 20);
+        REQUIRE(whole);
+        std::vector<std::byte> part(5000);
+        auto n = (*reader)->read(*big, 131072 - 2500, part);
+        REQUIRE(n);
+        CHECK(*n == 5000);
+        CHECK(std::equal(part.begin(), part.end(), whole->begin() + 131072 - 2500));
+    }
+    // zstd-compressed extents are recognised and refused until a decoder exists.
+    {
+        auto dev = loadSparseFixture("btrfsfs/btrfs_zstd.sparse");
+        auto probed = fs::probe(dev);
+        REQUIRE(probed);
+        auto reader = (*probed)->openReader();
+        REQUIRE(reader);
+        auto f = fs::resolvePath(**reader, "compressible.txt");
+        REQUIRE(f);
+        auto r = fs::readAll(**reader, *f, 1 << 20);
+        REQUIRE_FALSE(r);
+        CHECK(r.error().category() == ErrorCategory::Unsupported);
+        CHECK((*reader)->readdir(*fs::resolvePath(**reader, "many"))->size() == 400);   // metadata is uncompressed
     }
 }
 

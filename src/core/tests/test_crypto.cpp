@@ -342,3 +342,66 @@ TEST_CASE("ripemd160 and blake2s256: digests, HMAC and PBKDF2 agree with Python"
         CHECK(Hasher::hex(dk) == v.hex);
     }
 }
+
+#include "lzo_vectors.hpp"
+#include "stein/core/lzo.hpp"
+
+// The generators mirror the liblzo2 program that produced lzo_vectors.hpp.
+static std::vector<std::byte> lzoPlain(std::string_view name, std::size_t size) {
+    std::string base(name);
+    if (base.size() > 5 && base.ends_with("_fast")) base.resize(base.size() - 5);
+    std::vector<std::byte> out;
+    out.reserve(size);
+    auto push = [&](unsigned v) { out.push_back(std::byte(v & 0xFF)); };
+    if (base == "run") {
+        for (std::size_t i = 0; i < 5000; ++i) push('z');
+    } else if (base == "literals") {
+        for (unsigned i = 0; i < 300; ++i) push(i * 7 + 3);
+    } else if (base == "random4k") {
+        std::uint64_t r = 88172645463325252ull;
+        for (int i = 0; i < 4096; ++i) {
+            r ^= r << 13;
+            r ^= r >> 7;
+            r ^= r << 17;
+            push(static_cast<unsigned>(r >> 11));
+        }
+    } else if (base == "text60k") {
+        static const char* const words[] = {"alpha ", "beta ", "gamma ", "delta ", "epsilon ", "the quick brown fox ", "jumps over ", "lazy dog\n"};
+        std::uint32_t r = 12345;
+        while (out.size() < 60000) {
+            r = r * 1103515245u + 12345u;
+            for (const char* w = words[r >> 29]; *w; ++w) push(static_cast<unsigned char>(*w));
+        }
+    } else if (base == "far") {
+        for (int rep = 0; rep < 30; ++rep)
+            for (int i = 0; i < 2000; ++i) push(static_cast<unsigned>((i & 0xff) ^ (rep & 1)));
+    }
+    return out;
+}
+
+TEST_CASE("lzo1x: liblzo2 vectors (lzo1x_999 and lzo1x_1), truncation and small buffers") {
+    for (const auto& v : test::vectors::kLzo) {
+        CAPTURE(v.name);
+        auto comp = hexBytes(std::string(v.compressedHex).c_str());
+        std::vector<std::byte> want = v.plainHex.empty() ? lzoPlain(v.name, v.size) : hexBytes(std::string(v.plainHex).c_str());
+        REQUIRE(want.size() == v.size);
+        REQUIRE(Hasher::hex(Hasher::digest(HashAlgorithm::Sha256, want)) == v.sha256);   // the generator mirrors the oracle's
+        std::vector<std::byte> out(v.size);
+        auto n = compress::lzo1xDecompress(comp, out);
+        REQUIRE_MESSAGE(n, (n ? std::string() : n.error().toString()));
+        CHECK(*n == v.size);
+        CHECK(out == want);
+        if (v.size > 1) {
+            std::vector<std::byte> small(v.size - 1);
+            auto s = compress::lzo1xDecompress(comp, small);
+            REQUIRE_FALSE(s);
+            CHECK(s.error().category() == ErrorCategory::OutOfRange);
+        }
+        auto t = compress::lzo1xDecompress(std::span<const std::byte>(comp).subspan(0, comp.size() - 3), out);
+        CHECK_FALSE(t);
+    }
+    std::vector<std::byte> out(16);
+    CHECK_FALSE(compress::lzo1xDecompress({}, out));
+    const std::byte badMarker[] = {std::byte{0x12}, std::byte{0}, std::byte{0}};   // length code 2 with distance 0
+    CHECK_FALSE(compress::lzo1xDecompress(badMarker, out));
+}
