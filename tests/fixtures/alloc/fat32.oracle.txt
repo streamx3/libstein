@@ -1,0 +1,2 @@
+mounted=no
+clusters=1/129022

@@ -1,0 +1,2 @@
+mounted=yes
+free_clusters=3420(83.5%)

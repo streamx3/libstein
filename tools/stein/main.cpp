@@ -54,7 +54,7 @@ int usage() {
                "  stein pt wipe    <image> [<index>]       zero filesystem/table signatures (whole device or one partition)\n"
                "      every edit prints the pending operations and the resulting layout; --dry-run stops there;\n"
                "      --force is required for destructive edits on a real block device\n"
-               "  stein image create  <device|file> <out.stein> [--compress lz4|none] [--chunk 4M] [--split 2G]\n"
+               "  stein image create  <device|file> <out.stein> [--compress lz4|none] [--chunk 4M] [--split 2G] [--used-only]\n"
                "  stein image restore <in.stein> <device|file> [--no-verify] [--force]\n"
                "  stein image verify  <in.stein> [--level 1|2|3]\n"
                "  stein image info    <in.stein>\n"
@@ -79,7 +79,7 @@ int die(const Error& e) {
 
 struct Args {
     std::vector<std::string> positional;
-    bool doc = false, dryRun = false, noVerify = false, force = false, noWipe = false, unlock = false;
+    bool doc = false, dryRun = false, noVerify = false, force = false, noWipe = false, unlock = false, usedOnly = false;
     int level = 0;
     std::string compress, split, chunk;
     std::string start, size, end, type, name, index;
@@ -107,6 +107,7 @@ Args parse(int argc, char** argv) {
         else if ((s == "--index" || s == "--part") && i + 1 < argc) a.index = argv[++i];
         else if (s == "--no-wipe") a.noWipe = true;
         else if (s == "--unlock") a.unlock = true;
+        else if (s == "--used-only") a.usedOnly = true;
         else a.positional.push_back(s);
     }
     return a;
@@ -166,18 +167,31 @@ int cmdImage(const Args& a) {
         if (!a.split.empty()) co.splitSize = parseSize(a.split);
         if (!a.chunk.empty()) co.chunkSize = static_cast<std::uint32_t>(parseSize(a.chunk));
         co.sourceName = a.positional[2];
+        co.usedBlocksOnly = a.usedOnly;
         if (auto d = platform::current().describe(a.positional[2])) co.sourceIdentity = d->identity();
         auto r = image::createImage(*dev, a.positional[3], co, progress);
         if (!r) return die(r.error());
         std::printf("image %s: %llu chunks (%llu all-zero), %s read, %s stored in %zu file(s)\n", r->imageUuid.toString(false).c_str(),
                     static_cast<unsigned long long>(r->stats.chunks), static_cast<unsigned long long>(r->stats.zeroChunks),
                     formatSize(r->stats.bytesRead).c_str(), formatSize(r->storedBytes).c_str(), r->files.size());
+        for (const auto& n : r->allocationNotes) std::printf("  allocation: %s\n", n.c_str());
+        if (r->stats.freeBytesSkipped) std::printf("  free space skipped: %s\n", formatSize(r->stats.freeBytesSkipped).c_str());
         if (r->stats.unreadableSectors) std::printf("WARNING: %llu unreadable sectors were zero-filled\n", static_cast<unsigned long long>(r->stats.unreadableSectors));
         if (!r->imageHashHex.empty()) std::printf("sha256 %s\n", r->imageHashHex.c_str());
         return r->stats.unreadableSectors ? 1 : 0;
     }
     if (sub == "restore") {
         if (a.positional.size() < 4) return usage();
+        {
+            // A missing regular-file target is created at the image's size (restore into a new raw file).
+            std::error_code ec;
+            if (!platform::isDevicePath(a.positional[3]) && !std::filesystem::exists(a.positional[3], ec)) {
+                auto info = image::imageInfo(a.positional[2]);
+                if (!info) return die(info.error());
+                auto created = FileDevice::create(a.positional[3], info->header.totalSize);
+                if (!created) return die(created.error());
+            }
+        }
         auto dev = openImage(a.positional[3], true, a.sectorSize);
         if (!dev) return die(dev.error());
         image::RestoreOptions ro;

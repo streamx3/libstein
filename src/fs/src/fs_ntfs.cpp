@@ -27,6 +27,85 @@ bool applyFixups(std::vector<std::byte>& rec, std::uint32_t sectorSize) {
     return true;
 }
 
+// Decode an NTFS run list into (lcn, clusters) pairs; sparse runs have lcn == UINT64_MAX.
+struct Run {
+    std::uint64_t lcn;
+    std::uint64_t count;
+};
+std::vector<Run> decodeRuns(std::span<const std::byte> r) {
+    std::vector<Run> runs;
+    std::int64_t lcn = 0;
+    std::size_t pos = 0;
+    while (pos < r.size()) {
+        const auto hdr = std::to_integer<std::uint8_t>(r[pos++]);
+        if (hdr == 0) break;
+        const unsigned lenSize = hdr & 0xF, offSize = hdr >> 4;
+        if (lenSize == 0 || lenSize > 8 || offSize > 8 || pos + lenSize + offSize > r.size()) break;
+        std::uint64_t len = 0;
+        for (unsigned i = 0; i < lenSize; ++i) len |= std::uint64_t{std::to_integer<std::uint8_t>(r[pos + i])} << (8 * i);
+        pos += lenSize;
+        if (offSize == 0) {
+            runs.push_back(Run{~std::uint64_t{0}, len});   // sparse
+            continue;
+        }
+        std::int64_t delta = 0;
+        for (unsigned i = 0; i < offSize; ++i) delta |= std::int64_t{std::to_integer<std::uint8_t>(r[pos + i])} << (8 * i);
+        if (std::to_integer<std::uint8_t>(r[pos + offSize - 1]) & 0x80) delta -= std::int64_t{1} << (8 * offSize);   // sign-extend
+        pos += offSize;
+        lcn += delta;
+        runs.push_back(Run{static_cast<std::uint64_t>(lcn), len});
+    }
+    return runs;
+}
+
+// $Bitmap (MFT record 6): one bit per cluster, LSB first.
+class NtfsAllocation final : public AllocationSource {
+public:
+    std::uint32_t bps = 0;
+    ByteCount cluster = 0, mftOff = 0, recSize = 0;
+    std::uint64_t clusters = 0;
+
+    Expected<AllocationMap> load(BlockDevice& dev) const override {
+        auto rec = dev.read(mftOff + 6 * recSize, recSize);
+        if (!rec) return fail(rec.error());
+        if (rec->size() < 48 || std::string(reinterpret_cast<const char*>(rec->data()), 4) != "FILE") return fail(ErrorCategory::InvalidFormat, "$Bitmap MFT record is not a FILE record");
+        if (!applyFixups(*rec, bps)) return fail(ErrorCategory::Integrity, "$Bitmap MFT record has a torn update sequence");
+        gen::NtfsMftRecordHeader h(*rec);
+        std::size_t pos = h.attrsOffset();
+        while (pos + gen::NtfsAttrHeader::kSize <= rec->size()) {
+            gen::NtfsAttrHeader a(std::span<const std::byte>(*rec).subspan(pos, gen::NtfsAttrHeader::kSize));
+            if (a.type() == 0xFFFFFFFFu || a.length() < 16 || pos + a.length() > rec->size()) break;
+            if (a.type() == 0x80 && a.nonResident() && pos + 64 <= rec->size()) {
+                const std::uint16_t runsOff = loadLe16(rec->data() + pos + 32);
+                const std::uint64_t dataSize = loadLe64(rec->data() + pos + 48);
+                if (runsOff < 64 || pos + runsOff > pos + a.length()) return fail(ErrorCategory::InvalidFormat, "$Bitmap run list offset invalid");
+                const auto runs = decodeRuns(std::span<const std::byte>(*rec).subspan(pos + runsOff, a.length() - runsOff));
+                const std::uint64_t needed = (clusters + 7) / 8;
+                if (dataSize < needed) return fail(ErrorCategory::InvalidFormat, "$Bitmap is shorter than the volume needs");
+                std::vector<std::byte> bits;
+                bits.reserve(static_cast<std::size_t>(needed));
+                for (const auto& run : runs) {
+                    if (bits.size() >= needed) break;
+                    const ByteCount want = std::min<ByteCount>(run.count * cluster, needed - bits.size());
+                    if (run.lcn == ~std::uint64_t{0}) {
+                        bits.insert(bits.end(), static_cast<std::size_t>(want), std::byte{0});
+                        continue;
+                    }
+                    auto part = dev.read(run.lcn * cluster, want);
+                    if (!part) return fail(part.error());
+                    bits.insert(bits.end(), part->begin(), part->end());
+                }
+                if (bits.size() < needed) return fail(ErrorCategory::InvalidFormat, "$Bitmap run list does not cover the volume");
+                AllocationMap map(0, cluster, clusters, true);
+                map.importBitmap(0, clusters, bits);
+                return map;
+            }
+            pos += a.length();
+        }
+        return fail(ErrorCategory::InvalidFormat, "$Bitmap has no non-resident $DATA attribute");
+    }
+};
+
 } // namespace
 
 Result detectNtfs(Dev dev) {
@@ -59,6 +138,15 @@ Result detectNtfs(Dev dev) {
     const ByteCount backupBoot = b.numberOfSectors() * bps;
     if (backupBoot + bps <= dev->size()) fs->addRegion(Region{backupBoot, bps});
     const ByteCount mftOff = b.mftLcn() * cluster, mirrOff = b.mftmirrLcn() * cluster;
+    {
+        auto alloc = std::make_unique<NtfsAllocation>();
+        alloc->bps = bps;
+        alloc->cluster = cluster;
+        alloc->mftOff = mftOff;
+        alloc->recSize = recSize;
+        alloc->clusters = b.numberOfSectors() * bps / cluster;
+        fs->setAllocationSource(std::move(alloc));
+    }
     if (mftOff + 16 * recSize <= dev->size()) fs->addRegion(Region{mftOff, 16 * recSize});
     if (mirrOff + 4 * recSize <= dev->size()) fs->addRegion(Region{mirrOff, 4 * recSize});
 

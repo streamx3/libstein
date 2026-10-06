@@ -3,10 +3,12 @@
 #include "stein_test.hpp"
 
 #include "stein/core/hash.hpp"
+#include "stein/fs/filesystem.hpp"
 #include "stein/image/operations.hpp"
 #include "stein/image/stein_format.hpp"
 #include "stein/probe/topology.hpp"
 
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <random>
@@ -287,5 +289,68 @@ TEST_CASE("split raw image set opens as one device") {
     REQUIRE(all);
     CHECK(std::equal(all->begin(), all->end(), disk->bytes().begin()));
     if (dev) dev->reset();
+    stein::test::removeTree(dir);
+}
+
+TEST_CASE("used-block-only imaging stores free space as zero chunks and restores the used blocks exactly") {
+    auto dir = tmpDir("stein_test_image_used");
+    auto src = loadSparseFixture("alloc/ext4.sparse");
+    // Pollute the free space so that "whole copy" and "used only" differ measurably.
+    auto probedFs = fs::probe(src);
+    REQUIRE(probedFs);
+    REQUIRE(*probedFs);
+    auto map = (*probedFs)->allocationMap();
+    REQUIRE(map);
+    std::mt19937_64 rng(7);
+    std::uint64_t polluted = 0;
+    for (std::uint64_t b = 0; b < map->blocks() && polluted < 64; ++b) {
+        if (map->isUsed(b)) continue;
+        const ByteCount off = map->origin() + b * map->blockSize();
+        if (off + map->blockSize() > src->size()) break;
+        for (ByteCount i = 0; i < map->blockSize(); i += 8) {
+            const std::uint64_t v = rng();
+            std::memcpy(src->bytes().data() + off + i, &v, 8);
+        }
+        ++polluted;
+    }
+    REQUIRE(polluted == 64);
+    NullProgressSink sink;
+    Progress progress(sink);
+    CreateOptions whole;
+    whole.chunkSize = 64 * KiB;
+    whole.compression = Compression::None;
+    auto a = createImage(src, dir / "whole.stein", whole, progress);
+    REQUIRE(a);
+    CreateOptions used = whole;
+    used.usedBlocksOnly = true;
+    auto b = createImage(src, dir / "used.stein", used, progress);
+    REQUIRE_MESSAGE(b, (b ? std::string() : b.error().toString()));
+    CHECK(b->stats.freeBytesSkipped >= 64 * map->blockSize());
+    CHECK(b->storedBytes < a->storedBytes);
+    CHECK(b->storedBytes + 64 * map->blockSize() <= a->storedBytes);
+    REQUIRE(b->allocationNotes.size() == 1);
+    CHECK(b->allocationNotes[0].find("ext4") != std::string::npos);
+    auto info = imageInfo(dir / "used.stein");
+    REQUIRE(info);
+    CHECK(info->manifest.get("used_blocks_only").asBool());
+    // Restore: used blocks identical, polluted free blocks come back as zeros, filesystem probes clean.
+    auto target = std::make_shared<MemoryDevice>(src->size(), 512);
+    auto r = restoreImage(dir / "used.stein", *target, RestoreOptions{}, progress);
+    REQUIRE(r);
+    for (std::uint64_t blk = 0; blk < map->blocks(); ++blk) {
+        const ByteCount off = map->origin() + blk * map->blockSize();
+        if (off + map->blockSize() > src->size()) break;
+        auto s = src->bytes().subspan(off, map->blockSize());
+        auto t = target->bytes().subspan(off, map->blockSize());
+        if (map->isUsed(blk)) REQUIRE(std::equal(s.begin(), s.end(), t.begin()));
+        else REQUIRE(std::all_of(t.begin(), t.end(), [](std::byte x) { return x == std::byte{0}; }));
+    }
+    auto again = fs::probe(target);
+    REQUIRE(again);
+    REQUIRE(*again);
+    CHECK((*again)->info().label == "alloc_ext4");
+    auto map2 = (*again)->allocationMap();
+    REQUIRE(map2);
+    CHECK(map2->usedBlocks() == map->usedBlocks());
     stein::test::removeTree(dir);
 }

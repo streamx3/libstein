@@ -7,6 +7,7 @@
 #include "stein/block/block_device.hpp"
 #include "stein/core/error.hpp"
 #include "stein/core/progress.hpp"
+#include "stein/fs/allocation_map.hpp"
 
 #include <cstdint>
 #include <span>
@@ -19,8 +20,17 @@ enum class BadSectorPolicy : std::uint8_t {
     SkipZero,    // retry sector by sector, zero-fill what stays unreadable, continue (recorded)
 };
 
+// A filesystem's allocation map placed at its byte range on the source device.
+struct MappedAllocation {
+    Region region;
+    const fs::AllocationMap* map = nullptr;
+};
+
 struct CopyOptions {
     std::uint32_t chunkSize = 4 * MiB;
+    // Used-block-only: free blocks of these filesystems are zeroed before the
+    // chunk is handed on, so whole-free chunks become zero chunks.
+    std::vector<MappedAllocation> allocations;
     BadSectorPolicy badSectors = BadSectorPolicy::Fail;
     bool skipZeroChunksOnWrite = false;   // device->device: do not write all-zero chunks (target known to be zero / discarded)
     bool discardZeroChunks = false;       // device->device: try discard() for zero chunks before writing zeros
@@ -33,6 +43,7 @@ struct CopyStats {
     std::uint64_t chunks = 0;
     std::uint64_t zeroChunks = 0;
     std::uint64_t unreadableSectors = 0;
+    ByteCount freeBytesSkipped = 0;       // bytes zeroed because an allocation map said "free"
     std::vector<Region> badRegions;       // zero-filled ranges (coalesced)
 };
 

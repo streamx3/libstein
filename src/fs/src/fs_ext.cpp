@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "detectors.hpp"
+#include "stein/core/endian.hpp"
 #include "stein/core/strings.hpp"
 #include "stein/layout/gen/ext.hpp"
 
@@ -7,6 +8,43 @@ namespace stein::fs::detail {
 
 namespace gen = layout::gen;
 using layout::Validity;
+
+namespace {
+
+// Block bitmaps: one per group, located by the group descriptor table.
+class ExtAllocation final : public AllocationSource {
+public:
+    ByteCount bs = 0;
+    std::uint64_t blocks = 0, groups = 0;
+    std::uint32_t blocksPerGroup = 0, descSize = 32, firstDataBlock = 0;
+    ByteCount gdtOffset = 0;
+    bool is64 = false, needsRecovery = false;
+
+    Expected<AllocationMap> load(BlockDevice& dev) const override {
+        if (needsRecovery) return fail(ErrorCategory::Busy, "ext journal needs recovery; the block bitmaps may be stale");
+        AllocationMap map(0, bs, blocks, true);
+        auto gdt = dev.read(gdtOffset, groups * descSize);
+        if (!gdt) return fail(gdt.error());
+        std::vector<std::byte> bitmap(bs);
+        for (std::uint64_t g = 0; g < groups; ++g) {
+            const std::byte* d = gdt->data() + g * descSize;
+            const std::uint16_t flags = loadLe16(d + 0x12);
+            if (flags & 0x1) continue;   // BLOCK_UNINIT: keep the group marked used (conservative)
+            std::uint64_t bitmapBlock = loadLe32(d + 0);
+            if (is64 && descSize >= 64) bitmapBlock |= std::uint64_t{loadLe32(d + 0x20)} << 32;
+            if (bitmapBlock == 0 || bitmapBlock >= blocks) return fail(ErrorCategory::InvalidFormat, "ext group " + std::to_string(g) + " has an invalid block bitmap location");
+            if (auto r = dev.readAt(bitmapBlock * bs, bitmap); !r) return fail(r.error());
+            const std::uint64_t first = firstDataBlock + g * blocksPerGroup;
+            const std::uint64_t count = std::min<std::uint64_t>(blocksPerGroup, blocks > first ? blocks - first : 0);
+            map.importBitmap(first, count, bitmap);
+        }
+        // Blocks before the first data block (the 1 KiB boot area on 1 KiB-block filesystems) are not in any bitmap.
+        map.setRange(0, firstDataBlock, true);
+        return map;
+    }
+};
+
+} // namespace
 
 Result detectExt(Dev dev) {
     constexpr ByteCount kSbOffset = 1024;
@@ -58,6 +96,19 @@ Result detectExt(Dev dev) {
     const std::uint32_t descSize = (incompat & (1u << 7)) && sb.descSize() ? sb.descSize() : 32;
     const ByteCount gdtBytes = alignUp(groups * descSize, bs);
     if (gdtBlock * bs + gdtBytes <= dev->size()) fs->addRegion(Region{gdtBlock * bs, gdtBytes});
+    {
+        auto alloc = std::make_unique<ExtAllocation>();
+        alloc->bs = bs;
+        alloc->blocks = blocks;
+        alloc->groups = groups;
+        alloc->blocksPerGroup = sb.blocksPerGroup();
+        alloc->descSize = descSize;
+        alloc->firstDataBlock = sb.firstDataBlock();
+        alloc->gdtOffset = gdtBlock * bs;
+        alloc->is64 = is64;
+        alloc->needsRecovery = (incompat & (1u << 2)) != 0;
+        fs->setAllocationSource(std::move(alloc));
+    }
     // First backup superblock (group 1) when it exists.
     if (groups > 1) {
         const ByteCount backup = ByteCount{sb.blocksPerGroup()} * bs + (bs == 1024 ? 1024 : 0);

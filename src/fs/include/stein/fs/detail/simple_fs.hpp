@@ -7,6 +7,13 @@
 
 namespace stein::fs::detail {
 
+// How a detector provides L1: a small object that knows where the bitmap is.
+class AllocationSource {
+public:
+    virtual ~AllocationSource() = default;
+    virtual Expected<AllocationMap> load(BlockDevice& device) const = 0;
+};
+
 class SimpleFileSystem : public FileSystem {
 public:
     explicit SimpleFileSystem(std::shared_ptr<BlockDevice> device) : FileSystem(std::move(device)) {
@@ -18,12 +25,15 @@ public:
     std::span<const FsDiagnostic> diagnostics() const override { return m_diagnostics; }
     std::vector<Region> metadataRegions() const override { return m_regions; }
     layout::Node describe() const override { return m_tree; }
+    std::uint32_t capabilities() const override;
+    Expected<AllocationMap> allocationMap() const override;
 
     // Construction helpers used by detectors.
     FsInfo& mutableInfo() { return m_info; }
     void addRegion(Region r) { m_regions.push_back(r); }
     void addNode(layout::Node n) { m_tree.children.push_back(std::move(n)); }
     void setTreeName(std::string name) { m_tree.name = std::move(name); }
+    void setAllocationSource(std::unique_ptr<AllocationSource> src) { m_alloc = std::move(src); }
     void diag(layout::Validity sev, std::string code, std::string message) {
         if (sev >= layout::Validity::Warning) m_tree.flag(sev, message);
         m_diagnostics.push_back(FsDiagnostic{sev, std::move(code), std::move(message)});
@@ -34,6 +44,7 @@ protected:
     std::vector<FsDiagnostic> m_diagnostics;
     std::vector<Region> m_regions;
     layout::Node m_tree;
+    std::unique_ptr<AllocationSource> m_alloc;
 };
 
 // Read `length` bytes at `offset`; NotFound (not Io) when the device is too

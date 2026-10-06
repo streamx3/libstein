@@ -152,3 +152,96 @@ TEST_CASE("nothing on a blank or random device") {
     REQUIRE(t);
     CHECK(*t == nullptr);
 }
+
+// ---- L1: allocation maps -------------------------------------------------------
+
+namespace {
+struct AllocOracle {
+    bool mounted = false;
+    std::optional<ByteCount> freeBytes;         // ext: dumpe2fs
+    std::optional<std::uint64_t> freeClusters;  // ntfs: ntfsinfo
+    std::optional<std::uint64_t> usedClusters, totalClusters;   // fat: fsck.fat "used/total"
+};
+AllocOracle loadAllocOracle(const std::string& name) {
+    AllocOracle o;
+    std::ifstream in(std::string(STEIN_FIXTURE_DIR) + "/alloc/" + name + ".oracle.txt");
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line == "mounted=yes") o.mounted = true;
+        else if (line.rfind("free_bytes=", 0) == 0) o.freeBytes = std::stoull(line.substr(11));
+        else if (line.rfind("free_clusters=", 0) == 0) o.freeClusters = std::stoull(line.substr(14));
+        else if (line.rfind("clusters=", 0) == 0) {
+            const auto slash = line.find('/');
+            o.usedClusters = std::stoull(line.substr(9, slash - 9));
+            o.totalClusters = std::stoull(line.substr(slash + 1));
+        }
+    }
+    return o;
+}
+} // namespace
+
+TEST_CASE("allocation maps: every non-zero byte lies in a used block; counts match the native tools") {
+    const char* names[] = {"ext4", "ext2", "fat16", "fat32", "exfat", "ntfs", "hfsplus"};
+    for (const char* name : names) {
+        const std::string fixture = name;
+        CAPTURE(fixture);
+        auto dev = loadSparseFixture("alloc/" + fixture + ".sparse");
+        auto probed = fs::probe(dev);
+        REQUIRE(probed);
+        REQUIRE(*probed);
+        auto& f = **probed;
+        REQUIRE(fs::has(f.capabilities(), fs::Capability::UsedBlocks));
+        auto map = f.allocationMap();
+        REQUIRE_MESSAGE(map, (map ? std::string() : map.error().toString()));
+        CHECK(map->blockSize() >= 512);
+        CHECK(map->blocks() > 0);
+        CHECK(map->coveredEnd() <= dev->size() + map->blockSize());
+        // Invariant: anything non-zero on the device is inside a used block (or outside the covered range).
+        const auto bytes = dev->bytes();
+        std::uint64_t violations = 0;
+        for (std::uint64_t b = 0; b < map->blocks(); ++b) {
+            if (map->isUsed(b)) continue;
+            const ByteCount off = map->origin() + b * map->blockSize();
+            if (off >= bytes.size()) break;
+            const ByteCount len = std::min<ByteCount>(map->blockSize(), bytes.size() - off);
+            for (ByteCount i = 0; i < len; ++i)
+                if (bytes[off + i] != std::byte{0}) {
+                    ++violations;
+                    break;
+                }
+        }
+        CHECK(violations == 0);
+        // Some data must be marked used (metadata at least); a mounted fixture with files has more.
+        const auto o = loadAllocOracle(name);
+        CHECK(map->usedBlocks() < map->blocks());   // an empty FAT has 0 used clusters: metadata lives before the data area
+        if (o.freeBytes) CHECK(map->freeBytes() == *o.freeBytes);
+        if (o.freeClusters) CHECK(map->blocks() - map->usedBlocks() == *o.freeClusters);
+        if (o.usedClusters) {
+            CHECK(map->blocks() == *o.totalClusters);
+            CHECK(map->usedBlocks() == *o.usedClusters);
+        }
+        if (f.info().usedBytes && (f.type() == fs::FsType::HfsPlus || f.type() == fs::FsType::HfsX))
+            CHECK(map->usedBytes() == *f.info().usedBytes);   // volume header free count agrees with the bitmap
+        // zeroFree on a whole-device copy leaves exactly the used bytes.
+        std::vector<std::byte> copy(bytes.begin(), bytes.end());
+        const ByteCount zeroed = map->zeroFree(0, copy);
+        CHECK(zeroed <= map->freeBytes());
+        CHECK(zeroed > 0);
+        for (std::uint64_t b = 0; b < map->blocks(); ++b) {
+            const ByteCount off = map->origin() + b * map->blockSize();
+            if (off >= copy.size()) break;
+            if (map->isUsed(b)) CHECK(std::equal(copy.begin() + off, copy.begin() + std::min<ByteCount>(off + map->blockSize(), copy.size()), bytes.begin() + off));
+            else CHECK(copy[off] == std::byte{0});
+        }
+    }
+}
+
+TEST_CASE("allocation maps: a dirty filesystem refuses to hand out its bitmap") {
+    auto dev = loadSparseFixture("fs/ext4_dirty.sparse");
+    auto probed = fs::probe(dev);
+    REQUIRE(probed);
+    REQUIRE(*probed);
+    auto map = (*probed)->allocationMap();
+    REQUIRE_FALSE(map);
+    CHECK(map.error().category() == ErrorCategory::Busy);
+}

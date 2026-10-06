@@ -1,0 +1,2 @@
+mounted=yes
+free_bytes=58482688

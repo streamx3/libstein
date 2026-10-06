@@ -29,6 +29,94 @@ std::string fatDirLabel(std::span<const std::byte> dir) {
 
 } // namespace
 
+// FAT: a cluster is used when its FAT entry is non-zero.
+class FatAllocation final : public AllocationSource {
+public:
+    std::uint32_t bps = 0, spc = 0, bits = 16;
+    ByteCount fatOffset = 0, fatBytes = 0, dataOffset = 0;
+    std::uint64_t clusters = 0;
+
+    Expected<AllocationMap> load(BlockDevice& dev) const override {
+        auto fat = dev.read(fatOffset, std::min<ByteCount>(fatBytes, 1 * GiB));
+        if (!fat) return fail(fat.error());
+        AllocationMap map(dataOffset, ByteCount{bps} * spc, clusters, true);
+        const std::byte* f = fat->data();
+        for (std::uint64_t c = 0; c < clusters; ++c) {
+            const std::uint64_t n = c + 2;
+            std::uint32_t entry = 0;
+            if (bits == 12) {
+                const std::size_t pos = static_cast<std::size_t>(n + n / 2);
+                if (pos + 1 >= fat->size()) break;
+                const std::uint16_t v = loadLe16(f + pos);
+                entry = (n & 1) ? (v >> 4) : (v & 0x0FFF);
+            } else if (bits == 16) {
+                if ((n + 1) * 2 > fat->size()) break;
+                entry = loadLe16(f + n * 2);
+            } else {
+                if ((n + 1) * 4 > fat->size()) break;
+                entry = loadLe32(f + n * 4) & 0x0FFFFFFFu;
+            }
+            if (entry == 0) map.set(c, false);
+        }
+        return map;
+    }
+};
+
+// exFAT: the allocation bitmap file, found through the root directory (entry type 0x81).
+class ExfatAllocation final : public AllocationSource {
+public:
+    ByteCount bps = 0, cluster = 0, fatOffset = 0, heapOffset = 0;
+    std::uint32_t clusterCount = 0, rootCluster = 0;
+
+    Expected<std::uint32_t> next(BlockDevice& dev, std::uint32_t c) const {
+        auto e = dev.read(fatOffset + ByteCount{c} * 4, 4);
+        if (!e) return fail(e.error());
+        return loadLe32(e->data());
+    }
+    ByteCount clusterOffset(std::uint32_t c) const { return heapOffset + ByteCount{c - 2} * cluster; }
+
+    Expected<AllocationMap> load(BlockDevice& dev) const override {
+        // Walk the root directory chain looking for the bitmap entry.
+        std::uint32_t c = rootCluster;
+        std::uint32_t bitmapFirst = 0;
+        std::uint64_t bitmapLen = 0;
+        for (int hops = 0; hops < 1024 && c >= 2 && c - 2 < clusterCount && !bitmapFirst; ++hops) {
+            auto dir = dev.read(clusterOffset(c), cluster);
+            if (!dir) return fail(dir.error());
+            for (std::size_t e = 0; e + 32 <= dir->size(); e += 32) {
+                const auto type = std::to_integer<std::uint8_t>((*dir)[e]);
+                if (type == 0x00) break;
+                if (type == 0x81) {
+                    bitmapFirst = loadLe32(dir->data() + e + 20);
+                    bitmapLen = loadLe64(dir->data() + e + 24);
+                    break;
+                }
+            }
+            auto n = next(dev, c);
+            if (!n) return fail(n.error());
+            c = *n;
+        }
+        if (!bitmapFirst) return fail(ErrorCategory::InvalidFormat, "exFAT root directory has no allocation bitmap entry");
+        AllocationMap map(heapOffset, cluster, clusterCount, true);
+        const std::uint64_t needed = (std::uint64_t{clusterCount} + 7) / 8;
+        if (bitmapLen < needed) return fail(ErrorCategory::InvalidFormat, "exFAT allocation bitmap is too short");
+        std::vector<std::byte> bits;
+        bits.reserve(static_cast<std::size_t>(needed));
+        c = bitmapFirst;
+        for (int hops = 0; hops < 1 << 20 && bits.size() < needed && c >= 2 && c - 2 < clusterCount; ++hops) {
+            auto part = dev.read(clusterOffset(c), std::min<ByteCount>(cluster, needed - bits.size()));
+            if (!part) return fail(part.error());
+            bits.insert(bits.end(), part->begin(), part->end());
+            auto n = next(dev, c);
+            if (!n) return fail(n.error());
+            c = *n;
+        }
+        if (bits.size() < needed) return fail(ErrorCategory::InvalidFormat, "exFAT allocation bitmap chain is broken");
+        map.importBitmap(0, clusterCount, bits);
+        return map;
+    }
+};
+
 Result detectFat(Dev dev) {
     auto raw = readOrNotFound(*dev, 0, 512);
     if (!raw) return fail(raw.error());
@@ -125,6 +213,17 @@ Result detectFat(Dev dev) {
         fs->addNode(std::move(t));
         fs->addRegion(Region{0, ByteCount{reserved} * bps});
     }
+    {
+        auto alloc = std::make_unique<FatAllocation>();
+        alloc->bps = bps;
+        alloc->spc = spc;
+        alloc->bits = info.type == FsType::Fat12 ? 12 : info.type == FsType::Fat16 ? 16 : 32;
+        alloc->fatOffset = ByteCount{reserved} * bps;
+        alloc->fatBytes = ByteCount{fatSectors} * bps;
+        alloc->dataOffset = dataStart * bps;
+        alloc->clusters = clusters;
+        fs->setAllocationSource(std::move(alloc));
+    }
     // FATs and (FAT12/16) root directory are metadata too.
     fs->addRegion(Region{ByteCount{reserved} * bps, ByteCount{fats} * fatSectors * bps});
     if (rootDirSectors) fs->addRegion(Region{(ByteCount{reserved} + ByteCount{fats} * fatSectors) * bps, ByteCount{rootDirSectors} * bps});
@@ -170,6 +269,16 @@ Result detectExFat(Dev dev) {
                 }
             }
         }
+    }
+    {
+        auto alloc = std::make_unique<ExfatAllocation>();
+        alloc->bps = bps;
+        alloc->cluster = cluster;
+        alloc->fatOffset = ByteCount{b.fatOffset()} * bps;
+        alloc->heapOffset = ByteCount{b.clusterHeapOffset()} * bps;
+        alloc->clusterCount = b.clusterCount();
+        alloc->rootCluster = root;
+        fs->setAllocationSource(std::move(alloc));
     }
     fs->setTreeName("exFAT filesystem");
     auto tree = b.describe(0);

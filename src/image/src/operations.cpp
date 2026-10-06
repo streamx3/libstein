@@ -88,20 +88,46 @@ Expected<CreateResult> createImage(std::shared_ptr<BlockDevice> source, const st
     src.set("physical_sector_size", static_cast<std::uint64_t>(source->geometry().physicalSectorSize));
     wo.manifest.set("source", std::move(src));
     if (!options.notes.empty()) wo.manifest.set("notes", options.notes);
-    if (options.recordTopology) {
+    std::vector<std::unique_ptr<fs::AllocationMap>> maps;
+    CopyOptions co;
+    co.chunkSize = options.chunkSize;
+    co.badSectors = options.badSectors;
+    CreateResult r;
+    if (options.recordTopology || options.usedBlocksOnly) {
         progress.message("Probing source");
-        if (auto tree = probe::probe(source)) wo.manifest.set("topology", topologyJson(*tree));
+        auto tree = probe::probe(source);
+        if (tree && options.recordTopology) wo.manifest.set("topology", topologyJson(*tree));
+        if (tree && options.usedBlocksOnly) {
+            // Every filesystem with a readable allocation bitmap contributes a map; the others are copied whole.
+            std::vector<const probe::Node*> stack{&*tree};
+            while (!stack.empty()) {
+                const probe::Node* n = stack.back();
+                stack.pop_back();
+                for (const auto& c : n->children) stack.push_back(&c);
+                if (!n->content) continue;
+                const std::string what = std::string(fs::displayName(n->content->type())) + " at " + std::to_string(n->region.offset);
+                if (!fs::has(n->content->capabilities(), fs::Capability::UsedBlocks)) {
+                    r.allocationNotes.push_back(what + ": no allocation map support, copied whole");
+                    continue;
+                }
+                auto map = n->content->allocationMap();
+                if (!map) {
+                    r.allocationNotes.push_back(what + ": " + map.error().message() + "; copied whole");
+                    continue;
+                }
+                maps.push_back(std::make_unique<fs::AllocationMap>(std::move(*map)));
+                co.allocations.push_back(MappedAllocation{n->region, maps.back().get()});
+                r.allocationNotes.push_back(what + ": " + formatSize(maps.back()->usedBytes()) + " used of " + formatSize(maps.back()->blocks() * maps.back()->blockSize()));
+            }
+            wo.manifest.set("used_blocks_only", true);
+        }
     }
     auto writer = SteinWriter::create(out, source->size(), source->geometry().logicalSectorSize, wo);
     if (!writer) return fail(writer.error());
     WriterSink sink(**writer);
-    CopyOptions co;
-    co.chunkSize = options.chunkSize;
-    co.badSectors = options.badSectors;
     auto stats = copyToSink(*source, sink, co, progress);
     if (!stats) return fail(stats.error());
     if (auto f = (*writer)->finish(); !f) return fail(f.error());
-    CreateResult r;
     r.files = (*writer)->files();
     r.imageUuid = (*writer)->imageUuid();
     r.stats = *stats;

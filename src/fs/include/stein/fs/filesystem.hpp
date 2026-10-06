@@ -9,6 +9,7 @@
 #include "stein/block/block_device.hpp"
 #include "stein/core/error.hpp"
 #include "stein/core/units.hpp"
+#include "stein/fs/allocation_map.hpp"
 #include "stein/layout/node.hpp"
 
 #include <cstdint>
@@ -89,6 +90,9 @@ public:
     virtual std::vector<Region> metadataRegions() const = 0;
     // Hexinator-style tree of the structures we parsed.
     virtual layout::Node describe() const = 0;
+    // L1: read the allocation bitmap. Unsupported unless capabilities() has UsedBlocks.
+    // A filesystem that is not cleanly unmounted refuses (its bitmap may be stale).
+    virtual Expected<AllocationMap> allocationMap() const;
 
     const std::shared_ptr<BlockDevice>& device() const { return m_device; }
     layout::Validity health() const;

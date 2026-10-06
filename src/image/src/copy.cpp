@@ -37,6 +37,21 @@ Expected<std::uint64_t> readChunkTolerant(BlockDevice& source, ByteCount offset,
     return bad;
 }
 
+namespace {
+// Zero the free blocks of every mapped filesystem inside the chunk at `off`.
+ByteCount applyAllocations(const CopyOptions& options, ByteCount off, std::span<std::byte> chunk) {
+    ByteCount zeroed = 0;
+    for (const auto& m : options.allocations) {
+        if (!m.map) continue;
+        const ByteCount from = std::max(off, m.region.offset);
+        const ByteCount to = std::min(off + chunk.size(), m.region.end());
+        if (from >= to) continue;
+        zeroed += m.map->zeroFree(from - m.region.offset, chunk.subspan(static_cast<std::size_t>(from - off), static_cast<std::size_t>(to - from)));
+    }
+    return zeroed;
+}
+} // namespace
+
 Expected<CopyStats> copyToSink(BlockDevice& source, ChunkSink& sink, const CopyOptions& options, Progress& progress) {
     CopyStats stats;
     const ByteCount total = options.limit ? std::min(options.limit, source.size()) : source.size();
@@ -52,6 +67,7 @@ Expected<CopyStats> copyToSink(BlockDevice& source, ChunkSink& sink, const CopyO
         stats.unreadableSectors += *bad;
         stats.bytesRead += len;
         ++stats.chunks;
+        stats.freeBytesSkipped += applyAllocations(options, off, chunk);
         if (isAllZero(chunk)) ++stats.zeroChunks;
         if (auto w = sink.writeChunk(idx, chunk); !w) return fail(w.error());
         stats.bytesWritten += len;
@@ -77,6 +93,7 @@ Expected<CopyStats> copyDevice(BlockDevice& source, BlockDevice& target, const C
         stats.unreadableSectors += *bad;
         stats.bytesRead += len;
         ++stats.chunks;
+        stats.freeBytesSkipped += applyAllocations(options, off, chunk);
         if (isAllZero(chunk)) {
             ++stats.zeroChunks;
             if (options.skipZeroChunksOnWrite) {

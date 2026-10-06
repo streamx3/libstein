@@ -71,6 +71,35 @@ std::string hfsPlusLabel(BlockDevice& dev, ByteCount base, std::span<const std::
     return {};
 }
 
+// HFS+ allocation file: fork data at 0x70 in the volume header, bits MSB first.
+class HfsPlusAllocation final : public AllocationSource {
+public:
+    ByteCount base = 0, blockSize = 0;
+    std::uint32_t totalBlocks = 0;
+    std::uint64_t logicalSize = 0;
+    std::uint32_t extents[8][2] = {};
+
+    Expected<AllocationMap> load(BlockDevice& dev) const override {
+        const std::uint64_t needed = (std::uint64_t{totalBlocks} + 7) / 8;
+        if (logicalSize < needed) return fail(ErrorCategory::InvalidFormat, "HFS+ allocation file is too short");
+        std::vector<std::byte> bits;
+        bits.reserve(static_cast<std::size_t>(needed));
+        for (const auto& e : extents) {
+            if (bits.size() >= needed) break;
+            if (e[1] == 0) break;
+            const ByteCount want = std::min<ByteCount>(ByteCount{e[1]} * blockSize, needed - bits.size());
+            auto part = dev.read(base + ByteCount{e[0]} * blockSize, want);
+            if (!part) return fail(part.error());
+            bits.insert(bits.end(), part->begin(), part->end());
+        }
+        // More than eight extents live in the extents overflow file; refuse rather than guess.
+        if (bits.size() < needed) return fail(ErrorCategory::Unsupported, "HFS+ allocation file is fragmented beyond the volume header extents");
+        AllocationMap map(base, blockSize, totalBlocks, true);
+        map.importBitmap(0, totalBlocks, bits, false, true);
+        return map;
+    }
+};
+
 Result parseHfsPlus(Dev dev, ByteCount base, bool wrapped, Result&& wrapperTree) {
     auto raw = readOrNotFound(*dev, base + 1024, 512);
     if (!raw) return fail(raw.error());
@@ -92,6 +121,18 @@ Result parseHfsPlus(Dev dev, ByteCount base, bool wrapped, Result&& wrapperTree)
     if (h.attributes() & (1u << 11)) fs->diag(Validity::Warning, "hfsplus.inconsistent", "boot volume inconsistent flag set");
     info.uuid = hfsUuidFromSeed(std::span<const std::byte>(*raw).subspan(0x50 + 24, 8));
     info.label = hfsPlusLabel(*dev, base, *raw, h.blockSize());
+    {
+        auto alloc = std::make_unique<HfsPlusAllocation>();
+        alloc->base = base;
+        alloc->blockSize = h.blockSize();
+        alloc->totalBlocks = h.totalBlocks();
+        alloc->logicalSize = loadBe64(raw->data() + 0x70);
+        for (int i = 0; i < 8; ++i) {
+            alloc->extents[i][0] = loadBe32(raw->data() + 0x70 + 16 + i * 8);
+            alloc->extents[i][1] = loadBe32(raw->data() + 0x70 + 16 + i * 8 + 4);
+        }
+        fs->setAllocationSource(std::move(alloc));
+    }
     if (wrapped) info.extra = "embedded in an HFS wrapper at offset " + std::to_string(base);
     fs->setTreeName(std::string(displayName(info.type)) + " filesystem");
     if (wrapperTree) fs->addNode((*wrapperTree)->describe());

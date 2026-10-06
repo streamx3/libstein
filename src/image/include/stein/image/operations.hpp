@@ -25,6 +25,7 @@ struct CreateOptions {
     BadSectorPolicy badSectors = BadSectorPolicy::SkipZero;
     bool computeImageHash = true;
     bool recordTopology = true;       // probe the source and store the tree in the manifest
+    bool usedBlocksOnly = false;      // read allocation bitmaps and store free space as zero chunks
     std::string sourceName;           // defaults to device->name()
     std::string sourceIdentity;       // platform identity when known
     std::string notes;
@@ -32,6 +33,7 @@ struct CreateOptions {
 
 struct CreateResult {
     std::vector<std::filesystem::path> files;
+    std::vector<std::string> allocationNotes;   // per filesystem: map used / why not
     Uuid imageUuid;
     CopyStats stats;
     ByteCount storedBytes = 0;

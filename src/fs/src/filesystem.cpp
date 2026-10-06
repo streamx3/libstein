@@ -101,6 +101,23 @@ std::uint32_t FileSystem::capabilities() const {
     return c;
 }
 
+Expected<AllocationMap> FileSystem::allocationMap() const {
+    return fail(ErrorCategory::Unsupported, std::string(displayName(type())) + ": allocation map not supported");
+}
+
+std::uint32_t detail::SimpleFileSystem::capabilities() const {
+    std::uint32_t c = FileSystem::capabilities();
+    if (m_alloc) c |= static_cast<std::uint32_t>(Capability::UsedBlocks);
+    return c;
+}
+
+Expected<AllocationMap> detail::SimpleFileSystem::allocationMap() const {
+    if (!m_alloc) return FileSystem::allocationMap();
+    if (m_info.clean && !*m_info.clean)
+        return fail(ErrorCategory::Busy, std::string(displayName(type())) + " was not cleanly unmounted; its allocation bitmap may be stale");
+    return m_alloc->load(*m_device);
+}
+
 layout::Validity FileSystem::health() const {
     layout::Validity worst = layout::Validity::Ok;
     for (const auto& d : diagnostics())
