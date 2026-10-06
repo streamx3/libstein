@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
-// Straightforward implementations from RFC 1321 (MD5) and FIPS 180-4 (SHA-256).
-// Not optimised; correctness and readability first. An OpenSSL/mbedTLS backend
-// can replace these behind Hasher::create() when speed matters.
+// RFC 1321 (MD5) and FIPS 180-4 (SHA-256). SHA-256 dispatches to the SHA-NI /
+// ARMv8 kernels in sha256_hw.cpp when the CPU has them (see hash_impl.hpp).
 #include "stein/core/hash.hpp"
+
+#include "hash_impl.hpp"
 
 #include <cstdio>
 #include <algorithm>
@@ -172,7 +173,11 @@ void Sha256::reset() {
     m_bufferLen = 0;
 }
 
-void Sha256::transform(const std::uint8_t block[64]) {
+namespace detail {
+void sha256Portable(std::uint32_t state[8], const std::uint8_t* data, std::size_t blocks) {
+  while (blocks--) {
+    const std::uint8_t* block = data;
+    data += 64;
     std::uint32_t w[64];
     for (int i = 0; i < 16; ++i)
         w[i] = (static_cast<std::uint32_t>(block[i * 4]) << 24) | (static_cast<std::uint32_t>(block[i * 4 + 1]) << 16) |
@@ -182,8 +187,8 @@ void Sha256::transform(const std::uint8_t block[64]) {
         std::uint32_t s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
         w[i] = w[i - 16] + s0 + w[i - 7] + s1;
     }
-    std::uint32_t a = m_state[0], b = m_state[1], c = m_state[2], d = m_state[3], e = m_state[4],
-                  f = m_state[5], g = m_state[6], h = m_state[7];
+    std::uint32_t a = state[0], b = state[1], c = state[2], d = state[3], e = state[4],
+                  f = state[5], g = state[6], h = state[7];
     for (int i = 0; i < 64; ++i) {
         std::uint32_t S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
         std::uint32_t ch = (e & f) ^ (~e & g);
@@ -200,14 +205,24 @@ void Sha256::transform(const std::uint8_t block[64]) {
         b = a;
         a = t1 + t2;
     }
-    m_state[0] += a;
-    m_state[1] += b;
-    m_state[2] += c;
-    m_state[3] += d;
-    m_state[4] += e;
-    m_state[5] += f;
-    m_state[6] += g;
-    m_state[7] += h;
+    state[0] += a;
+    state[1] += b;
+    state[2] += c;
+    state[3] += d;
+    state[4] += e;
+    state[5] += f;
+    state[6] += g;
+    state[7] += h;
+  }
+}
+} // namespace detail
+
+void Sha256::transform(const std::uint8_t block[64]) { transformBlocks(block, 1); }
+
+void Sha256::transformBlocks(const std::uint8_t* data, std::size_t blocks) {
+    static const bool hw = detail::sha256HardwareAvailable();
+    if (hw) detail::sha256Hardware(m_state.data(), data, blocks);
+    else detail::sha256Portable(m_state.data(), data, blocks);
 }
 
 void Sha256::update(std::span<const std::byte> data) {
@@ -225,10 +240,11 @@ void Sha256::update(std::span<const std::byte> data) {
             m_bufferLen = 0;
         }
     }
-    while (n >= 64) {
-        transform(p);
-        p += 64;
-        n -= 64;
+    if (n >= 64) {
+        const std::size_t blocks = n / 64;
+        transformBlocks(p, blocks);
+        p += blocks * 64;
+        n -= blocks * 64;
     }
     if (n) {
         std::memcpy(m_buffer.data(), p, n);

@@ -39,6 +39,8 @@ ctest --preset debug
 ./build/debug/tools/stein/stein image create /dev/sdb backup.stein --compress lz4
 ./build/debug/tools/stein/stein probe backup.stein        # an image is a disk
 ./build/debug/tools/stein/stein image restore backup.stein /dev/sdc
+./build/debug/tools/stein/stein app init office.json /dev/sdb /backups/office.stein   # dr_stein-style profile
+./build/debug/tools/stein/stein app status office.json && ./build/debug/tools/stein/stein app restore office.json
 ```
 
 Fixtures under `tests/fixtures/` are regenerated with

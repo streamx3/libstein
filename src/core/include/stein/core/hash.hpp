@@ -62,6 +62,7 @@ public:
 
 private:
     void transform(const std::uint8_t block[64]);
+    void transformBlocks(const std::uint8_t* data, std::size_t blocks);
     std::array<std::uint32_t, 8> m_state{};
     std::uint64_t m_bits = 0;
     std::array<std::uint8_t, 64> m_buffer{};

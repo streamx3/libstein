@@ -199,3 +199,50 @@ TEST_CASE("progress and report") {
     CHECK(text.find("  [OK] Write GPT") != std::string::npos);
     CHECK(text.find("sectors: 34") != std::string::npos);
 }
+
+#include "../src/hash_impl.hpp"
+#include "stein/core/cpu.hpp"
+#include <random>
+
+TEST_CASE("crc32/sha256: hardware kernels agree with the portable ones on every length and alignment") {
+    MESSAGE("cpu: ", cpuFeatures().summary());
+    std::mt19937_64 rng(42);
+    std::vector<std::byte> buf(70016);
+    for (auto& b : buf) b = static_cast<std::byte>(rng());
+    // Lengths around block boundaries and odd alignments.
+    const std::size_t lens[] = {0, 1, 7, 8, 9, 63, 64, 65, 127, 128, 129, 1000, 4095, 4096, 4097, 65536, 65537, 69999};
+    for (std::size_t off = 0; off < 9; ++off) {
+        for (std::size_t len : lens) {
+            auto span = std::span<const std::byte>(buf).subspan(off, len);
+            const std::uint32_t pc = detail::crc32cPortable(0xFFFFFFFFu, span);
+            if (detail::crc32cHardwareAvailable()) CHECK(detail::crc32cHardware(0xFFFFFFFFu, span) == pc);
+            CHECK(Crc32c::compute(span) == ~pc);
+            // Incremental in uneven pieces equals one shot.
+            Crc32c inc;
+            std::size_t done = 0;
+            for (std::size_t piece = 1; done < len; piece = piece * 3 + 1) {
+                const std::size_t n = std::min(piece, len - done);
+                inc.update(span.subspan(done, n));
+                done += n;
+            }
+            CHECK(inc.value() == ~pc);
+            const std::uint32_t pi = detail::crc32Portable(0xFFFFFFFFu, span);
+            CHECK(Crc32::compute(span) == ~pi);
+            if (len % 64 == 0 && len) {
+                std::uint32_t a[8] = {1, 2, 3, 4, 5, 6, 7, 8}, b[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+                detail::sha256Portable(a, reinterpret_cast<const std::uint8_t*>(span.data()), len / 64);
+                if (detail::sha256HardwareAvailable()) {
+                    detail::sha256Hardware(b, reinterpret_cast<const std::uint8_t*>(span.data()), len / 64);
+                    for (int i = 0; i < 8; ++i) CHECK(a[i] == b[i]);
+                }
+            }
+        }
+    }
+    // Byte-at-a-time CRC (the textbook form) agrees with slice-by-8.
+    std::uint32_t slow = 0xFFFFFFFFu;
+    for (std::byte b : std::span<const std::byte>(buf).first(5000)) {
+        slow ^= std::to_integer<std::uint32_t>(b);
+        for (int k = 0; k < 8; ++k) slow = (slow & 1) ? (0x82F63B78u ^ (slow >> 1)) : (slow >> 1);
+    }
+    CHECK(detail::crc32cPortable(0xFFFFFFFFu, std::span<const std::byte>(buf).first(5000)) == slow);
+}
