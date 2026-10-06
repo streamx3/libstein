@@ -5,6 +5,7 @@
 #include "stein/block/slice_device.hpp"
 
 #include <algorithm>
+#include <map>
 #include "stein/probe/topology.hpp"
 
 using namespace stein;
@@ -134,4 +135,41 @@ TEST_CASE("probe: a LUKS container opens with a passphrase and shows its plainte
     bool noted = false;
     for (const auto& n : stillLocked->notes) noted = noted || n.code == "luks.locked";
     CHECK(noted);
+}
+
+TEST_CASE("probe: an LVM physical volume lists its logical volumes and probes the ones it can map") {
+    auto pv0 = loadSparseFixture("lvm/pv0.sparse");
+    auto tree = probe::probe(pv0);
+    REQUIRE(tree);
+    REQUIRE(tree->content);
+    CHECK(tree->content->type() == fs::FsType::Lvm2Pv);
+    REQUIRE(tree->children.size() == 4);
+    std::map<std::string, const probe::Node*> byName;
+    for (const auto& c : tree->children) {
+        CHECK(c.kind == probe::NodeKind::Volume);
+        byName[c.name] = &c;
+    }
+    REQUIRE(byName.count("stein_vg/linear"));
+    REQUIRE(byName.count("stein_vg/striped"));
+    REQUIRE(byName.count("stein_vg/frag"));
+    const auto* lin = byName["stein_vg/linear"];
+    REQUIRE(lin->content);
+    CHECK(lin->content->info().label == "lv_linear");
+    const auto* frag = byName["stein_vg/frag"];
+    REQUIRE(frag->content);
+    CHECK(frag->content->info().label == "lv_frag");
+    const auto* st = byName["stein_vg/striped"];
+    CHECK_FALSE(st->device);
+    bool missing = false;
+    for (const auto& n : st->notes) missing = missing || n.code == "lvm.missing_pv";
+    CHECK(missing);
+    auto text = probe::toText(*tree);
+    CHECK(text.find("volume stein_vg/linear") != std::string::npos);
+    CHECK(text.find("lv_frag") != std::string::npos);
+    CHECK(text.find("not mappable here") != std::string::npos);
+    probe::Options o;
+    o.volumes = false;
+    auto flat = probe::probe(pv0, o);
+    REQUIRE(flat);
+    CHECK(flat->children.empty());
 }

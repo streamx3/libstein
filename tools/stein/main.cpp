@@ -16,6 +16,7 @@
 #include "stein/block/file_device.hpp"
 #include "stein/block/sparse_file.hpp"
 #include "stein/container/luks.hpp"
+#include "stein/volume/lvm.hpp"
 #include "stein/core/strings.hpp"
 #include "stein/core/units.hpp"
 #include "stein/fs/filesystem.hpp"
@@ -77,6 +78,8 @@ int usage() {
                "  stein luks unlock  <image|device> [--part N]        check a passphrase and probe the plaintext\n"
                "  stein luks extract <image|device> <out> [--part N]  decrypt the payload into a plain image\n"
                "      stein probe --passphrase P also descends into LUKS containers it can open\n"
+               "  stein lvm list    <image|device> [--part N] [--doc]   volume group, PVs, LVs and how they map\n"
+               "  stein lvm extract <image|device> <lv> <out> [--part N] copy a logical volume into a plain image\n"
                "  stein types [gpt|mbr]\n"
                "  stein app init    <profile.json> <device> <image.stein>   write a profile for a disk (identity from the OS)\n"
                "  stein app status  <profile.json> [--unlock]\n"
@@ -958,6 +961,57 @@ int cmdMedia(const Args& a) {
     return usage();
 }
 
+// ---- LVM (stein_volume) -------------------------------------------------------
+
+int cmdLvm(const Args& a) {
+    // stein lvm list <image|device> [--part N] | stein lvm extract <image|device> <lv> <out> [--part N]
+    if (a.positional.size() < 3) return usage();
+    const std::string& sub = a.positional[1];
+    auto dev = deviceOrPartition(a, a.positional[2]);
+    if (!dev) return die(dev.error());
+    auto vg = volume::VolumeGroup::fromPv(*dev);
+    if (!vg) return die(vg.error());
+    if (sub == "list") {
+        std::printf("volume group %s  (%s, extent %s, seqno %llu)\n", vg->name().c_str(), vg->id().c_str(), formatSize(vg->extentBytes()).c_str(),
+                    static_cast<unsigned long long>(vg->seqno()));
+        for (const auto& [name, pv] : vg->pvs())
+            std::printf("  pv %-6s %s  %s  pe_start %llu  %llu extents%s\n", name.c_str(), pv.id.c_str(), formatSize(pv.deviceSizeSectors * 512).c_str(),
+                        static_cast<unsigned long long>(pv.peStartSectors), static_cast<unsigned long long>(pv.peCount), pv.device ? "  [here]" : "  [elsewhere]");
+        for (const auto& lv : vg->lvs()) {
+            std::string how;
+            for (const auto& seg : lv.segments) how += (how.empty() ? "" : " + ") + seg.type + (seg.stripeCount > 1 ? "x" + std::to_string(seg.stripeCount) : "") + "/" + std::to_string(seg.extentCount);
+            auto missing = vg->missingPvs(lv);
+            auto unsupported = vg->unsupportedSegments(lv);
+            std::string state = !unsupported.empty() ? "unsupported segment " + unsupported.front() : !missing.empty() ? "needs " + missing.front() : "mappable";
+            std::printf("  lv %-10s %10s  %-24s %s%s\n", lv.name.c_str(), formatSize(lv.extents() * vg->extentBytes()).c_str(), how.c_str(), state.c_str(), lv.visible() ? "" : "  (hidden)");
+        }
+        if (a.doc) std::fputs(vg->metadataText().c_str(), stdout);
+        return 0;
+    }
+    if (sub == "extract") {
+        if (a.positional.size() < 5) return usage();
+        auto lv = vg->openLv(a.positional[3]);
+        if (!lv) return die(lv.error());
+        const std::string& outPath = a.positional[4];
+        std::error_code ec;
+        if (!platform::isDevicePath(outPath) && !std::filesystem::exists(outPath, ec)) {
+            auto created = FileDevice::create(outPath, (*lv)->size());
+            if (!created) return die(created.error());
+        }
+        auto target = openImage(outPath, true, a.sectorSize);
+        if (!target) return die(target.error());
+        TtyProgress tty;
+        Progress progress(tty);
+        image::CopyOptions co;
+        co.limit = std::min((*lv)->size(), (*target)->size());
+        auto stats = image::copyDevice(**lv, **target, co, progress);
+        if (!stats) return die(stats.error());
+        std::printf("copied %s of %s to %s\n", formatSize(stats->bytesRead).c_str(), a.positional[3].c_str(), outPath.c_str());
+        return 0;
+    }
+    return usage();
+}
+
 int cmdTypes(const Args& a) {
     const std::string filter = a.positional.size() > 1 ? a.positional[1] : "";
     for (const auto& info : pt::types::all()) {
@@ -989,5 +1043,6 @@ int main(int argc, char** argv) {
     if (cmd == "app") return cmdApp(a);
     if (cmd == "media") return cmdMedia(a);
     if (cmd == "luks") return cmdLuks(a);
+    if (cmd == "lvm") return cmdLvm(a);
     return usage();
 }

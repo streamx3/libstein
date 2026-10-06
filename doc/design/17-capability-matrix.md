@@ -48,7 +48,7 @@ L0 detect/geometry/label/uuid · L1 used-block map · L2 offline metadata edit
 | BitLocker | v1 | v2 (password / recovery key / BEK; AES-CBC+Elephant, AES-XTS) | – | libbde docs as spec |
 | FileVault2 / CoreStorage | v1 | v3 | – | |
 | plain dm-crypt | v1 (parameters supplied) | v1 | v1 | |
-| LVM2 | **done** (PV, VG name) | v1 (linear, striped), v2 (mirror read, thin detect) | v3 (pvcreate/vgcreate/lvcreate in-process) | own text-metadata parser |
+| LVM2 | **done** (PV, VG name) | **done** (linear/striped/multi-segment LVs as devices) | v3 (pvcreate/vgcreate/lvcreate in-process) | own text-metadata parser |
 | mdraid 0.9/1.x | **done** | v2 (linear/0/1/10 read) | – | |
 | APFS container | v1 | v2 | – | |
 

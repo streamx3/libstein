@@ -24,6 +24,7 @@ enum class NodeKind : std::uint8_t {
     Free,        // unallocated space inside a table's usable range
     Metadata,    // table metadata region (shown on request)
     Decrypted,   // the plaintext payload of an unlocked container (LUKS)
+    Volume,      // a logical volume assembled from a volume manager (LVM2)
 };
 
 struct Note {
@@ -57,6 +58,7 @@ struct Options {
     // Decrypted child holding whatever the plaintext carries. Argon2 slots make
     // each attempt cost real time, so pass only what the user typed.
     std::vector<std::string> passphrases;
+    bool volumes = true;         // assemble LVM logical volumes whose extents all lie on this device
 };
 
 Expected<Node> probe(std::shared_ptr<BlockDevice> root, const Options& options = {});

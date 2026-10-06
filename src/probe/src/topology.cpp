@@ -2,6 +2,7 @@
 #include "stein/probe/topology.hpp"
 
 #include "stein/container/luks.hpp"
+#include "stein/volume/lvm.hpp"
 
 #include "stein/block/slice_device.hpp"
 #include "stein/core/strings.hpp"
@@ -126,6 +127,46 @@ void probeLuks(Node& node, const Options& options, int depth) {
     node.notes.push_back(Note{Validity::Info, "luks.locked", "no supplied passphrase opens this container"});
 }
 
+// An LVM2 physical volume: list the group's logical volumes; map those this device alone can serve.
+void probeLvm(Node& node, const Options& options, int depth) {
+    if (!options.volumes || !node.content || node.content->type() != fs::FsType::Lvm2Pv) return;
+    auto vg = volume::VolumeGroup::fromPv(node.device);
+    if (!vg) {
+        node.notes.push_back(Note{Validity::Info, "lvm.metadata", vg.error().message()});
+        return;
+    }
+    for (const auto& lv : vg->lvs()) {
+        if (!lv.visible()) continue;
+        Node child;
+        child.kind = NodeKind::Volume;
+        child.name = vg->name() + "/" + lv.name;
+        child.region = Region{node.region.offset, lv.extents() * vg->extentBytes()};   // logical size; extents are scattered
+        auto missing = vg->missingPvs(lv);
+        auto unsupported = vg->unsupportedSegments(lv);
+        if (!unsupported.empty()) {
+            child.notes.push_back(Note{Validity::Info, "lvm.segment", "segment type " + unsupported.front() + " is not mapped in-process yet"});
+        } else if (!missing.empty()) {
+            std::string list;
+            for (const auto& m : missing) list += (list.empty() ? "" : ", ") + m;
+            child.notes.push_back(Note{Validity::Info, "lvm.missing_pv", "needs other physical volume(s): " + list});
+        } else if (auto dev = vg->openLv(lv.name)) {
+            child.device = *dev;
+            Node tmp;
+            tmp.kind = NodeKind::Device;
+            tmp.device = child.device;
+            tmp.region = child.region;
+            probeInto(tmp, options, depth + 1);
+            child.table = std::move(tmp.table);
+            child.content = std::move(tmp.content);
+            child.children = std::move(tmp.children);
+            for (auto& n : tmp.notes) child.notes.push_back(std::move(n));
+        } else {
+            child.notes.push_back(Note{Validity::Warning, "lvm.open", dev.error().message()});
+        }
+        node.children.push_back(std::move(child));
+    }
+}
+
 void probeInto(Node& node, const Options& options, int depth) {
     if (depth > options.maxDepth) return;
     if (node.kind == NodeKind::Device) {
@@ -133,12 +174,14 @@ void probeInto(Node& node, const Options& options, int depth) {
         if (!node.table) {
             probeContent(node);
             probeLuks(node, options, depth);
+            probeLvm(node, options, depth);
         }
         return;
     }
     // Partition: content first; a nested table only when nothing else claims the bytes.
     probeContent(node);
     probeLuks(node, options, depth);
+    probeLvm(node, options, depth);
     if (!node.content && options.nestedTables && node.device->size() >= 1 * MiB) {
         auto t = pt::PartitionTable::read(node.device);
         if (t && (*t)->type() != pt::TableType::None) {
@@ -190,6 +233,7 @@ std::string Node::summary() const {
         if (partition->type.scheme == pt::TableType::Mbr && (partition->attributes & pt::Partition::kMbrBootable)) s += " [boot]";
     } else {
         if (kind == NodeKind::Decrypted) s = "decrypted payload  " + sizeOf(region);
+        else if (kind == NodeKind::Volume) s = "volume " + name + "  " + sizeOf(region) + (device ? "" : "  (not mappable here)");
         else s = (device ? device->name() : name) + "  " + sizeOf(region);
     }
     if (table) {
