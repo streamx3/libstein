@@ -1,0 +1,5 @@
+f 14 second.txt
+d 96 sub
+f 28 sub/nested.txt
+sha256 90477893ab41972b8c0ed6c81fdc047d2c221c34c0e385992a82b306039ac4d2 second.txt
+sha256 7e7f7da1c5e4c20bacaf244ad82e3528c52e31fee18dba90d6a8a3038f474e63 sub/nested.txt
