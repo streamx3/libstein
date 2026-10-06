@@ -99,7 +99,8 @@ make_snap() {
   local name=apfs_snap
   local img="$WORK/$name"
   if [ -e "$OUT/$name.sparse" ]; then echo "$name: exists, kept (delete it to rebuild)"; return; fi
-  hdiutil create -size 96m -fs APFS -volname rd_snap -layout NONE -ov "$img" >/dev/null
+  # APFS allows one volume per 512 MiB of container, so two volumes need more than 1 GiB (sparse on disk).
+  hdiutil create -size 1100m -fs APFS -volname rd_snap -layout NONE -ov "$img" >/dev/null
   local mnt="$WORK/mnt_$name"; mkdir -p "$mnt"
   hdiutil attach -nobrowse -noverify -noautofsck -mountpoint "$mnt" "$img.dmg" >/dev/null
   touch "$mnt/.metadata_never_index"
