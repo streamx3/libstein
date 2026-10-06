@@ -80,6 +80,9 @@ int usage() {
                "      stein probe --passphrase P also descends into LUKS containers it can open\n"
                "  stein lvm list    <image|device> [--part N] [--doc]   volume group, PVs, LVs and how they map\n"
                "  stein lvm extract <image|device> <lv> <out> [--part N] copy a logical volume into a plain image\n"
+               "  stein ls  <image|device> [path] [--part N] [--lv NAME] [--passphrase P]   list a directory in-process\n"
+               "  stein cat <image|device> <path> ...                                       print a file\n"
+               "  stein cp  <image|device> <path> <out> ...                                 copy a file out (ext2/3/4 so far)\n"
                "  stein types [gpt|mbr]\n"
                "  stein app init    <profile.json> <device> <image.stein>   write a profile for a disk (identity from the OS)\n"
                "  stein app status  <profile.json> [--unlock]\n"
@@ -101,7 +104,7 @@ struct Args {
     int level = 0;
     std::string compress, split, chunk;
     std::string start, size, end, type, name, index;
-    std::string passphrase, passphraseFile, newPassphrase, kdf;
+    std::string passphrase, passphraseFile, newPassphrase, kdf, lv;
     std::uint32_t kdfCost = 0, kdfMemoryKiB = 0;
     std::uint32_t quick = 0;
     bool keep = false;
@@ -127,6 +130,7 @@ Args parse(int argc, char** argv) {
         else if (s == "--type" && i + 1 < argc) a.type = argv[++i];
         else if (s == "--name" && i + 1 < argc) a.name = argv[++i];
         else if ((s == "--index" || s == "--part") && i + 1 < argc) a.index = argv[++i];
+        else if (s == "--lv" && i + 1 < argc) a.lv = argv[++i];
         else if (s == "--no-wipe") a.noWipe = true;
         else if (s == "--unlock") a.unlock = true;
         else if (s == "--used-only") a.usedOnly = true;
@@ -1012,6 +1016,117 @@ int cmdLvm(const Args& a) {
     return usage();
 }
 
+// ---- files inside filesystems (stein_fs L3) -----------------------------------
+
+// The filesystem to read: <image|device> [--part N] [--lv name], through LUKS with --passphrase.
+Expected<std::unique_ptr<fs::Reader>> openReaderFor(const Args& a, const std::string& path, std::string& where) {
+    auto dev = deviceOrPartition(a, path);
+    if (!dev) return fail(dev.error());
+    std::shared_ptr<BlockDevice> target = *dev;
+    where = path + (a.index.empty() ? "" : " partition " + a.index);
+    for (int hops = 0; hops < 4; ++hops) {
+        auto probed = fs::probe(target);
+        if (!probed) return fail(probed.error());
+        if (!*probed) return fail(ErrorCategory::NotFound, where + ": no recognised filesystem");
+        const auto t = (*probed)->type();
+        if (t == fs::FsType::Luks1 || t == fs::FsType::Luks2) {
+            if (g_passphrase.empty()) return fail(ErrorCategory::Permission, where + " is LUKS-encrypted; pass --passphrase");
+            auto luks = container::Luks::open(target);
+            if (!luks) return fail(luks.error());
+            auto payload = luks->openPayload(g_passphrase, true);
+            if (!payload) return fail(payload.error());
+            target = *payload;
+            where += " (decrypted)";
+            continue;
+        }
+        if (t == fs::FsType::Lvm2Pv) {
+            auto vg = volume::VolumeGroup::fromPv(target);
+            if (!vg) return fail(vg.error());
+            std::string lvName = a.lv;
+            if (lvName.empty()) {
+                std::string names;
+                for (const auto& lv : vg->lvs()) names += (names.empty() ? "" : ", ") + lv.name;
+                return fail(ErrorCategory::InvalidArgument, where + " is an LVM physical volume; pick a logical volume with --lv (" + names + ")");
+            }
+            auto lv = vg->openLv(lvName);
+            if (!lv) return fail(lv.error());
+            target = *lv;
+            where += " lv " + lvName;
+            continue;
+        }
+        if (!fs::has((*probed)->capabilities(), fs::Capability::Read))
+            return fail(ErrorCategory::Unsupported, where + ": " + std::string(fs::displayName(t)) + " cannot be read in-process yet");
+        return (*probed)->openReader();
+    }
+    return fail(ErrorCategory::Internal, "too many container layers");
+}
+
+std::string modeText(const fs::Stat& st) {
+    std::string m = st.type == fs::FileType::Directory ? "d" : st.type == fs::FileType::Symlink ? "l" : "-";
+    const char* bits = "rwxrwxrwx";
+    for (int i = 0; i < 9; ++i) m += (st.mode & (0400 >> i)) ? bits[i] : '-';
+    return m;
+}
+
+int cmdLs(const Args& a) {
+    if (a.positional.size() < 2) return usage();
+    std::string where;
+    auto reader = openReaderFor(a, a.positional[1], where);
+    if (!reader) return die(reader.error());
+    const std::string path = a.positional.size() > 2 ? a.positional[2] : "/";
+    auto inode = fs::resolvePath(**reader, path);
+    if (!inode) return die(inode.error());
+    auto st = (*reader)->stat(*inode);
+    if (!st) return die(st.error());
+    if (st->type != fs::FileType::Directory) {
+        std::printf("%s %10llu %s\n", modeText(*st).c_str(), static_cast<unsigned long long>(st->size), path.c_str());
+        return 0;
+    }
+    auto entries = (*reader)->readdir(*inode);
+    if (!entries) return die(entries.error());
+    std::sort(entries->begin(), entries->end(), [](const fs::DirEntry& x, const fs::DirEntry& y) { return x.name < y.name; });
+    for (const auto& e : *entries) {
+        auto es = (*reader)->stat(e.inode);
+        if (!es) continue;
+        std::string extra;
+        if (es->type == fs::FileType::Symlink)
+            if (auto t = (*reader)->readlink(e.inode)) extra = " -> " + *t;
+        std::printf("%s %3u %10llu  %s%s\n", modeText(*es).c_str(), es->nlink, static_cast<unsigned long long>(es->size), e.name.c_str(), extra.c_str());
+    }
+    return 0;
+}
+
+int cmdCat(const Args& a, bool toFile) {
+    if (a.positional.size() < (toFile ? 4u : 3u)) return usage();
+    std::string where;
+    auto reader = openReaderFor(a, a.positional[1], where);
+    if (!reader) return die(reader.error());
+    auto inode = fs::resolvePath(**reader, a.positional[2]);
+    if (!inode) return die(inode.error());
+    auto st = (*reader)->stat(*inode);
+    if (!st) return die(st.error());
+    if (st->type == fs::FileType::Directory) return die(Error(ErrorCategory::InvalidArgument, a.positional[2] + " is a directory"));
+    std::FILE* out = toFile ? std::fopen(a.positional[3].c_str(), "wb") : stdout;
+    if (!out) return die(Error(ErrorCategory::Io, "cannot create " + a.positional[3]));
+    std::vector<std::byte> buf(4 * MiB);
+    std::uint64_t off = 0;
+    while (off < st->size) {
+        auto n = (*reader)->read(*inode, off, buf);
+        if (!n) {
+            if (toFile) std::fclose(out);
+            return die(n.error());
+        }
+        if (*n == 0) break;
+        std::fwrite(buf.data(), 1, *n, out);
+        off += *n;
+    }
+    if (toFile) {
+        std::fclose(out);
+        std::fprintf(stderr, "copied %s from %s:%s to %s\n", formatSize(off).c_str(), where.c_str(), a.positional[2].c_str(), a.positional[3].c_str());
+    }
+    return 0;
+}
+
 int cmdTypes(const Args& a) {
     const std::string filter = a.positional.size() > 1 ? a.positional[1] : "";
     for (const auto& info : pt::types::all()) {
@@ -1044,5 +1159,8 @@ int main(int argc, char** argv) {
     if (cmd == "media") return cmdMedia(a);
     if (cmd == "luks") return cmdLuks(a);
     if (cmd == "lvm") return cmdLvm(a);
+    if (cmd == "ls") return cmdLs(a);
+    if (cmd == "cat") return cmdCat(a, false);
+    if (cmd == "cp") return cmdCat(a, true);
     return usage();
 }
