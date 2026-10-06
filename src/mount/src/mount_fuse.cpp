@@ -1,20 +1,57 @@
 // SPDX-License-Identifier: MIT
+// libfuse3 on Linux; on Windows the same code targets WinFsp's fuse3 layer
+// (winfsp-x64.dll, delay-loaded so the binary starts without it).
 #define FUSE_USE_VERSION 31
 #include "stein/mount/mount.hpp"
 
 #include "stein/core/strings.hpp"
 
+#if defined(_WIN32)
+#include <winfsp/winfsp.h>
+#include <fuse3/fuse.h>
+#include <fcntl.h>
+#else
 #include <fuse3/fuse.h>
 #include <fuse3/fuse_lowlevel.h>
+#include <unistd.h>
+#endif
 
 #include <atomic>
 #include <cerrno>
 #include <cstring>
 #include <map>
 #include <mutex>
-#include <unistd.h>
+
+#ifndef O_ACCMODE
+#define O_ACCMODE 3
+#endif
+#ifndef S_IFLNK
+#define S_IFLNK 0120000
+#endif
+#ifndef S_IFBLK
+#define S_IFBLK 0060000
+#endif
+#ifndef S_IFIFO
+#define S_IFIFO 0010000
+#endif
+#ifndef S_IFSOCK
+#define S_IFSOCK 0140000
+#endif
+#ifndef EROFS
+#define EROFS 30
+#endif
 
 namespace stein::mount {
+
+#if defined(_WIN32)
+using StatT = struct fuse_stat;
+using StatvfsT = struct fuse_statvfs;
+using OffT = fuse_off_t;
+#else
+using StatT = struct stat;
+using StatvfsT = struct statvfs;
+using OffT = off_t;
+#endif
 
 struct Mount::Impl {
     std::unique_ptr<fs::Reader> reader;
@@ -46,9 +83,9 @@ struct Mount::Impl {
         default: return -EIO;
         }
     }
-    static void fillStat(const fs::Stat& st, struct stat* out) {
+    static void fillStat(const fs::Stat& st, StatT* out) {
         std::memset(out, 0, sizeof *out);
-        mode_t type = S_IFREG;
+        unsigned type = S_IFREG;
         switch (st.type) {
         case fs::FileType::Directory: type = S_IFDIR; break;
         case fs::FileType::Symlink: type = S_IFLNK; break;
@@ -59,22 +96,23 @@ struct Mount::Impl {
         default: break;
         }
         // Read-only mount: strip write bits; directories need x to be traversable.
-        mode_t perm = (st.mode ? st.mode : 0644) & 0555;
+        unsigned perm = (st.mode ? st.mode : 0644) & 0555;
         if (type == S_IFDIR) perm |= 0555;
         if (type == S_IFLNK) perm = 0777;
         out->st_mode = type | perm;
         out->st_nlink = st.nlink ? st.nlink : 1;
-        out->st_size = static_cast<off_t>(st.size);
-        out->st_uid = getuid();
-        out->st_gid = getgid();
+        out->st_size = static_cast<OffT>(st.size);
+        const fuse_context* ctx = fuse_get_context();
+        out->st_uid = ctx ? ctx->uid : 0;
+        out->st_gid = ctx ? ctx->gid : 0;
         out->st_blksize = 4096;
-        out->st_blocks = static_cast<blkcnt_t>((st.allocatedBytes ? st.allocatedBytes : st.size + 511) / 512);
-        out->st_atime = static_cast<time_t>(st.atime);
-        out->st_mtime = static_cast<time_t>(st.mtime);
-        out->st_ctime = static_cast<time_t>(st.ctime);
+        out->st_blocks = static_cast<decltype(out->st_blocks)>((st.allocatedBytes ? st.allocatedBytes : st.size + 511) / 512);
+        out->st_atim.tv_sec = static_cast<decltype(out->st_atim.tv_sec)>(st.atime);
+        out->st_mtim.tv_sec = static_cast<decltype(out->st_mtim.tv_sec)>(st.mtime);
+        out->st_ctim.tv_sec = static_cast<decltype(out->st_ctim.tv_sec)>(st.ctime);
     }
 
-    static int opGetattr(const char* path, struct stat* out, struct fuse_file_info*) {
+    static int opGetattr(const char* path, StatT* out, struct fuse_file_info*) {
         auto& s = self();
         std::lock_guard lock(s.mutex);
         auto ino = s.inodeFor(path);
@@ -84,7 +122,7 @@ struct Mount::Impl {
         fillStat(*st, out);
         return 0;
     }
-    static int opReaddir(const char* path, void* buf, fuse_fill_dir_t fill, off_t, struct fuse_file_info*, enum fuse_readdir_flags) {
+    static int opReaddir(const char* path, void* buf, fuse_fill_dir_t fill, OffT, struct fuse_file_info*, enum fuse_readdir_flags) {
         auto& s = self();
         std::lock_guard lock(s.mutex);
         auto ino = s.inodeFor(path);
@@ -110,7 +148,7 @@ struct Mount::Impl {
         fi->keep_cache = 1;
         return 0;
     }
-    static int opRead(const char* path, char* buf, size_t size, off_t off, struct fuse_file_info* fi) {
+    static int opRead(const char* path, char* buf, size_t size, OffT off, struct fuse_file_info* fi) {
         auto& s = self();
         std::lock_guard lock(s.mutex);
         fs::Inode ino{fi ? fi->fh : 0};
@@ -134,7 +172,7 @@ struct Mount::Impl {
         buf[size - 1] = '\0';
         return 0;
     }
-    static int opStatfs(const char*, struct statvfs* st) {
+    static int opStatfs(const char*, StatvfsT* st) {
         std::memset(st, 0, sizeof *st);
         st->f_bsize = st->f_frsize = 4096;
         st->f_namemax = 255;
@@ -143,7 +181,11 @@ struct Mount::Impl {
 };
 
 bool Mount::available() {
+#if defined(_WIN32)
+    return NT_SUCCESS(FspLoad(nullptr));   // finds winfsp-x64.dll through the registry; fails when WinFsp is not installed
+#else
     return ::access("/dev/fuse", R_OK | W_OK) == 0;
+#endif
 }
 
 Expected<std::unique_ptr<Mount>> Mount::create(std::unique_ptr<fs::Reader> reader, const std::filesystem::path& mountpoint, const MountOptions& options) {
@@ -157,7 +199,12 @@ Expected<std::unique_ptr<Mount>> Mount::create(std::unique_ptr<fs::Reader> reade
     auto& a = m->m_impl->args;
     fuse_opt_add_arg(&a, "stein");
     fuse_opt_add_arg(&a, "-o");
+#if defined(_WIN32)
+    // uid/gid -1: present files as owned by the mounting user; volname shows in Explorer.
+    fuse_opt_add_arg(&a, ("ro,uid=-1,gid=-1,volname=" + options.fsName + ",FileSystemName=stein").c_str());
+#else
     fuse_opt_add_arg(&a, ("ro,fsname=" + options.fsName + ",subtype=stein" + (options.allowOther ? ",allow_other" : "")).c_str());
+#endif
     if (options.debug) fuse_opt_add_arg(&a, "-d");
     static const fuse_operations ops = [] {
         fuse_operations o{};
@@ -174,7 +221,11 @@ Expected<std::unique_ptr<Mount>> Mount::create(std::unique_ptr<fs::Reader> reade
     if (fuse_mount(m->m_impl->fuse, mountpoint.c_str()) != 0) {
         fuse_destroy(m->m_impl->fuse);
         m->m_impl->fuse = nullptr;
+#if defined(_WIN32)
+        return fail(ErrorCategory::Permission, "cannot mount at " + mountpoint.string() + " (is WinFsp installed and the mount point a free drive letter or an absent directory?)");
+#else
         return fail(ErrorCategory::Permission, "cannot mount at " + mountpoint.string() + " (is fusermount3 available and /dev/fuse accessible?)");
+#endif
     }
     m->m_impl->mounted = true;
     return m;
@@ -202,7 +253,11 @@ void Mount::stop() {
     // reads after the exit flag is set, which would leave the requester waiting forever. Unmounting
     // aborts the kernel connection instead; the loop's read() then fails with ENODEV and returns.
     m_impl->stopRequested.store(true);
+#if defined(_WIN32)
+    fuse_exit(m_impl->fuse);
+#else
     fuse_session_exit(fuse_get_session(m_impl->fuse));
+#endif
     if (m_impl->mounted) {
         fuse_unmount(m_impl->fuse);
         m_impl->mounted = false;

@@ -24,6 +24,9 @@ jobs:
       - name: Install Ninja and ccache (macOS)
         if: runner.os == 'macOS'
         run: brew install ninja ccache
+      - name: Install WinFsp (Windows)
+        if: runner.os == 'Windows'
+        run: choco install winfsp -y --no-progress
       - name: Configure (Unix)
         if: runner.os != 'Windows'
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DSTEIN_WERROR=ON -DSTEIN_SANITIZERS=${{ runner.os == 'Linux' && 'ON' || 'OFF' }}
