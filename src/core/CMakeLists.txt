@@ -20,6 +20,7 @@ stein_add_module(core
     src/lzo.cpp
     src/zstd.cpp
     src/lzma.cpp
+    src/lzfse.cpp
     src/aes.cpp
     src/aes_hw.cpp
     src/keys.cpp)

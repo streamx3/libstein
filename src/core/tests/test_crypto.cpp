@@ -499,3 +499,27 @@ TEST_CASE("lzma/lzma2/xz: XZ Utils vectors (checks crc32/crc64/sha256/none, mult
     const char* msg = "123456789";
     CHECK(compress::crc64(std::span<const std::byte>(reinterpret_cast<const std::byte*>(msg), 9)) == 0x995DC9BBDF1939FAull);
 }
+
+#include "lzfse_vectors.hpp"
+#include "stein/core/lzfse.hpp"
+
+TEST_CASE("lzfse: Apple encoder vectors (raw, lzvn and FSE v2 blocks, multi-block), truncation and small buffers") {
+    for (const auto& v : test::vectors::kLzfse) {
+        CAPTURE(v.name);
+        CAPTURE(v.blocks);
+        auto comp = joinedHex(v);
+        std::vector<std::byte> out(v.size + 16);
+        auto n = compress::lzfseDecompress(comp, out);
+        REQUIRE_MESSAGE(n, (n ? std::string() : n.error().toString()));
+        CHECK(*n == v.size);
+        CHECK(Hasher::hex(Hasher::digest(HashAlgorithm::Sha256, std::span<const std::byte>(out).subspan(0, *n))) == v.sha256);
+        if (v.size > 1) {
+            std::vector<std::byte> small(v.size - 1);
+            auto s = compress::lzfseDecompress(comp, small);
+            REQUIRE_FALSE(s);
+            CHECK(s.error().category() == ErrorCategory::OutOfRange);
+        }
+        auto t = compress::lzfseDecompress(std::span<const std::byte>(comp).subspan(0, comp.size() - 6), out);
+        CHECK_FALSE(t);   // the end block is gone
+    }
+}

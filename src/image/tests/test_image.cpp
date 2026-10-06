@@ -621,8 +621,8 @@ TEST_CASE("ewf: EnCase 6 compressed, EnCase 6 split into 13 uncompressed segment
     std::filesystem::remove_all(dir, ec);
 }
 
-TEST_CASE("dmg: UDRO, UDZO (zlib), UDBZ (bzip2), UDCO (ADC) and ULMO (lzma) images from hdiutil reproduce the raw disk") {
-    const char* names[] = {"dmg_udro", "dmg_udzo", "dmg_udbz", "dmg_udco", "dmg_ulmo"};
+TEST_CASE("dmg: UDRO, UDZO (zlib), UDBZ (bzip2), UDCO (ADC), ULMO (lzma) and ULFO (lzfse) images from hdiutil reproduce the raw disk") {
+    const char* names[] = {"dmg_udro", "dmg_udzo", "dmg_udbz", "dmg_udco", "dmg_ulmo", "dmg_ulfo"};
     const auto dir = std::filesystem::temp_directory_path() / ("stein_dmg_" + std::to_string(std::random_device{}()));
     std::filesystem::create_directories(dir);
     for (const char* name : names) {
