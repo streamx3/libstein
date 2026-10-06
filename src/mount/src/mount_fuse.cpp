@@ -7,7 +7,10 @@
 #include "stein/core/strings.hpp"
 
 #if defined(_WIN32)
-#include <winfsp/winfsp.h>
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #include <fuse3/fuse.h>
 #include <fcntl.h>
 #else
@@ -44,8 +47,8 @@
 namespace stein::mount {
 
 #if defined(_WIN32)
-using StatT = struct fuse_stat;
-using StatvfsT = struct fuse_statvfs;
+using StatT = fuse_stat;        // WinFsp spells these without the struct tag being usable in an elaborated specifier
+using StatvfsT = fuse_statvfs;
 using OffT = fuse_off_t;
 #else
 using StatT = struct stat;
@@ -180,9 +183,31 @@ struct Mount::Impl {
     }
 };
 
+#if defined(_WIN32)
+namespace {
+// What WinFsp's FspLoad() does: find the install directory in the registry and load the DLL
+// from there, so the delay-loaded import resolves against the already-loaded module.
+bool loadWinFsp() {
+    static bool loaded = [] {
+        for (const wchar_t* key : {L"SOFTWARE\\WOW6432Node\\WinFsp", L"SOFTWARE\\WinFsp"}) {
+            wchar_t dir[MAX_PATH] = {};
+            DWORD size = sizeof dir;
+            if (RegGetValueW(HKEY_LOCAL_MACHINE, key, L"InstallDir", RRF_RT_REG_SZ, nullptr, dir, &size) != ERROR_SUCCESS) continue;
+            std::wstring path = dir;
+            if (!path.empty() && path.back() != L'\\') path += L'\\';
+            path += sizeof(void*) == 8 ? L"bin\\winfsp-x64.dll" : L"bin\\winfsp-x86.dll";
+            if (LoadLibraryW(path.c_str())) return true;
+        }
+        return LoadLibraryW(L"winfsp-x64.dll") != nullptr;
+    }();
+    return loaded;
+}
+} // namespace
+#endif
+
 bool Mount::available() {
 #if defined(_WIN32)
-    return NT_SUCCESS(FspLoad(nullptr));   // finds winfsp-x64.dll through the registry; fails when WinFsp is not installed
+    return loadWinFsp();
 #else
     return ::access("/dev/fuse", R_OK | W_OK) == 0;
 #endif
@@ -218,7 +243,11 @@ Expected<std::unique_ptr<Mount>> Mount::create(std::unique_ptr<fs::Reader> reade
     }();
     m->m_impl->fuse = fuse_new(&a, &ops, sizeof ops, m->m_impl.get());
     if (!m->m_impl->fuse) return fail(ErrorCategory::Internal, "fuse_new failed");
-    if (fuse_mount(m->m_impl->fuse, mountpoint.c_str()) != 0) {
+#if defined(_WIN32)
+    if (!loadWinFsp()) return fail(ErrorCategory::Unsupported, "WinFsp is not installed (https://winfsp.dev)");
+#endif
+    const std::string mountpointText = mountpoint.string();
+    if (fuse_mount(m->m_impl->fuse, mountpointText.c_str()) != 0) {
         fuse_destroy(m->m_impl->fuse);
         m->m_impl->fuse = nullptr;
 #if defined(_WIN32)
