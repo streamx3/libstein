@@ -10,21 +10,21 @@ L0 detect/geometry/label/uuid · L1 used-block map · L2 offline metadata edit
 
 | FS | L0 | L1 | L2 label/uuid | L2 resize | L2 check | L2 create | L3 | L4 |
 |---|---|---|---|---|---|---|---|---|
-| ext2/3/4 | v1 | v1 | v1 | v2 (x in v1) | v2 (x in v1) | v1 | v1 | v2 |
-| FAT12/16/32 | v1 | v1 | v1 | v2 (FAT32 only, cluster-count rules) | v1 (FreeBSD fsck_msdosfs port) | v1 | v1 | v1 |
-| exFAT | v1 | v1 | v1 | v2 | v2 | v1 | v1 | v1 |
-| NTFS | v1 | v1 | v1 | v3 (x in v1) | – (x) | v2 (x in v1) | v1 | v3 |
-| HFS+ / HFSX | v1 | v1 | v1 | v3 | – | v2 | v2 | v3 |
-| HFS (classic) | v1 | – | v1 | – | – | – | – | – |
-| APFS (container + volumes) | v1 | v2 | v1 (name) | – | – | – | v2 | – |
-| XFS | v1 | v2 | v1 | x (grow) | x | x | v2 | – |
-| btrfs | v1 | v2 | v1 | x | x | x | v2 | – |
-| F2FS, JFS, nilfs2, bcachefs, reiser*, minix, ocfs2 | v1 | – | v1 (read) | x | x | x | – | – |
-| UDF | v1 | – | v1 | – | – | x | v1 | – |
-| ISO9660 | v1 | v1 (used = everything) | v1 | – | – | – | v1 | – |
-| swap (linux, freebsd) | v1 | v1 (nothing used) | v1 | v1 (recreate) | – | v1 | – | – |
-| ReFS, ZFS, UFS | v1 | – | v1 (label) | – | – | – | – | – |
-| BitLocker (as content marker) | v1 | → container | | | | | | |
+| ext2/3/4 | **done** | v1 | v1 | v2 (x in v1) | v2 (x in v1) | v1 | v1 | v2 |
+| FAT12/16/32 | **done** | v1 | v1 | v2 (FAT32 only, cluster-count rules) | v1 (FreeBSD fsck_msdosfs port) | v1 | v1 | v1 |
+| exFAT | **done** | v1 | v1 | v2 | v2 | v1 | v1 | v1 |
+| NTFS | **done** | v1 | v1 | v3 (x in v1) | – (x) | v2 (x in v1) | v1 | v3 |
+| HFS+ / HFSX | **done** | v1 | v1 | v3 | – | v2 | v2 | v3 |
+| HFS (classic) | **done** (incl. wrapper) | – | v1 | – | – | – | – | – |
+| APFS (container + volumes) | **done** (container) | v2 | v1 (name) | – | – | – | v2 | – |
+| XFS | **done** | v2 | v1 | x (grow) | x | x | v2 | – |
+| btrfs | **done** | v2 | v1 | x | x | x | v2 | – |
+| F2FS, JFS, nilfs2, bcachefs, reiser*, minix, ocfs2 | **done** (+erofs, squashfs) | – | v1 (read) | x | x | x | – | – |
+| UDF | **done** | – | v1 | – | – | x | v1 | – |
+| ISO9660 | **done** (+Joliet) | v1 (used = everything) | v1 | – | – | – | v1 | – |
+| swap (linux, freebsd) | **done** (linux) | v1 (nothing used) | v1 | v1 (recreate) | – | v1 | – | – |
+| ReFS, ZFS, UFS | **done** (detect; ZFS name/guid) | – | v1 (label) | – | – | – | – | – |
+| BitLocker (as content marker) | **done** | → container | | | | | | |
 
 ## Partition tables
 
@@ -42,14 +42,14 @@ L0 detect/geometry/label/uuid · L1 used-block map · L2 offline metadata edit
 
 | Thing | detect | open/read | write/create | notes |
 |---|---|---|---|---|
-| LUKS1 | v1 | v1 | v2 (format, keyslots) | PBKDF2, AF-splitter, aes-xts-plain64 first; other cipher specs v2 |
-| LUKS2 | v1 | v1 (argon2id/pbkdf2, xts; integrity → refuse) | v2 | JSON metadata, two header copies |
+| LUKS1 | **done** | v1 | v2 (format, keyslots) | PBKDF2, AF-splitter, aes-xts-plain64 first; other cipher specs v2 |
+| LUKS2 | **done** | v1 (argon2id/pbkdf2, xts; integrity → refuse) | v2 | JSON metadata, two header copies |
 | TrueCrypt/VeraCrypt | v1 (by trial decrypt) | v2 (basis: tc-play, BSD-2; cascades, hidden, PIM) | v3 | system-encryption volumes v3 |
 | BitLocker | v1 | v2 (password / recovery key / BEK; AES-CBC+Elephant, AES-XTS) | – | libbde docs as spec |
 | FileVault2 / CoreStorage | v1 | v3 | – | |
 | plain dm-crypt | v1 (parameters supplied) | v1 | v1 | |
-| LVM2 | v1 | v1 (linear, striped), v2 (mirror read, thin detect) | v3 (pvcreate/vgcreate/lvcreate in-process) | own text-metadata parser |
-| mdraid 0.9/1.x | v1 | v2 (linear/0/1/10 read) | – | |
+| LVM2 | **done** (PV, VG name) | v1 (linear, striped), v2 (mirror read, thin detect) | v3 (pvcreate/vgcreate/lvcreate in-process) | own text-metadata parser |
+| mdraid 0.9/1.x | **done** | v2 (linear/0/1/10 read) | – | |
 | APFS container | v1 | v2 | – | |
 
 ## Images

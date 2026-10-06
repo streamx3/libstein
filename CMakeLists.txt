@@ -34,7 +34,7 @@ endif()
 # ---------------------------------------------------------------------------
 # Modules (dependency order; see doc/design/10-architecture.md)
 # ---------------------------------------------------------------------------
-foreach(mod core layout block pt fs)
+foreach(mod core layout block pt fs probe)
   if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/${mod}/CMakeLists.txt)
     add_subdirectory(src/${mod})
   endif()

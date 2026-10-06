@@ -2,7 +2,8 @@
 // `stein` — the command-line front-end. Deliberately thin: every command is a
 // few lines over the libraries, so that what the CLI can do, every UI can do.
 //
-//   stein probe   <image>                 partition table, partitions, diagnostics
+//   stein probe   <image>                 topology tree: table, partitions, contents
+//   stein table   <image>                 partition table details
 //   stein inspect <image> [--doc]         hexinator-style tree of every metadata structure
 //   stein verify  <image>                 exit 0 if healthy, 1 on warnings, 2 on errors
 //   stein repair  <image> [--dry-run]     fix repairable problems (GPT: rebuild/relocate copies)
@@ -18,6 +19,7 @@
 #include "stein/fs/filesystem.hpp"
 #include "stein/pt/gpt_table.hpp"
 #include "stein/pt/partition_table.hpp"
+#include "stein/probe/topology.hpp"
 
 #include <cstdio>
 #include <string>
@@ -29,7 +31,8 @@ namespace {
 
 int usage() {
     std::fputs("usage: stein <probe|inspect|verify|repair|types> ... | stein pt <dump|restore> ...\n"
-               "  stein probe   <image> [--sector-size N]\n"
+               "  stein probe   <image> [--sector-size N]   topology tree: table, partitions, filesystems\n"
+               "  stein table   <image>                     partition table details\n"
                "  stein inspect <image> [--doc] [--sector-size N]\n"
                "  stein verify  <image>\n"
                "  stein repair  <image> [--dry-run]\n"
@@ -101,7 +104,7 @@ void printTable(const pt::PartitionTable& t) {
     }
 }
 
-int cmdProbe(const Args& a) {
+int cmdTable(const Args& a) {
     if (a.positional.size() < 2) return usage();
     auto dev = openImage(a.positional[1], false, a.sectorSize);
     if (!dev) return die(dev.error());
@@ -109,6 +112,16 @@ int cmdProbe(const Args& a) {
     if (!t) return die(t.error());
     printTable(**t);
     return 0;
+}
+
+int cmdProbe(const Args& a) {
+    if (a.positional.size() < 2) return usage();
+    auto dev = openImage(a.positional[1], false, a.sectorSize);
+    if (!dev) return die(dev.error());
+    auto tree = probe::probe(*dev);
+    if (!tree) return die(tree.error());
+    std::fputs(probe::toText(*tree).c_str(), stdout);
+    return tree->health() >= layout::Validity::Error ? 2 : 0;
 }
 
 int cmdInspect(const Args& a) {
@@ -240,6 +253,7 @@ int main(int argc, char** argv) {
     if (a.positional.empty()) return usage();
     const std::string& cmd = a.positional[0];
     if (cmd == "probe") return cmdProbe(a);
+    if (cmd == "table") return cmdTable(a);
     if (cmd == "inspect") return cmdInspect(a);
     if (cmd == "verify") return cmdVerify(a);
     if (cmd == "repair") return cmdRepair(a);
