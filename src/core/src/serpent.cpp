@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: MIT
 // Serpent (Anderson, Biham, Knudsen), bitsliced form. The S-boxes are applied
 // word-parallel by evaluating their truth tables (sixteen minterms, each an
-// AND of the four input words or their complements), which keeps the code a
-// plain transcription of the specification's tables.
+// AND of the four input words or their complements, OR-ed per output bit
+// with compile-time masks), which keeps the code a plain transcription of
+// the specification's tables rather than hand-optimised boolean formulas.
 #include "stein/core/cipher.hpp"
 
 #include "stein/core/endian.hpp"
 
 #include <bit>
 #include <cstring>
+#include <utility>
 
 namespace stein::crypto {
 
@@ -26,40 +28,55 @@ constexpr std::uint8_t kSbox[8][16] = {
 };
 constexpr std::uint32_t kPhi = 0x9e3779b9u;
 
-struct Tables {
-    std::uint8_t inv[8][16];
-    // For S-box s and output bit j: the set of input nibbles whose image has bit j set (as a 16-bit mask).
-    std::uint16_t fwd[8][4], bwd[8][4];
-    Tables() {
-        for (int s = 0; s < 8; ++s) {
-            for (int v = 0; v < 16; ++v) inv[s][kSbox[s][v]] = static_cast<std::uint8_t>(v);
-            for (int j = 0; j < 4; ++j) {
-                fwd[s][j] = bwd[s][j] = 0;
-                for (int v = 0; v < 16; ++v) {
-                    if ((kSbox[s][v] >> j) & 1) fwd[s][j] = static_cast<std::uint16_t>(fwd[s][j] | (1u << v));
-                    if ((inv[s][v] >> j) & 1) bwd[s][j] = static_cast<std::uint16_t>(bwd[s][j] | (1u << v));
-                }
-            }
-        }
-    }
-};
-const Tables& tables() {
-    static const Tables t;
-    return t;
+constexpr std::uint8_t inverse(int s, int y) {
+    for (int v = 0; v < 16; ++v)
+        if (kSbox[s][v] == y) return static_cast<std::uint8_t>(v);
+    return 0;
 }
 
-// x[0..3] hold bit i of nibble i for all 32 positions; replace each nibble by table[nibble].
-inline void applySbox(const std::uint16_t masks[4], std::uint32_t x[4]) {
+// For S-box `s` (or its inverse) and output bit `j`: the set of input nibbles whose image has
+// bit j set, as a 16-bit mask. Computed at compile time so the OR-trees below are fixed.
+constexpr std::uint16_t minterms(int s, bool inv, int j) {
+    std::uint16_t m = 0;
+    for (int v = 0; v < 16; ++v) {
+        const int y = inv ? inverse(s, v) : kSbox[s][v];
+        if ((y >> j) & 1) m = static_cast<std::uint16_t>(m | (1u << v));
+    }
+    return m;
+}
+
+template <std::uint16_t Mask, std::size_t... I>
+constexpr std::uint32_t orSelected(const std::uint32_t (&m)[16], std::index_sequence<I...>) {
+    return ((((Mask >> I) & 1u) ? m[I] : 0u) | ... | 0u);
+}
+
+// x[0..3] hold bit i of nibble i for all 32 positions; replace each nibble by table[nibble]. The
+// sixteen minterms (AND of the four inputs or their complements) are shared by the four outputs.
+template <int S, bool Inv>
+inline void applySbox(std::uint32_t x[4]) {
     const std::uint32_t n0 = ~x[0], n1 = ~x[1], n2 = ~x[2], n3 = ~x[3];
     const std::uint32_t a[4] = {n0 & n1, x[0] & n1, n0 & x[1], x[0] & x[1]};
     const std::uint32_t b[4] = {n2 & n3, x[2] & n3, n2 & x[3], x[2] & x[3]};
-    std::uint32_t m[16];
-    for (int v = 0; v < 16; ++v) m[v] = a[v & 3] & b[v >> 2];
-    for (int j = 0; j < 4; ++j) {
-        std::uint32_t r = 0;
-        for (int v = 0; v < 16; ++v)
-            if ((masks[j] >> v) & 1) r |= m[v];
-        x[j] = r;
+    const std::uint32_t m[16] = {a[0] & b[0], a[1] & b[0], a[2] & b[0], a[3] & b[0], a[0] & b[1], a[1] & b[1], a[2] & b[1], a[3] & b[1],
+                                 a[0] & b[2], a[1] & b[2], a[2] & b[2], a[3] & b[2], a[0] & b[3], a[1] & b[3], a[2] & b[3], a[3] & b[3]};
+    using Seq = std::make_index_sequence<16>;
+    x[0] = orSelected<minterms(S, Inv, 0)>(m, Seq{});
+    x[1] = orSelected<minterms(S, Inv, 1)>(m, Seq{});
+    x[2] = orSelected<minterms(S, Inv, 2)>(m, Seq{});
+    x[3] = orSelected<minterms(S, Inv, 3)>(m, Seq{});
+}
+
+template <bool Inv>
+inline void applySbox(int s, std::uint32_t x[4]) {
+    switch (s & 7) {
+    case 0: applySbox<0, Inv>(x); break;
+    case 1: applySbox<1, Inv>(x); break;
+    case 2: applySbox<2, Inv>(x); break;
+    case 3: applySbox<3, Inv>(x); break;
+    case 4: applySbox<4, Inv>(x); break;
+    case 5: applySbox<5, Inv>(x); break;
+    case 6: applySbox<6, Inv>(x); break;
+    default: applySbox<7, Inv>(x); break;
     }
 }
 
@@ -99,23 +116,21 @@ Expected<Serpent> Serpent::create(std::span<const std::uint8_t> key) {
     std::uint32_t w[140];                           // w[-8..131] shifted by 8
     for (int i = 0; i < 8; ++i) w[i] = loadLe32(reinterpret_cast<const std::byte*>(padded + 4 * i));
     for (int i = 0; i < 132; ++i) w[i + 8] = std::rotl(w[i] ^ w[i + 3] ^ w[i + 5] ^ w[i + 7] ^ kPhi ^ static_cast<std::uint32_t>(i), 11);
-    const Tables& t = tables();
     Serpent s;
     for (int i = 0; i < 33; ++i) {
         std::uint32_t x[4] = {w[8 + 4 * i], w[9 + 4 * i], w[10 + 4 * i], w[11 + 4 * i]};
-        applySbox(t.fwd[(3 - i) & 7], x);
+        applySbox<false>((3 - i) & 7, x);
         for (int j = 0; j < 4; ++j) s.m_k[4 * i + j] = x[j];
     }
     return s;
 }
 
 void Serpent::encryptBlock(const std::uint8_t in[16], std::uint8_t out[16]) const {
-    const Tables& t = tables();
     std::uint32_t x[4];
     for (int i = 0; i < 4; ++i) x[i] = loadLe32(reinterpret_cast<const std::byte*>(in + 4 * i));
     for (int r = 0; r < 32; ++r) {
         for (int j = 0; j < 4; ++j) x[j] ^= m_k[4 * r + j];
-        applySbox(t.fwd[r & 7], x);
+        applySbox<false>(r, x);
         if (r < 31) linear(x);
     }
     for (int j = 0; j < 4; ++j) x[j] ^= m_k[128 + j];
@@ -123,13 +138,12 @@ void Serpent::encryptBlock(const std::uint8_t in[16], std::uint8_t out[16]) cons
 }
 
 void Serpent::decryptBlock(const std::uint8_t in[16], std::uint8_t out[16]) const {
-    const Tables& t = tables();
     std::uint32_t x[4];
     for (int i = 0; i < 4; ++i) x[i] = loadLe32(reinterpret_cast<const std::byte*>(in + 4 * i));
     for (int j = 0; j < 4; ++j) x[j] ^= m_k[128 + j];
     for (int r = 31; r >= 0; --r) {
         if (r < 31) linearInverse(x);
-        applySbox(t.bwd[r & 7], x);
+        applySbox<true>(r, x);
         for (int j = 0; j < 4; ++j) x[j] ^= m_k[4 * r + j];
     }
     for (int i = 0; i < 4; ++i) storeLe32(reinterpret_cast<std::byte*>(out + 4 * i), x[i]);

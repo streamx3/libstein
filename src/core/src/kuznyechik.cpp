@@ -59,20 +59,42 @@ Block LInv(Block a) {
     return a;
 }
 
+// A block as two machine words, so the table XORs run 8 bytes at a time.
+struct W2 {
+    std::uint64_t a, b;
+};
+inline W2 toW2(const Block& x) {
+    W2 w;
+    std::memcpy(&w.a, x.data(), 8);
+    std::memcpy(&w.b, x.data() + 8, 8);
+    return w;
+}
+inline W2 toW2(const std::uint8_t* p) {
+    W2 w;
+    std::memcpy(&w.a, p, 8);
+    std::memcpy(&w.b, p + 8, 8);
+    return w;
+}
+inline void store(const W2& w, std::uint8_t* p) {
+    std::memcpy(p, &w.a, 8);
+    std::memcpy(p + 8, &w.b, 8);
+}
+inline std::uint8_t byteOf(const W2& w, int i) { return static_cast<std::uint8_t>((i < 8 ? w.a : w.b) >> (8 * (i & 7))); }
+
 struct Tables {
     std::uint8_t piInv[256];
-    Block ls[16][256];      // L(S(x) at position i)
-    Block linv[16][256];    // L^-1(x at position i)
-    Block c[32];            // round constants
+    W2 ls[16][256];      // L(S(x) at position i)
+    W2 linv[16][256];    // L^-1(x at position i)
+    Block c[32];         // round constants
     Tables() {
         for (int x = 0; x < 256; ++x) piInv[kPi[x]] = static_cast<std::uint8_t>(x);
         for (int i = 0; i < 16; ++i)
             for (int x = 0; x < 256; ++x) {
                 Block a{};
                 a[i] = kPi[x];
-                ls[i][x] = L(a);
+                ls[i][x] = toW2(L(a));
                 a[i] = static_cast<std::uint8_t>(x);
-                linv[i][x] = LInv(a);
+                linv[i][x] = toW2(LInv(a));
             }
         for (int i = 0; i < 32; ++i) {
             Block v{};
@@ -89,11 +111,21 @@ const Tables& tables() {
 inline void xorInto(Block& a, const Block& b) {
     for (int i = 0; i < 16; ++i) a[i] ^= b[i];
 }
+inline void xorInto(W2& a, const W2& b) {
+    a.a ^= b.a;
+    a.b ^= b.b;
+}
+
+inline W2 lsx(const W2& x) {
+    const Tables& t = tables();
+    W2 out = t.ls[0][byteOf(x, 0)];
+    for (int i = 1; i < 16; ++i) xorInto(out, t.ls[i][byteOf(x, i)]);
+    return out;
+}
 
 inline Block lsx(const Block& a) {
-    const Tables& t = tables();
-    Block out = t.ls[0][a[0]];
-    for (int i = 1; i < 16; ++i) xorInto(out, t.ls[i][a[i]]);
+    Block out;
+    store(lsx(toW2(a)), out.data());
     return out;
 }
 
@@ -124,28 +156,29 @@ Expected<Kuznyechik> Kuznyechik::create(std::span<const std::uint8_t> key) {
 }
 
 void Kuznyechik::encryptBlock(const std::uint8_t in[16], std::uint8_t out[16]) const {
-    Block a;
-    std::memcpy(a.data(), in, 16);
+    W2 a = toW2(in);
     for (int i = 0; i < 9; ++i) {
-        xorInto(a, m_rk[i]);
+        xorInto(a, toW2(m_rk[i]));
         a = lsx(a);
     }
-    xorInto(a, m_rk[9]);
-    std::memcpy(out, a.data(), 16);
+    xorInto(a, toW2(m_rk[9]));
+    store(a, out);
 }
 
 void Kuznyechik::decryptBlock(const std::uint8_t in[16], std::uint8_t out[16]) const {
     const Tables& t = tables();
-    Block a;
-    std::memcpy(a.data(), in, 16);
-    xorInto(a, m_rk[9]);
+    W2 a = toW2(in);
+    xorInto(a, toW2(m_rk[9]));
     for (int i = 8; i >= 0; --i) {
-        Block l = t.linv[0][a[0]];
-        for (int j = 1; j < 16; ++j) xorInto(l, t.linv[j][a[j]]);
-        for (int j = 0; j < 16; ++j) a[j] = t.piInv[l[j]];
-        xorInto(a, m_rk[i]);
+        W2 l = t.linv[0][byteOf(a, 0)];
+        for (int j = 1; j < 16; ++j) xorInto(l, t.linv[j][byteOf(a, j)]);
+        std::uint8_t bytes[16];
+        store(l, bytes);
+        for (int j = 0; j < 16; ++j) bytes[j] = t.piInv[bytes[j]];
+        a = toW2(bytes);
+        xorInto(a, toW2(m_rk[i]));
     }
-    std::memcpy(out, a.data(), 16);
+    store(a, out);
 }
 
 } // namespace stein::crypto

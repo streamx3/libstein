@@ -178,9 +178,9 @@ TEST_CASE("aes: FIPS-197 and oracle block vectors, portable and hardware kernels
         crypto::detail::aesDecryptPortable(aes->roundKeys(), aes->rounds(), p1, p2);
         CHECK(std::memcmp(p2, in, 16) == 0);
         if (crypto::aesHardwareAvailable()) {
-            crypto::detail::aesEncryptHardware(aes->roundKeys(), aes->rounds(), in, p1);
+            crypto::detail::aesEncryptHardware(aes->encryptKeyBytes(), aes->rounds(), in, p1);
             CHECK(Hasher::hex(p1) == v.ciphertext);
-            crypto::detail::aesDecryptHardware(aes->roundKeys(), aes->rounds(), p1, p2);
+            crypto::detail::aesDecryptHardware(aes->decryptKeyBytes(), aes->rounds(), p1, p2);
             CHECK(std::memcmp(p2, in, 16) == 0);
         }
     }

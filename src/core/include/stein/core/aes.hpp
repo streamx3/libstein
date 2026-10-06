@@ -21,9 +21,13 @@ public:
     void decryptBlock(const std::uint8_t in[16], std::uint8_t out[16]) const;
     unsigned rounds() const { return m_rounds; }
     const std::uint32_t* roundKeys() const { return m_rk.data(); }   // (rounds + 1) * 4 words, encryption schedule
+    // Byte-form schedules for the hardware kernels (prepared once; empty without hardware AES).
+    const std::uint8_t* encryptKeyBytes() const { return m_enc.data(); }
+    const std::uint8_t* decryptKeyBytes() const { return m_dec.data(); }
 
 private:
     std::array<std::uint32_t, 60> m_rk{};
+    std::array<std::uint8_t, 240> m_enc{}, m_dec{};
     unsigned m_rounds = 0;
 };
 

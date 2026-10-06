@@ -119,18 +119,20 @@ Expected<Aes> Aes::create(std::span<const std::uint8_t> key) {
         }
         a.m_rk[i] = a.m_rk[i - nk] ^ t;
     }
+    static const bool hw = detail::aesHardware();
+    if (hw) detail::aesPrepareHardware(a.m_rk.data(), a.m_rounds, a.m_enc.data(), a.m_dec.data());
     return a;
 }
 
 void Aes::encryptBlock(const std::uint8_t in[16], std::uint8_t out[16]) const {
     static const bool hw = detail::aesHardware();
-    if (hw) detail::aesEncryptHardware(m_rk.data(), m_rounds, in, out);
+    if (hw) detail::aesEncryptHardware(m_enc.data(), m_rounds, in, out);
     else detail::aesEncryptPortable(m_rk.data(), m_rounds, in, out);
 }
 
 void Aes::decryptBlock(const std::uint8_t in[16], std::uint8_t out[16]) const {
     static const bool hw = detail::aesHardware();
-    if (hw) detail::aesDecryptHardware(m_rk.data(), m_rounds, in, out);
+    if (hw) detail::aesDecryptHardware(m_dec.data(), m_rounds, in, out);
     else detail::aesDecryptPortable(m_rk.data(), m_rounds, in, out);
 }
 

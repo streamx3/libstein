@@ -48,14 +48,40 @@ Expected<std::unique_ptr<BlockCipher>> make(std::span<const std::uint8_t> key) {
     return std::unique_ptr<BlockCipher>(std::make_unique<C>(std::move(*c)));
 }
 
-inline void gfMulTweak(std::uint8_t t[16]) {
-    std::uint8_t carry = 0;
-    for (int i = 0; i < 16; ++i) {
-        const std::uint8_t c = t[i] >> 7;
-        t[i] = static_cast<std::uint8_t>((t[i] << 1) | carry);
-        carry = c;
+struct Tweak {
+    std::uint64_t lo, hi;   // little-endian words of the 128-bit tweak
+};
+inline void gfMulTweak(Tweak& t) {
+    const std::uint64_t carry = t.hi >> 63;
+    t.hi = (t.hi << 1) | (t.lo >> 63);
+    t.lo = (t.lo << 1) ^ (carry ? 0x87u : 0u);
+}
+inline Tweak loadTweak(const std::uint8_t b[16]) { return Tweak{loadLe64(reinterpret_cast<const std::byte*>(b)), loadLe64(reinterpret_cast<const std::byte*>(b + 8))}; }
+inline void xorTweak(const std::byte* in, const Tweak& t, std::uint8_t out[16]) {
+    const std::uint64_t a = loadLe64(in) ^ t.lo, b = loadLe64(in + 8) ^ t.hi;
+    storeLe64(reinterpret_cast<std::byte*>(out), a);
+    storeLe64(reinterpret_cast<std::byte*>(out + 8), b);
+}
+inline void xorTweak(const std::uint8_t in[16], const Tweak& t, std::byte* out) {
+    const std::uint64_t a = loadLe64(reinterpret_cast<const std::byte*>(in)) ^ t.lo, b = loadLe64(reinterpret_cast<const std::byte*>(in + 8)) ^ t.hi;
+    storeLe64(out, a);
+    storeLe64(out + 8, b);
+}
+
+template <bool Encrypt>
+inline void xtsLayer(const BlockCipher& data, const BlockCipher& tweakCipher, std::uint64_t sector, std::span<const std::byte> in, std::span<std::byte> out) {
+    std::uint8_t tweakIn[16] = {}, tweakOut[16];
+    storeLe64(reinterpret_cast<std::byte*>(tweakIn), sector);
+    tweakCipher.encryptBlock(tweakIn, tweakOut);
+    Tweak t = loadTweak(tweakOut);
+    for (std::size_t off = 0; off < in.size(); off += 16) {
+        std::uint8_t x[16], y[16];
+        xorTweak(in.data() + off, t, x);
+        if constexpr (Encrypt) data.encryptBlock(x, y);
+        else data.decryptBlock(x, y);
+        xorTweak(y, t, out.data() + off);
+        gfMulTweak(t);
     }
-    if (carry) t[0] ^= 0x87;
 }
 
 } // namespace
@@ -109,31 +135,9 @@ std::vector<CipherAlgorithm> Xts::cascade() const {
     return v;
 }
 
-void Xts::layerEncrypt(const Layer& l, std::uint64_t sector, std::span<const std::byte> in, std::span<std::byte> out) {
-    std::uint8_t tweak[16] = {}, t[16];
-    storeLe64(reinterpret_cast<std::byte*>(tweak), sector);
-    l.tweak->encryptBlock(tweak, t);
-    for (std::size_t off = 0; off < in.size(); off += 16) {
-        std::uint8_t x[16], y[16];
-        for (int i = 0; i < 16; ++i) x[i] = std::to_integer<std::uint8_t>(in[off + i]) ^ t[i];
-        l.data->encryptBlock(x, y);
-        for (int i = 0; i < 16; ++i) out[off + i] = std::byte(y[i] ^ t[i]);
-        gfMulTweak(t);
-    }
-}
+void Xts::layerEncrypt(const Layer& l, std::uint64_t sector, std::span<const std::byte> in, std::span<std::byte> out) { xtsLayer<true>(*l.data, *l.tweak, sector, in, out); }
 
-void Xts::layerDecrypt(const Layer& l, std::uint64_t sector, std::span<const std::byte> in, std::span<std::byte> out) {
-    std::uint8_t tweak[16] = {}, t[16];
-    storeLe64(reinterpret_cast<std::byte*>(tweak), sector);
-    l.tweak->encryptBlock(tweak, t);
-    for (std::size_t off = 0; off < in.size(); off += 16) {
-        std::uint8_t x[16], y[16];
-        for (int i = 0; i < 16; ++i) x[i] = std::to_integer<std::uint8_t>(in[off + i]) ^ t[i];
-        l.data->decryptBlock(x, y);
-        for (int i = 0; i < 16; ++i) out[off + i] = std::byte(y[i] ^ t[i]);
-        gfMulTweak(t);
-    }
-}
+void Xts::layerDecrypt(const Layer& l, std::uint64_t sector, std::span<const std::byte> in, std::span<std::byte> out) { xtsLayer<false>(*l.data, *l.tweak, sector, in, out); }
 
 Expected<void> Xts::encrypt(std::uint64_t sector, std::span<const std::byte> in, std::span<std::byte> out) const {
     if (in.size() % 16 || out.size() < in.size()) return fail(ErrorCategory::InvalidArgument, "XTS data must be a multiple of 16 bytes");
