@@ -193,7 +193,9 @@ for c in d["Containers"]:
   diskutil unmount "$mnt2" >/dev/null
   hdiutil detach "$mnt" >/dev/null
   python3 "$HERE/sparsify.py" pack "$img.dmg" "$OUT/$name.sparse"
-  echo "$name: $(stat -f %z "$OUT/$name.sparse") bytes, $(grep -c . "$OUT/$name.oracle.txt") live / $(grep -c . "$OUT/$name.snapshot.oracle.txt") snapshot / $(grep -c . "$OUT/$name.second.oracle.txt") second oracle lines"
+  local snaplines="none"
+  [ -e "$OUT/$name.snapshot.oracle.txt" ] && snaplines=$(grep -c . "$OUT/$name.snapshot.oracle.txt" || true)
+  echo "$name: $(stat -f %z "$OUT/$name.sparse") bytes, $(grep -c . "$OUT/$name.oracle.txt" || true) live / $snaplines snapshot / $(grep -c . "$OUT/$name.second.oracle.txt" || true) second oracle lines"
 }
 
 make_snap
