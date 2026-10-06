@@ -20,7 +20,8 @@ L0 detect/geometry/label/uuid · L1 used-block map · L2 offline metadata edit
 | XFS | **done** | v2 | v1 | x (grow) | x | x | **done** (reader: v4/v5 inodes, extents and bmbt forks, sf/block/leaf/node dirs) | – |
 | btrfs | **done** | v2 | v1 | x | x | x | **done** (reader: chunk map, fs/subvolume trees, inline/regular extents, zlib/lzo/zstd compression) | – |
 | SquashFS | **done** | – | – | – | – | – | **done** (reader: 4.0, gzip/lzo/xz/lz4/zstd/lzma, fragments, sparse blocks, basic and extended inodes) | – |
-| F2FS, JFS, nilfs2, bcachefs, reiser*, minix, ocfs2 | **done** (+erofs) | – | v1 (read) | x | x | x | – | – |
+| EROFS | **done** | – | – | – | – | – | **done** (reader: flat/inline/chunk-based data, compressed data with full and compact indexes, big pclusters, tail packing, fragments, dedupe; lz4/lzma/deflate/zstd) | – |
+| F2FS, JFS, nilfs2, bcachefs, reiser*, minix, ocfs2 | **done** | – | v1 (read) | x | x | x | – | – |
 | UDF | **done** | – | v1 | – | – | x | **done** (reader: physical/sparable/metadata maps, FE/EFE, inline/short/long ADs, symlinks; VAT v2) | – |
 | ISO9660 | **done** (+Joliet) | v1 (used = everything) | v1 | – | – | – | **done** (reader: Rock Ridge names/links/relocation, Joliet, plain) | – |
 | swap (linux, freebsd) | **done** (linux) | v1 (nothing used) | v1 | v1 (recreate) | – | v1 | – | – |

@@ -131,7 +131,10 @@ std::vector<std::byte> compress(std::span<const std::byte> input, int accelerati
     return out;
 }
 
-static Expected<std::size_t> decompressImpl(std::span<const std::byte> input, std::span<std::byte> output, bool exact) {
+enum class Fill { Exact, UpTo, Partial };
+
+static Expected<std::size_t> decompressImpl(std::span<const std::byte> input, std::span<std::byte> output, Fill fill) {
+    const bool exact = fill == Fill::Exact, partial = fill == Fill::Partial;
     const std::byte* ip = input.data();
     const std::byte* const iend = ip + input.size();
     std::byte* op = output.data();
@@ -152,11 +155,15 @@ static Expected<std::size_t> decompressImpl(std::span<const std::byte> input, st
             } while (b == 255);
         }
         if (static_cast<std::size_t>(iend - ip) < literalLen) return bad("literals exceed input");
-        if (static_cast<std::size_t>(oend - op) < literalLen) return bad("literals exceed output");
+        if (static_cast<std::size_t>(oend - op) < literalLen) {
+            if (!partial) return bad("literals exceed output");
+            std::memcpy(op, ip, static_cast<std::size_t>(oend - op));
+            return output.size();
+        }
         std::memcpy(op, ip, literalLen);
         ip += literalLen;
         op += literalLen;
-        if (ip == iend) {
+        if (ip == iend || (partial && op == oend)) {
             if (exact && op != oend) return bad("output size mismatch");
             return static_cast<std::size_t>(op - output.data());   // end of block: last sequence has only literals
         }
@@ -173,6 +180,11 @@ static Expected<std::size_t> decompressImpl(std::span<const std::byte> input, st
                 matchLen += b;
             } while (b == 255);
         }
+        if (static_cast<std::size_t>(oend - op) <= matchLen && partial) {
+            matchLen = static_cast<std::size_t>(oend - op);
+            for (std::size_t i = 0; i < matchLen; ++i) op[i] = op[i - offset];
+            return output.size();   // the target is reached: whatever follows is padding
+        }
         if (static_cast<std::size_t>(oend - op) < matchLen) return bad("match exceeds output");
         const std::byte* match = op - offset;
         if (offset >= matchLen) {
@@ -185,12 +197,13 @@ static Expected<std::size_t> decompressImpl(std::span<const std::byte> input, st
 }
 
 Expected<void> decompress(std::span<const std::byte> input, std::span<std::byte> output) {
-    auto n = decompressImpl(input, output, true);
+    auto n = decompressImpl(input, output, Fill::Exact);
     if (!n) return fail(n.error());
     return {};
 }
 
-Expected<std::size_t> decompressUpTo(std::span<const std::byte> input, std::span<std::byte> output) { return decompressImpl(input, output, false); }
+Expected<std::size_t> decompressUpTo(std::span<const std::byte> input, std::span<std::byte> output) { return decompressImpl(input, output, Fill::UpTo); }
+Expected<std::size_t> decompressPartial(std::span<const std::byte> input, std::span<std::byte> output) { return decompressImpl(input, output, Fill::Partial); }
 
 Expected<std::vector<std::byte>> decompress(std::span<const std::byte> input, std::size_t originalSize) {
     std::vector<std::byte> out(originalSize);

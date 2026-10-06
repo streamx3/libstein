@@ -26,6 +26,7 @@ struct State {
     std::span<std::byte> out;
     std::size_t outPos = 0;
     bool overflow = false, corrupt = false, truncated = false;
+    bool partial = false;   // a full output buffer ends decoding successfully
 
     int bits(int need) {
         while (bitCount < need) {
@@ -117,6 +118,10 @@ void codes(State& st, const Huffman& lencode, const Huffman& distcode) {
                 return;
             }
             if (st.outPos + len > st.out.size()) {
+                // In partial mode the bytes that fit still belong to the caller's window.
+                const std::size_t fit = st.partial ? st.out.size() - st.outPos : 0;
+                for (std::size_t i = 0; i < fit; ++i) st.out[st.outPos + i] = st.out[st.outPos - dist + i];
+                st.outPos += fit;
                 st.overflow = true;
                 return;
             }
@@ -144,6 +149,11 @@ void stored(State& st) {
         return;
     }
     if (st.outPos + len > st.out.size()) {
+        if (st.partial) {
+            const std::size_t fit = st.out.size() - st.outPos;
+            std::memcpy(st.out.data() + st.outPos, st.in.data() + st.inPos, fit);
+            st.outPos += fit;
+        }
         st.overflow = true;
         return;
     }
@@ -235,7 +245,7 @@ void dynamic(State& st) {
 }
 
 Expected<std::size_t> finish(const State& st) {
-    if (st.overflow) return fail(ErrorCategory::OutOfRange, "inflate: output buffer too small");
+    if (st.overflow) return st.partial ? Expected<std::size_t>{st.outPos} : fail(ErrorCategory::OutOfRange, "inflate: output buffer too small");
     if (st.truncated) return fail(ErrorCategory::InvalidFormat, "inflate: compressed data ends early");
     if (st.corrupt) return fail(ErrorCategory::InvalidFormat, "inflate: corrupt deflate stream");
     return st.outPos;
@@ -278,6 +288,14 @@ Expected<std::size_t> inflateRaw(std::span<const std::byte> in, std::span<std::b
     State st;
     st.in = in;
     st.out = out;
+    return inflateInto(st);
+}
+
+Expected<std::size_t> inflateRawPartial(std::span<const std::byte> in, std::span<std::byte> out) {
+    State st;
+    st.in = in;
+    st.out = out;
+    st.partial = true;
     return inflateInto(st);
 }
 

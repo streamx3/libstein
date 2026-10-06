@@ -15,6 +15,10 @@ namespace stein::compress {
 // Raw LZMA1 stream with the given properties byte (lc/lp/pb). Decodes until `out` is full or
 // the end marker appears; returns the bytes produced.
 Expected<std::size_t> lzmaDecompressRaw(std::span<const std::byte> in, std::span<std::byte> out, std::uint8_t props);
+// MicroLZMA (EROFS, xz's lzma_microlzma): the inverted properties byte sits where the range
+// coder's leading zero would be, no size fields, no end marker; `out` is the exact size unless
+// `partial`.
+Expected<std::size_t> lzmaMicroDecompress(std::span<const std::byte> in, std::span<std::byte> out, bool partial = false);
 // .lzma format: 13-byte header (properties, dictionary size, uncompressed size or -1).
 Expected<std::size_t> lzmaDecompress(std::span<const std::byte> in, std::span<std::byte> out);
 // LZMA2 chunk stream (as used inside .xz): returns the bytes produced; `consumed` receives the

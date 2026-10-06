@@ -853,6 +853,61 @@ TEST_CASE("apfs reader: hdiutil fixtures (case-insensitive and case-sensitive) r
     }
 }
 
+TEST_CASE("erofs reader: mkfs.erofs fixtures (plain, chunk-based, lz4 compact/legacy/big pcluster/ztailpacking/fragments+dedupe, lzma, deflate) read back exactly") {
+    const char* names[] = {"erofs_plain", "erofs_chunked", "erofs_lz4", "erofs_lz4_legacy", "erofs_lz4hc_bigpcl", "erofs_lz4_ztail", "erofs_lz4_frag", "erofs_lzma", "erofs_deflate"};
+    for (const char* name : names) {
+        const std::string fixture = name;
+        CAPTURE(fixture);
+        auto dev = loadSparseFixture("erofs/" + fixture + ".sparse");
+        auto probed = fs::probe(dev);
+        REQUIRE(probed);
+        REQUIRE(*probed);
+        CHECK((*probed)->info().type == fs::FsType::Erofs);
+        REQUIRE(fs::has((*probed)->capabilities(), fs::Capability::Read));
+        auto reader = (*probed)->openReader();
+        REQUIRE_MESSAGE(reader, (reader ? std::string() : reader.error().toString()));
+        auto root = (*reader)->root();
+        REQUIRE(root);
+        std::map<std::string, std::pair<char, std::uint64_t>> seen;
+        std::map<std::string, std::string> sha, links;
+        walk(**reader, *root, "", seen, sha, links);
+        const auto o = loadExtOracle(fixture == "erofs_chunked" ? "erofs_chunked" : "erofs", "erofs");
+        CHECK(seen.size() == o.entries.size());
+        for (const auto& [path, ts] : o.entries) {
+            CAPTURE(path);
+            REQUIRE(seen.count(path));
+            CHECK(seen[path].first == ts.first);
+            if (ts.first == 'f') CHECK(seen[path].second == ts.second);
+        }
+        for (const auto& [path, h] : o.sha) {
+            CAPTURE(path);
+            CHECK(sha[path] == h);
+        }
+        for (const auto& [path, t] : o.links) {
+            CAPTURE(path);
+            CHECK(links[path] == t);
+        }
+        auto hl = fs::resolvePath(**reader, "hardlink.txt");
+        REQUIRE(hl);
+        CHECK(*hl == *fs::resolvePath(**reader, "hello.txt"));
+        CHECK((*reader)->stat(*hl)->nlink == 2);
+        CHECK((*reader)->stat(*hl)->mtime == 1704164645);
+        CHECK((*reader)->stat(*hl)->mode == 0644);
+        CHECK_FALSE(fs::resolvePath(**reader, "HELLO.TXT"));
+        CHECK(*fs::resolvePath(**reader, "link_short") == *hl);
+        // Partial reads inside and across compressed clusters.
+        auto big = fs::resolvePath(**reader, "compressible.txt");
+        REQUIRE(big);
+        auto whole = fs::readAll(**reader, *big, 1 << 20);
+        REQUIRE(whole);
+        std::vector<std::byte> part(5000);
+        auto n = (*reader)->read(*big, 65536 - 2500, part);
+        REQUIRE(n);
+        CHECK(*n == 5000);
+        CHECK(std::equal(part.begin(), part.end(), whole->begin() + 65536 - 2500));
+    }
+}
+
 TEST_CASE("udf reader: genisoimage UDF 1.02 (bridge and UDF-only) read back exactly; mkudffs 2.50 metadata partition opens") {
     for (const char* name : {"udf_only", "udf_bridge"}) {
         const std::string fixture = name;

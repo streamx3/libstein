@@ -15,6 +15,8 @@ namespace stein::compress {
 // Decode raw deflate data into `out`; returns the number of bytes produced. Fails with
 // InvalidFormat on corrupt input and OutOfRange when `out` is too small.
 Expected<std::size_t> inflateRaw(std::span<const std::byte> in, std::span<std::byte> out);
+// Like inflateRaw but a full `out` ends decoding successfully (the rest of the stream is ignored).
+Expected<std::size_t> inflateRawPartial(std::span<const std::byte> in, std::span<std::byte> out);
 // zlib stream: 2-byte header, raw deflate, Adler-32 trailer (verified).
 Expected<std::size_t> inflateZlib(std::span<const std::byte> in, std::span<std::byte> out);
 // gzip member: header with optional fields, raw deflate, CRC-32 and size trailer (verified).

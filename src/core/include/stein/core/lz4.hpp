@@ -27,6 +27,8 @@ std::vector<std::byte> compress(std::span<const std::byte> input, int accelerati
 Expected<void> decompress(std::span<const std::byte> input, std::span<std::byte> output);
 // Like decompress() but the block may produce fewer bytes than `output` holds; returns the count.
 Expected<std::size_t> decompressUpTo(std::span<const std::byte> input, std::span<std::byte> output);
+// Decode until `output` is full and stop there, whatever the block still holds; returns the count.
+Expected<std::size_t> decompressPartial(std::span<const std::byte> input, std::span<std::byte> output);
 Expected<std::vector<std::byte>> decompress(std::span<const std::byte> input, std::size_t originalSize);
 
 } // namespace stein::lz4

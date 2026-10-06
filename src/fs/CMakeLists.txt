@@ -13,6 +13,7 @@ stein_add_module(fs
     src/fs_btrfs_reader.cpp
     src/fs_squashfs_reader.cpp
     src/fs_apfs_reader.cpp
+    src/fs_erofs_reader.cpp
     src/fs_udf_reader.cpp
     src/registry.cpp
     src/fs_ext.cpp

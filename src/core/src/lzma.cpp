@@ -40,8 +40,8 @@ struct RangeDecoder {
     std::uint32_t range = 0xFFFFFFFFu, code = 0;
     bool corrupt = false;
 
-    bool init() {
-        if (len < 5 || p[0] != 0) return false;
+    bool init(bool firstByteIsProps = false) {
+        if (len < 5 || (!firstByteIsProps && p[0] != 0)) return false;
         for (int i = 1; i < 5; ++i) code = (code << 8) | p[i];
         pos = 5;
         return code != 0xFFFFFFFFu;
@@ -284,6 +284,27 @@ Expected<std::size_t> lzmaDecompressRaw(std::span<const std::byte> in, std::span
     RangeDecoder rc{reinterpret_cast<const std::uint8_t*>(in.data()), in.size()};
     if (!rc.init()) return fail(ErrorCategory::InvalidFormat, "bad LZMA range coder header");
     return decodeWithMarker(d, rc, out, out.size());
+}
+
+Expected<std::size_t> lzmaMicroDecompress(std::span<const std::byte> in, std::span<std::byte> out, bool partial) {
+    if (in.size() < 5) return fail(ErrorCategory::InvalidFormat, "MicroLZMA stream too short");
+    LzmaDecoder d;
+    // The properties byte is stored inverted (xz: lzma_lzma_lclppb_decode(&options, ~in[0])).
+    if (!d.setProps(static_cast<std::uint8_t>(~std::to_integer<std::uint8_t>(in[0])))) return fail(ErrorCategory::InvalidFormat, "invalid MicroLZMA properties byte");
+    d.resetState();
+    RangeDecoder rc{reinterpret_cast<const std::uint8_t*>(in.data()), in.size()};
+    if (!rc.init(true)) return fail(ErrorCategory::InvalidFormat, "bad MicroLZMA range coder header");
+    bool sawEnd = false;
+    auto pos = d.decode(rc, reinterpret_cast<std::uint8_t*>(out.data()), 0, out.size(), 0, true, &sawEnd);
+    if (!pos) {
+        // A match that would run past the buffer is the normal end of a partial decode: the
+        // decoder copied what fits before reporting it.
+        if (partial && pos.error().category() == ErrorCategory::OutOfRange) return out.size();
+        return pos;
+    }
+    if (rc.corrupt) return fail(ErrorCategory::InvalidFormat, "MicroLZMA stream truncated");
+    if (!partial && *pos != out.size()) return fail(ErrorCategory::InvalidFormat, "MicroLZMA stream ended before the expected size");
+    return *pos;
 }
 
 Expected<std::size_t> lzmaDecompress(std::span<const std::byte> in, std::span<std::byte> out) {

@@ -4,6 +4,7 @@
 #include "detectors.hpp"
 #include "stein/fs/btrfs_reader.hpp"
 #include "stein/fs/squashfs_reader.hpp"
+#include "stein/fs/erofs_reader.hpp"
 #include "stein/fs/xfs_reader.hpp"
 #include "stein/core/endian.hpp"
 #include "stein/core/strings.hpp"
@@ -283,6 +284,7 @@ Result detectErofs(Dev dev) {
     fs->setTreeName("EROFS filesystem");
     fs->addNode(sb.describe(kOff));
     fs->addRegion(Region{kOff, 128});
+    fs->setReaderSource(makeErofsReaderSource());
     return std::unique_ptr<FileSystem>(std::move(fs));
 }
 
