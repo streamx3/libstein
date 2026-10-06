@@ -3,6 +3,9 @@
 // CHECK(a == b) prints readable values. Explicit specialisations only.
 #pragma once
 
+#include <filesystem>
+#include <system_error>
+
 #include <doctest.h>
 
 #include "stein/core/error.hpp"
@@ -23,4 +26,12 @@ namespace stein::test {
 inline std::span<const std::byte> bytesOf(std::string_view s) {
     return {reinterpret_cast<const std::byte*>(s.data()), s.size()};
 }
+
+// Non-throwing recursive delete for test scratch dirs. On Windows a file that
+// is still open cannot be deleted; callers release their devices first.
+inline void removeTree(const std::filesystem::path& dir) {
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
 } // namespace stein::test

@@ -26,7 +26,7 @@ struct Sink : ProgressSink {
 
 std::filesystem::path tmpDir(const char* name) {
     auto d = std::filesystem::temp_directory_path() / name;
-    std::filesystem::remove_all(d);
+    stein::test::removeTree(d);
     std::filesystem::create_directories(d);
     return d;
 }
@@ -132,7 +132,8 @@ TEST_CASE("stein image: create, info, open as device, probe through it, verify, 
     REQUIRE(r3);
     CHECK(r3->targetSmaller);
     CHECK(*small.read(0, 512) == *src->read(0, 512));
-    std::filesystem::remove_all(dir);
+    if (dev) dev->reset();
+    stein::test::removeTree(dir);
 }
 
 TEST_CASE("stein image: split segments, uncompressed, corruption detection, recovery without trailer") {
@@ -205,7 +206,10 @@ TEST_CASE("stein image: split segments, uncompressed, corruption detection, reco
     auto head = (*recDev)->read(0, 64 * 1024);
     REQUIRE(head);
     CHECK(*head == *src->read(0, 64 * 1024));
-    std::filesystem::remove_all(dir);
+    if (dev) dev->reset();
+    if (badDev) badDev->reset();
+    if (recDev) recDev->reset();
+    stein::test::removeTree(dir);
 }
 
 TEST_CASE("copy engine: bad sector policy") {
@@ -282,5 +286,6 @@ TEST_CASE("split raw image set opens as one device") {
     auto all = (*dev)->read(0, (*dev)->size());
     REQUIRE(all);
     CHECK(std::equal(all->begin(), all->end(), disk->bytes().begin()));
-    std::filesystem::remove_all(dir);
+    if (dev) dev->reset();
+    stein::test::removeTree(dir);
 }

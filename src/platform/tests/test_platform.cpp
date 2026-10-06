@@ -28,7 +28,8 @@ TEST_CASE("platform: name, enumerate does not fail, openAny on a regular file") 
     REQUIRE(dev);
     CHECK((*dev)->size() == 4 * MiB);
     CHECK(!openAny((dir / "missing").string(), OpenMode::ReadOnly));
-    std::filesystem::remove_all(dir);
+    if (dev) dev->reset();
+    stein::test::removeTree(dir);
 }
 
 #ifdef __linux__
@@ -51,7 +52,7 @@ TEST_CASE("linux: loop attach, open raw device, probe, mounts, detach") {
     auto attached = p.attach(img, AttachOptions{.readOnly = true, .partitionScan = true});
     if (!attached) {
         MESSAGE("loop attach unavailable here: ", attached.error().toString());
-        std::filesystem::remove_all(dir);
+        stein::test::removeTree(dir);
         return;
     }
     CHECK(attached->osPath.rfind("/dev/loop", 0) == 0);
@@ -84,6 +85,6 @@ TEST_CASE("linux: loop attach, open raw device, probe, mounts, detach") {
     CHECK(p.rereadPartitionTable(attached->osPath));
     dev->reset();
     CHECK(p.detach(*attached));
-    std::filesystem::remove_all(dir);
+    stein::test::removeTree(dir);
 }
 #endif
