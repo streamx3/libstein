@@ -21,7 +21,7 @@ L0 detect/geometry/label/uuid · L1 used-block map · L2 offline metadata edit
 | btrfs | **done** | v2 | v1 | x | x | x | v2 | – |
 | F2FS, JFS, nilfs2, bcachefs, reiser*, minix, ocfs2 | **done** (+erofs, squashfs) | – | v1 (read) | x | x | x | – | – |
 | UDF | **done** | – | v1 | – | – | x | v1 | – |
-| ISO9660 | **done** (+Joliet) | v1 (used = everything) | v1 | – | – | – | v1 | – |
+| ISO9660 | **done** (+Joliet) | v1 (used = everything) | v1 | – | – | – | **done** (reader: Rock Ridge names/links/relocation, Joliet, plain) | – |
 | swap (linux, freebsd) | **done** (linux) | v1 (nothing used) | v1 | v1 (recreate) | – | v1 | – | – |
 | ReFS, ZFS, UFS | **done** (detect; ZFS name/guid) | – | v1 (label) | – | – | – | – | – |
 | BitLocker (as content marker) | **done** | → container | | | | | | |
