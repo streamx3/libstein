@@ -258,9 +258,9 @@ struct ExtOracle {
     std::map<std::string, std::string> sha;
     std::map<std::string, std::string> links;
 };
-ExtOracle loadExtOracle(const std::string& name) {
+ExtOracle loadExtOracle(const std::string& name, const std::string& dir = "extfs") {
     ExtOracle o;
-    std::ifstream in(std::string(STEIN_FIXTURE_DIR) + "/extfs/" + name + ".oracle.txt");
+    std::ifstream in(std::string(STEIN_FIXTURE_DIR) + "/" + dir + "/" + name + ".oracle.txt");
     std::string line;
     while (std::getline(in, line)) {
         if (line.rfind("sha256 ", 0) == 0) {
@@ -359,4 +359,54 @@ TEST_CASE("ext reader: every file, directory and symlink matches the kernel moun
         CHECK(fs::resolvePath(**reader, "no/such/file").error().category() == ErrorCategory::NotFound);
         CHECK(*fs::resolvePath(**reader, "dir/nested/../nested/deep/../deep/leaf.txt") == *leaf);
     }
+}
+
+TEST_CASE("ntfs reader: every file, directory and link matches the ntfs-3g mount") {
+    auto dev = loadSparseFixture("ntfsfs/ntfs.sparse");
+    auto probed = fs::probe(dev);
+    REQUIRE(probed);
+    REQUIRE(*probed);
+    CHECK((*probed)->type() == fs::FsType::Ntfs);
+    REQUIRE(fs::has((*probed)->capabilities(), fs::Capability::Read));
+    auto reader = (*probed)->openReader();
+    REQUIRE_MESSAGE(reader, (reader ? std::string() : reader.error().toString()));
+    CHECK_FALSE((*reader)->caseSensitive());
+    auto root = (*reader)->root();
+    REQUIRE(root);
+    std::map<std::string, std::pair<char, std::uint64_t>> seen;
+    std::map<std::string, std::string> sha, links;
+    walk(**reader, *root, "", seen, sha, links);
+    const auto o = loadExtOracle("ntfs", "ntfsfs");
+    for (const auto& [path, ts] : o.entries) {
+        CAPTURE(path);
+        REQUIRE(seen.count(path));
+        CHECK(seen[path].first == ts.first);
+        if (ts.first == 'f') CHECK(seen[path].second == ts.second);
+    }
+    // Everything we list must be in the oracle too, except NTFS metafiles the mount hides.
+    for (const auto& [path, ts] : seen) {
+        CAPTURE(path);
+        if (path.rfind("System Volume Information", 0) == 0 || path.rfind("$", 0) == 0) continue;
+        CHECK(o.entries.count(path));
+    }
+    for (const auto& [path, h] : o.sha) {
+        CAPTURE(path);
+        CHECK(sha[path] == h);
+    }
+    for (const auto& [path, t] : o.links) {
+        CAPTURE(path);
+        CHECK(links[path] == t);
+    }
+    // Case-insensitive lookup, hard link count, holes.
+    auto upper = fs::resolvePath(**reader, "dir/upper.txt");
+    REQUIRE(upper);
+    CHECK(*upper == *fs::resolvePath(**reader, "dir/UPPER.TXT"));
+    CHECK((*reader)->stat(*fs::resolvePath(**reader, "hello.txt"))->nlink == 2);
+    auto sparse = fs::resolvePath(**reader, "sparse.bin");
+    REQUIRE(sparse);
+    std::vector<std::byte> buf(13);
+    auto n = (*reader)->read(*sparse, 1024 * 1024, buf);
+    REQUIRE(n);
+    CHECK(std::string(reinterpret_cast<const char*>(buf.data()), *n) == "after a hole\n");
+    CHECK(seen.count("many/file_299.txt"));
 }

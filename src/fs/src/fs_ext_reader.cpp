@@ -19,7 +19,6 @@ constexpr std::uint32_t kFlagExtents = 0x80000;
 constexpr std::uint32_t kFlagInlineData = 0x10000000;
 constexpr std::uint32_t kIncompatFiletype = 1u << 1;
 constexpr std::uint32_t kIncompat64bit = 1u << 7;
-constexpr std::uint32_t kIncompatInlineData = 1u << 15;
 constexpr std::uint16_t kExtentMagic = 0xF30A;
 
 FileType typeFromMode(std::uint16_t mode) {

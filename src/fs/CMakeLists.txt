@@ -4,6 +4,7 @@ stein_add_module(fs
     src/allocation_map.cpp
     src/reader.cpp
     src/fs_ext_reader.cpp
+    src/fs_ntfs_reader.cpp
     src/registry.cpp
     src/fs_ext.cpp
     src/fs_fat.cpp
