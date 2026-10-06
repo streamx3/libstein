@@ -20,7 +20,7 @@ constexpr std::uint32_t kBtreeInfoSize = 40;
 constexpr std::uint8_t kTypeInode = 3, kTypeXattr = 4, kTypeFileExtent = 8, kTypeDirRec = 9;
 constexpr std::uint64_t kIncompatCaseInsensitive = 1, kIncompatNormalizationInsensitive = 8, kFsUnencrypted = 1;
 constexpr std::uint32_t kUfCompressed = 0x20;
-constexpr std::uint8_t kXfName = 4, kXfDstream = 8;
+constexpr std::uint8_t kXfDstream = 8;
 constexpr std::uint16_t kXattrEmbedded = 2;
 
 // Fletcher-64 as APFS uses it (over the block after its 8-byte checksum field).

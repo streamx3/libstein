@@ -19,7 +19,7 @@ namespace {
 constexpr std::size_t kMetaSize = 8192;
 constexpr std::uint32_t kFragNone = 0xFFFFFFFFu, kUncompressedBlock = 1u << 24;
 constexpr std::uint16_t kCompGzip = 1, kCompLzma = 2, kCompLzo = 3, kCompXz = 4, kCompLz4 = 5, kCompZstd = 6;
-constexpr std::uint16_t kFlagUncompressedInodes = 0x0001, kFlagUncompressedData = 0x0002, kFlagUncompressedFragments = 0x0008, kFlagUncompressedIds = 0x0800;
+constexpr std::uint16_t kFlagUncompressedData = 0x0002, kFlagUncompressedFragments = 0x0008;   // inode/id tables carry the flag per block
 enum : std::uint16_t { kDir = 1, kFile = 2, kSymlink = 3, kBlk = 4, kChr = 5, kFifo = 6, kSock = 7, kLDir = 8, kLFile = 9, kLSymlink = 10, kLBlk = 11, kLChr = 12, kLFifo = 13, kLSock = 14 };
 
 FileType typeOf(std::uint16_t t) {
