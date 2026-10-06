@@ -7,6 +7,7 @@
 
 #include "stein/core/error.hpp"
 
+#include <ostream>
 #include <span>
 #include <string>
 #include <string_view>

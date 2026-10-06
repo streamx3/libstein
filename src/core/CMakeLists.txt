@@ -8,8 +8,10 @@ stein_add_module(core
     src/progress.cpp
     src/report.cpp
     src/strings.cpp
-    src/log.cpp)
+    src/log.cpp
+    src/json.cpp
+    src/lz4.cpp)
 
 stein_add_test(test_core
-  SOURCES tests/test_main.cpp tests/test_core.cpp
+  SOURCES tests/test_main.cpp tests/test_core.cpp tests/test_json_lz4.cpp
   DEPS stein::core)

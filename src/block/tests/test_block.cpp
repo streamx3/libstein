@@ -6,6 +6,7 @@
 #include "stein/block/slice_device.hpp"
 #include "stein/block/sparse_file.hpp"
 
+#include <array>
 #include <filesystem>
 
 using namespace stein;
