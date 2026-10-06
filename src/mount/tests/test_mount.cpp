@@ -10,6 +10,7 @@
 #include <fstream>
 #include <random>
 #include <chrono>
+#include <cstdlib>
 #include <thread>
 #if defined(_WIN32)
 #include <windows.h>
@@ -18,9 +19,17 @@
 using namespace stein;
 using stein::test::loadSparseFixture;
 
+namespace {
+// CI sets STEIN_REQUIRE_MOUNT where a backend is expected to work, so a silent skip there is a failure.
+void skipOrFail(const std::string& why) {
+    if (std::getenv("STEIN_REQUIRE_MOUNT")) FAIL(why);
+    else MESSAGE(why);
+}
+} // namespace
+
 TEST_CASE("mount: an ext4 fixture mounted through FUSE reads like the kernel mount did") {
     if (!mount::Mount::available()) {
-        MESSAGE("no usable FUSE on this machine; skipping");
+        skipOrFail("no usable FUSE/WinFsp on this machine; skipping");
         return;
     }
     auto dev = loadSparseFixture("extfs/ext4.sparse");
@@ -49,7 +58,7 @@ TEST_CASE("mount: an ext4 fixture mounted through FUSE reads like the kernel mou
 #endif
     auto m = mount::Mount::create(std::move(*reader), mp);
     if (!m) {
-        MESSAGE("mount failed (", m.error().toString(), "); skipping");
+        skipOrFail("mount failed (" + m.error().toString() + "); skipping");
 #if !defined(_WIN32)
         std::filesystem::remove(mp);
 #endif
@@ -62,7 +71,7 @@ TEST_CASE("mount: an ext4 fixture mounted through FUSE reads like the kernel mou
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     if (!(*m)->running()) {
         loop.join();
-        MESSAGE("fuse loop did not start: ", loopResult ? std::string("exited cleanly") : loopResult.error().toString());
+        skipOrFail("fuse loop did not start: " + (loopResult ? std::string("exited cleanly") : loopResult.error().toString()));
         m->reset();
         std::error_code ec0;
 #if !defined(_WIN32)
