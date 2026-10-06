@@ -6,6 +6,7 @@
 
 #include "stein/core/strings.hpp"
 #include "stein/fs/filesystem.hpp"
+#include "stein/fs/udf_reader.hpp"
 
 #include <algorithm>
 #include <filesystem>
@@ -726,5 +727,72 @@ TEST_CASE("btrfs reader: mkfs.btrfs --rootdir fixtures read back exactly (inline
         CHECK_FALSE(fs::resolvePath(**reader, "HELLO.TXT"));
         CHECK((*reader)->readdir(*fs::resolvePath(**reader, "many"))->size() == 400);
         CHECK(*fs::resolvePath(**reader, "link_short") == *hl);
+    }
+}
+
+TEST_CASE("udf reader: genisoimage UDF 1.02 (bridge and UDF-only) read back exactly; mkudffs 2.50 metadata partition opens") {
+    for (const char* name : {"udf_only", "udf_bridge"}) {
+        const std::string fixture = name;
+        CAPTURE(fixture);
+        auto dev = loadSparseFixture("udffs/" + fixture + ".sparse");
+        std::unique_ptr<fs::Reader> reader;
+        if (fixture == "udf_only") {
+            auto probed = fs::probe(dev);
+            REQUIRE(probed);
+            REQUIRE(*probed);
+            CHECK((*probed)->info().type == fs::FsType::Udf);
+            REQUIRE(fs::has((*probed)->capabilities(), fs::Capability::Read));
+            auto r = (*probed)->openReader();
+            REQUIRE_MESSAGE(r, (r ? std::string() : r.error().toString()));
+            reader = std::move(*r);
+        } else {
+            // The bridge disc probes as ISO 9660; open its UDF side explicitly.
+            auto r = fs::detail::UdfReader::open(dev);
+            REQUIRE_MESSAGE(r, (r ? std::string() : r.error().toString()));
+            reader = std::move(*r);
+        }
+        auto root = reader->root();
+        REQUIRE(root);
+        std::map<std::string, std::pair<char, std::uint64_t>> seen;
+        std::map<std::string, std::string> sha, links;
+        walk(*reader, *root, "", seen, sha, links);
+        const auto o = loadExtOracle(fixture, "udffs");
+        CHECK(seen.size() == o.entries.size());
+        for (const auto& [path, ts] : o.entries) {
+            CAPTURE(path);
+            REQUIRE(seen.count(path));
+            CHECK(seen[path].first == ts.first);
+            if (ts.first == 'f') CHECK(seen[path].second == ts.second);
+        }
+        for (const auto& [path, h] : o.sha) {
+            CAPTURE(path);
+            CHECK(sha[path] == h);
+        }
+        for (const auto& [path, t] : o.links) {
+            CAPTURE(path);
+            CHECK(links[path] == t);
+        }
+        auto hello = fs::resolvePath(*reader, "hello.txt");
+        REQUIRE(hello);
+        CHECK(reader->stat(*hello)->mtime == 1704164645);
+        CHECK_FALSE(fs::resolvePath(*reader, "HELLO.TXT"));
+        CHECK(reader->readdir(*fs::resolvePath(*reader, "many"))->size() == 120);
+        // genisoimage has no UDF symlink support: the links come out as empty files, so readlink refuses.
+        auto link = fs::resolvePath(*reader, "link_short");
+        REQUIRE(link);
+        CHECK_FALSE(reader->readlink(*link));
+    }
+    if (std::filesystem::exists(std::string(STEIN_FIXTURE_DIR) + "/udffs/udf_250_empty.sparse")) {
+        auto dev = loadSparseFixture("udffs/udf_250_empty.sparse");
+        auto probed = fs::probe(dev);
+        REQUIRE(probed);
+        REQUIRE(*probed);
+        CHECK((*probed)->info().type == fs::FsType::Udf);
+        auto r = (*probed)->openReader();
+        REQUIRE_MESSAGE(r, (r ? std::string() : r.error().toString()));
+        auto entries = (*r)->readdir(*(*r)->root());
+        REQUIRE(entries);
+        CHECK(entries->empty());
+        CHECK((*r)->stat(*(*r)->root())->type == fs::FileType::Directory);
     }
 }

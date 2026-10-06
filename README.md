@@ -55,7 +55,7 @@ maps for ext/FAT/exFAT/NTFS/HFS+ (used-block imaging); `.stein` images with
 LZ4, split segments and ChaCha20-Poly1305 encryption (Argon2id key slots);
 qcow2/VHD/VHDX/VMDK/VDI, E01 and DMG containers opened read-only;
 LUKS1/2 unlock; VeraCrypt/TrueCrypt volumes (AES-XTS, SHA-512/SHA-256, hidden volumes); LVM2 linear/striped volumes; file readers for ext2/3/4,
-NTFS, FAT, exFAT, HFS+, ISO 9660, XFS and btrfs, mountable through FUSE on Linux; profile-driven one-button
+NTFS, FAT, exFAT, HFS+, ISO 9660, UDF, XFS and btrfs, mountable through FUSE on Linux; profile-driven one-button
 backup/restore; fake-flash and surface tests. See `doc/reports/` for the detailed status.
 
 Fixtures under `tests/fixtures/` are regenerated with the scripts in

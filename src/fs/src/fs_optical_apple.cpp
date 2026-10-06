@@ -4,6 +4,7 @@
 #include "stein/core/endian.hpp"
 #include "stein/core/strings.hpp"
 #include "stein/fs/iso_reader.hpp"
+#include "stein/fs/udf_reader.hpp"
 #include "stein/layout/gen/iso9660.hpp"
 #include "stein/layout/gen/misc_fs.hpp"
 
@@ -87,6 +88,7 @@ Result detectUdf(Dev dev) {
     auto& info = fs->mutableInfo();
     info.type = FsType::Udf;
     fs->setTreeName("UDF filesystem");
+    fs->setReaderSource(makeUdfReaderSource());
     fs->addRegion(Region{32768, 6 * 2048});
     // Anchor at sector 256 for the common block sizes; then the main volume descriptor sequence.
     for (ByteCount bs : {ByteCount{2048}, ByteCount{512}, ByteCount{1024}, ByteCount{4096}}) {

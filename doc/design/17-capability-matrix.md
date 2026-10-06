@@ -20,7 +20,7 @@ L0 detect/geometry/label/uuid · L1 used-block map · L2 offline metadata edit
 | XFS | **done** | v2 | v1 | x (grow) | x | x | **done** (reader: v4/v5 inodes, extents and bmbt forks, sf/block/leaf/node dirs) | – |
 | btrfs | **done** | v2 | v1 | x | x | x | **done** (reader: chunk map, fs/subvolume trees, inline/regular extents; compression refused) | – |
 | F2FS, JFS, nilfs2, bcachefs, reiser*, minix, ocfs2 | **done** (+erofs, squashfs) | – | v1 (read) | x | x | x | – | – |
-| UDF | **done** | – | v1 | – | – | x | v1 | – |
+| UDF | **done** | – | v1 | – | – | x | **done** (reader: physical/sparable/metadata maps, FE/EFE, inline/short/long ADs, symlinks; VAT v2) | – |
 | ISO9660 | **done** (+Joliet) | v1 (used = everything) | v1 | – | – | – | **done** (reader: Rock Ridge names/links/relocation, Joliet, plain) | – |
 | swap (linux, freebsd) | **done** (linux) | v1 (nothing used) | v1 | v1 (recreate) | – | v1 | – | – |
 | ReFS, ZFS, UFS | **done** (detect; ZFS name/guid) | – | v1 (label) | – | – | – | – | – |
