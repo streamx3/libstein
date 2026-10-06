@@ -209,8 +209,15 @@ public:
         put(prog);
         put(3);
         put(proc);
-        put(0);
-        put(0);   // AUTH_NULL cred
+        // AUTH_SYS credentials like a kernel client: stamp, machine name, uid, gid, no groups.
+        put(1);
+        put(5 * 4 + 8);
+        put(0);          // stamp
+        put(4);          // machine name "test"
+        put(0x74657374u);
+        put(501);        // uid
+        put(20);         // gid
+        put(0);          // gids count
         put(0);
         put(0);   // AUTH_NULL verf
         msg.insert(msg.end(), args.begin(), args.end());

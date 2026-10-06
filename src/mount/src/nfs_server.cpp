@@ -457,10 +457,10 @@ struct NfsServer::Impl {
     std::vector<std::byte> dispatch(std::span<const std::byte> record) {
         XdrReader r(record);
         const std::uint32_t xid = r.u32(), msgType = r.u32(), rpcVers = r.u32(), prog = r.u32(), vers = r.u32(), proc = r.u32();
-        r.skipOpaque();   // cred: flavor + body
-        r.u32();
-        r.skipOpaque();   // verf
-        r.u32();
+        r.u32();          // cred flavor (AUTH_NULL or AUTH_SYS; either is accepted)
+        r.skipOpaque();   // cred body
+        r.u32();          // verf flavor
+        r.skipOpaque();   // verf body
         XdrWriter w;
         w.u32(xid);
         w.u32(1);   // REPLY
