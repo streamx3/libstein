@@ -96,7 +96,8 @@ make_one apfsx "Case-sensitive APFS" rd_apfsx
 
 # --- apfs_snap: two volumes, a snapshot, compressed files ---------------------
 make_snap() {
-  local name=apfs_snap img="$WORK/$name"
+  local name=apfs_snap
+  local img="$WORK/$name"
   if [ -e "$OUT/$name.sparse" ]; then echo "$name: exists, kept (delete it to rebuild)"; return; fi
   hdiutil create -size 96m -fs APFS -volname rd_snap -layout NONE -ov "$img" >/dev/null
   local mnt="$WORK/mnt_$name"; mkdir -p "$mnt"
