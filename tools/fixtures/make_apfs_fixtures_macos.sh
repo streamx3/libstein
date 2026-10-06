@@ -120,10 +120,14 @@ int main(int argc, char** argv) {
 }
 C
   cc -o "$WORK/mksnap" "$WORK/mksnap.c"
-  # fs_snapshot_create is refused on the GitHub runner even as root (EPERM); Time Machine's local
-  # snapshot works there, under its own name (com.apple.TimeMachine.<date>.local).
-  sudo "$WORK/mksnap" "$mnt" stein-snap || tmutil localsnapshot "$mnt" || sudo tmutil localsnapshot "$mnt"
+  # fs_snapshot_create needs an entitlement root does not have on the GitHub runner (EPERM), and
+  # tmutil localsnapshot refuses the image volume there; on a real Mac both work as root. Without
+  # a snapshot the fixture still carries the second volume and the compressed files, and the
+  # snapshot oracle is not written (the test skips the snapshot checks when it is absent).
+  local snapshot_ok=0
+  if sudo "$WORK/mksnap" "$mnt" stein-snap || sudo tmutil localsnapshot "$mnt"; then snapshot_ok=1; else echo "apfs_snap: no snapshot could be created on this machine"; fi
   diskutil apfs listSnapshots "$mnt" || true
+  [ "$snapshot_ok" = 1 ] || rm -f "$OUT/$name.snapshot.oracle.txt"
   # Changes after the snapshot: a deletion, a rewrite, a growth, new files.
   rm "$mnt/tiny.txt"
   printf 'rewritten after the snapshot\n' > "$mnt/dir/upper.txt"

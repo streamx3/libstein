@@ -12,6 +12,7 @@
 #include "stein/fs/f2fs_reader.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -29,7 +30,7 @@ constexpr std::uint32_t kFeatEncrypt = 0x1, kFeatExtraAttr = 0x8, kFeatFlexibleI
 // Checkpoint flags.
 constexpr std::uint32_t kCpCompactSum = 0x4, kCpLargeNatBitmap = 0x400;
 // i_inline.
-constexpr std::uint8_t kInlineXattr = 0x01, kInlineData = 0x02, kInlineDentry = 0x04, kDataExist = 0x08, kExtraAttr = 0x20, kCompressReleased = 0x80;
+constexpr std::uint8_t kInlineXattr = 0x01, kInlineData = 0x02, kInlineDentry = 0x04, kExtraAttr = 0x20, kCompressReleased = 0x80;
 // i_flags and i_advise.
 constexpr std::uint32_t kFlCompr = 0x4, kFlCasefold = 0x40000000u;
 constexpr std::uint8_t kAdviseEncrypt = 0x04;

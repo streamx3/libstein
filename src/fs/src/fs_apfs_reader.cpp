@@ -22,7 +22,7 @@ namespace {
 constexpr std::uint32_t kObjNxSuperblock = 1, kObjBtree = 2, kObjBtreeNode = 3, kObjOmap = 11, kObjFs = 13, kObjTypeMask = 0x0000FFFF;
 constexpr std::uint16_t kBtnodeRoot = 1, kBtnodeLeaf = 2, kBtnodeFixedKv = 4;
 constexpr std::uint32_t kBtreeInfoSize = 40;
-constexpr std::uint8_t kTypeSnapMetadata = 1, kTypeInode = 3, kTypeXattr = 4, kTypeFileExtent = 8, kTypeDirRec = 9, kTypeSnapName = 11;
+constexpr std::uint8_t kTypeSnapMetadata = 1, kTypeInode = 3, kTypeXattr = 4, kTypeFileExtent = 8, kTypeDirRec = 9;
 constexpr std::uint64_t kIncompatCaseInsensitive = 1, kIncompatNormalizationInsensitive = 8, kFsUnencrypted = 1;
 constexpr std::uint32_t kUfCompressed = 0x20;
 constexpr std::uint8_t kXfDstream = 8;
