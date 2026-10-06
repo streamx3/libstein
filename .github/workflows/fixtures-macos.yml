@@ -1,0 +1,20 @@
+name: Fixtures (macOS)
+
+# Manual: builds the HFS+ family of reader fixtures with hdiutil and the native
+# driver, which only macOS has. Download the artifact and commit it under
+# tests/fixtures/hfsfs.
+on:
+  workflow_dispatch:
+
+jobs:
+  hfsplus:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build HFS+ fixtures
+        run: tools/fixtures/make_hfsplus_fixtures_macos.sh out/hfsfs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hfsfs-fixtures
+          path: out/hfsfs
+          if-no-files-found: error
