@@ -131,7 +131,7 @@ Result detectHfs(Dev dev) {
     info.type = FsType::Hfs;
     info.blockSize = mdb.allocBlockSize();
     info.totalBytes = ByteCount{mdb.numAllocBlocks()} * mdb.allocBlockSize();
-    info.usedBytes = ByteCount{mdb.numAllocBlocks() - std::min(mdb.freeBlocks(), mdb.numAllocBlocks())} * mdb.allocBlockSize();
+    info.usedBytes = static_cast<ByteCount>(mdb.numAllocBlocks() - std::min(mdb.freeBlocks(), mdb.numAllocBlocks())) * mdb.allocBlockSize();
     const auto nameLen = std::min<std::size_t>(mdb.volumeNameLen(), 27);
     info.label = asciiField(std::span<const std::byte>(*raw).subspan(0x25, nameLen));
     info.clean = (mdb.attributes() & (1u << 8)) != 0;

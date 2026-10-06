@@ -34,7 +34,7 @@ Result detectExt(Dev dev) {
     const std::uint64_t freeBlocks = sb.freeBlocksCountLo() | (is64 ? (std::uint64_t{sb.freeBlocksCountHi()} << 32) : 0);
     info.version = std::to_string(sb.revLevel()) + "." + std::to_string(sb.minorRevLevel());
     info.label = sb.volumeName();
-    info.uuid = uuidText(raw->data() + gen::ExtSuperblock::kUuidOffset ? std::span<const std::byte>(*raw).subspan(gen::ExtSuperblock::kUuidOffset, 16) : std::span<const std::byte>{});
+    info.uuid = uuidText(std::span<const std::byte>(*raw).subspan(gen::ExtSuperblock::kUuidOffset, 16));
     info.blockSize = bs;
     info.totalBytes = blocks * bs;
     info.usedBytes = (blocks > freeBlocks ? blocks - freeBlocks : 0) * bs;
