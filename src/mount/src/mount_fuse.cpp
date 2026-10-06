@@ -20,6 +20,7 @@
 #endif
 
 #include <atomic>
+#include <cctype>
 #include <cerrno>
 #include <cstring>
 #include <map>
@@ -216,7 +217,14 @@ bool Mount::available() {
 Expected<std::unique_ptr<Mount>> Mount::create(std::unique_ptr<fs::Reader> reader, const std::filesystem::path& mountpoint, const MountOptions& options) {
     if (!reader) return fail(ErrorCategory::InvalidArgument, "no reader");
     std::error_code ec;
+#if defined(_WIN32)
+    // WinFsp mounts on a free drive letter ("X:") or on a directory that does not exist yet.
+    const std::string mp = mountpoint.string();
+    const bool driveLetter = mp.size() == 2 && mp[1] == ':' && std::isalpha(static_cast<unsigned char>(mp[0]));
+    if (!driveLetter && std::filesystem::exists(mountpoint, ec)) return fail(ErrorCategory::InvalidArgument, "mountpoint " + mp + " exists; WinFsp needs a free drive letter or an absent directory");
+#else
     if (!std::filesystem::is_directory(mountpoint, ec)) return fail(ErrorCategory::NotFound, "mountpoint " + mountpoint.string() + " is not a directory");
+#endif
     auto m = std::unique_ptr<Mount>(new Mount());
     m->m_impl = std::make_unique<Impl>();
     m->m_impl->reader = std::move(reader);

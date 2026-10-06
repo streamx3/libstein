@@ -22,7 +22,8 @@ using stein::test::loadSparseFixture;
 namespace {
 // CI sets STEIN_REQUIRE_MOUNT where a backend is expected to work, so a silent skip there is a failure.
 void skipOrFail(const std::string& why) {
-    if (std::getenv("STEIN_REQUIRE_MOUNT")) FAIL(why);
+    const char* require = std::getenv("STEIN_REQUIRE_MOUNT");
+    if (require && *require) FAIL(why);
     else MESSAGE(why);
 }
 } // namespace
