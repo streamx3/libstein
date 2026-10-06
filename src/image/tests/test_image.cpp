@@ -466,3 +466,89 @@ TEST_CASE("encrypted images: locked structure, unlock, wrong passphrase, tamper,
     CHECK(v2bad->chunksBad == 1);
     stein::test::removeTree(dir);
 }
+
+#include "stein/block/file_device.hpp"
+#include "stein/block/sparse_file.hpp"
+#include "stein/image/vdisk.hpp"
+
+TEST_CASE("vdisk: qcow2 (v2/v3/compressed/4K clusters), VHD (dynamic/fixed), VHDX, VMDK (sparse/stream-optimized) and VDI reproduce the raw disk byte for byte") {
+    struct Case { const char* name; image::VdiskFormat format; const char* variant; bool compressed; };
+    const Case cases[] = {
+        {"qcow2", image::VdiskFormat::Qcow2, "v3", false},          {"qcow2_compressed", image::VdiskFormat::Qcow2, "v3", false},
+        {"qcow2_v2", image::VdiskFormat::Qcow2, "v2", false},       {"qcow2_64k", image::VdiskFormat::Qcow2, "v3", false},
+        {"vhd_dynamic", image::VdiskFormat::Vhd, "dynamic", false}, {"vhd_fixed", image::VdiskFormat::Vhd, "fixed", false},
+        {"vhdx", image::VdiskFormat::Vhdx, "dynamic", false},       {"vmdk_sparse", image::VdiskFormat::Vmdk, "monolithicSparse", false},
+        {"vmdk_stream", image::VdiskFormat::Vmdk, "streamOptimized", true}, {"vdi", image::VdiskFormat::Vdi, "dynamic", false},
+    };
+    const auto dir = std::filesystem::temp_directory_path() / ("stein_vdisk_" + std::to_string(std::random_device{}()));
+    std::filesystem::create_directories(dir);
+    for (const auto& c : cases) {
+        const std::string fixture = c.name;
+        CAPTURE(fixture);
+        // Materialise the container (the formats are read by path).
+        auto mem = SparseFile::loadIntoMemory(std::string(STEIN_FIXTURE_DIR) + "/vdisk/" + fixture + ".sparse");
+        REQUIRE(mem);
+        const auto path = dir / (fixture + ".img");
+        {
+            auto out = FileDevice::create(path, (*mem)->size());
+            REQUIRE(out);
+            std::vector<std::byte> buf(1 * MiB);
+            for (ByteCount off = 0; off < (*mem)->size(); off += buf.size()) {
+                const std::size_t n = static_cast<std::size_t>(std::min<ByteCount>(buf.size(), (*mem)->size() - off));
+                REQUIRE((*mem)->readAt(off, std::span<std::byte>(buf).subspan(0, n)));
+                REQUIRE((*out)->writeAt(off, std::span<const std::byte>(buf).subspan(0, n)));
+            }
+            REQUIRE((*out)->flush());
+        }
+        std::map<std::string, std::string> o;
+        {
+            std::ifstream in(std::string(STEIN_FIXTURE_DIR) + "/vdisk/" + fixture + ".oracle.txt");
+            std::string line;
+            while (std::getline(in, line))
+                if (auto eq = line.find('='); eq != std::string::npos) o[line.substr(0, eq)] = line.substr(eq + 1);
+        }
+        auto fmt = image::detectVdiskFormat(path);
+        REQUIRE(fmt);
+        CHECK(*fmt == c.format);
+        image::VdiskInfo info;
+        auto dev = image::openVdisk(path, &info);
+        REQUIRE_MESSAGE(dev, (dev ? std::string() : dev.error().toString()));
+        CHECK(info.format == c.format);
+        CHECK(info.variant == c.variant);
+        CHECK(info.compressed == c.compressed);
+        const ByteCount rawSize = std::stoull(o["raw_size"]);
+        CHECK((*dev)->size() >= rawSize);
+        if (fixture != "vhd_dynamic" && fixture != "vhd_fixed") CHECK((*dev)->size() == std::stoull(o["virtual_size"]));
+        CHECK((*dev)->isReadOnly());
+        // Whole-disk hash equals the raw source.
+        std::vector<std::byte> all(static_cast<std::size_t>(rawSize));
+        std::vector<std::byte> chunk(1 * MiB);
+        for (ByteCount off = 0; off < rawSize; off += chunk.size()) {
+            const std::size_t n = static_cast<std::size_t>(std::min<ByteCount>(chunk.size(), rawSize - off));
+            REQUIRE((*dev)->readAt(off, std::span<std::byte>(all).subspan(static_cast<std::size_t>(off), n)));
+        }
+        CHECK(Hasher::hex(Hasher::digest(HashAlgorithm::Sha256, all)) == o["sha256"]);
+        // Odd-sized reads across unit boundaries agree with the sequential read.
+        std::mt19937_64 rng(42);
+        for (int i = 0; i < 40; ++i) {
+            const ByteCount off = rng() % (rawSize - 300000);
+            const std::size_t n = 1 + static_cast<std::size_t>(rng() % 299999);
+            std::vector<std::byte> win(n);
+            REQUIRE((*dev)->readAt(off, win));
+            CHECK(std::memcmp(win.data(), all.data() + off, n) == 0);
+        }
+        // The disk inside: GPT with two partitions, ext2 on the second.
+        auto tree = probe::probe(*dev);
+        REQUIRE(tree);
+        REQUIRE(tree->table);
+        CHECK(tree->table->partitions().size() == 2);
+        REQUIRE(tree->children.size() >= 2);
+        const auto* ext = tree->children[1].content.get();
+        REQUIRE(ext);
+        CHECK(ext->info().label == "inside_vdisk");
+        CHECK_FALSE((*dev)->writeAt(0, std::span<const std::byte>(chunk).subspan(0, 512)));
+        mem->reset();
+    }
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}

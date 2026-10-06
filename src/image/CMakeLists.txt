@@ -3,6 +3,7 @@ stein_add_module(image
     src/stein_format.cpp
     src/copy.cpp
     src/operations.cpp
+    src/vdisk.cpp
   PUBLIC_DEPS stein::core stein::block stein::probe)
 
 stein_add_test(test_image

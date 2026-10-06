@@ -1,0 +1,6 @@
+format=vmdk
+virtual_size=25165824
+raw_size=25165824
+sha256=230bd6fd228b6917018c9fbe3aee81bee0c138be1fb99da79caf8a0063e1d47e
+cluster_size=65536
+create_type=streamOptimized

@@ -271,3 +271,30 @@ TEST_CASE("sha512, hmac-sha512 and pbkdf2-hmac-sha512 vectors") {
     crypto::pbkdf2Sha256(bytes("pw"), bytes("salt"), 100, b);
     CHECK(a == b);
 }
+
+#include "inflate_vectors.hpp"
+#include "stein/core/inflate.hpp"
+
+TEST_CASE("inflate: stored, fixed and dynamic blocks, raw/zlib/gzip wrappers, truncation and small buffers") {
+    for (const auto& v : test::vectors::kInflate) {
+        CAPTURE(v.name);
+        auto comp = hexBytes(v.compressedHex);
+        std::vector<std::byte> out(v.plainLength);
+        const std::string kind = v.kind;
+        auto n = kind == "raw" ? compress::inflateRaw(comp, out) : kind == "gzip" ? compress::inflateGzip(comp, out) : compress::inflateZlib(comp, out);
+        REQUIRE_MESSAGE(n, (n ? std::string() : n.error().toString()));
+        CHECK(*n == v.plainLength);
+        CHECK(Hasher::hex(Hasher::digest(HashAlgorithm::Sha256, out)) == v.plainSha256);
+        // Too small an output buffer is OutOfRange, a truncated stream InvalidFormat.
+        std::vector<std::byte> small(v.plainLength / 2);
+        auto s = kind == "raw" ? compress::inflateRaw(comp, small) : kind == "gzip" ? compress::inflateGzip(comp, small) : compress::inflateZlib(comp, small);
+        REQUIRE_FALSE(s);
+        CHECK(s.error().category() == ErrorCategory::OutOfRange);
+        auto cut = std::span<const std::byte>(comp).subspan(0, comp.size() / 2);
+        auto t = kind == "raw" ? compress::inflateRaw(cut, out) : kind == "gzip" ? compress::inflateGzip(cut, out) : compress::inflateZlib(cut, out);
+        CHECK_FALSE(t);
+    }
+    // Adler-32 of "Wikipedia" (RFC 1950 example value).
+    const std::string w = "Wikipedia";
+    CHECK(compress::adler32(std::span<const std::byte>(reinterpret_cast<const std::byte*>(w.data()), w.size())) == 0x11E60398u);
+}

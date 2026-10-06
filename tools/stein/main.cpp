@@ -23,6 +23,7 @@
 #include "stein/fs/filesystem.hpp"
 #include "stein/app/scenario.hpp"
 #include "stein/image/operations.hpp"
+#include "stein/image/vdisk.hpp"
 #include "stein/mount/mount.hpp"
 #include "stein/ops/media_test.hpp"
 #include "stein/ops/stack.hpp"
@@ -224,6 +225,18 @@ Expected<std::shared_ptr<BlockDevice>> openImage(const std::string& path, bool w
     std::error_code ec;
     if (platform::isDevicePath(path)) return platform::openAny(path, writable ? platform::OpenMode::ReadWrite : platform::OpenMode::ReadOnly, ss);
     if (!writable && std::filesystem::is_regular_file(path, ec) && image::SteinReader::looksLikeStein(path)) return image::openImage(path, g_passphrase);
+    // qcow2 / VHD / VHDX / VMDK / VDI containers open read-only as the disk they describe.
+    if (std::filesystem::is_regular_file(path, ec)) {
+        auto fmt = image::detectVdiskFormat(path);
+        if (fmt && *fmt != image::VdiskFormat::Raw && *fmt != image::VdiskFormat::Stein) {
+            if (writable) return fail(ErrorCategory::Permission, path + " is a " + std::string(image::toString(*fmt)) + " container; stein opens those read-only");
+            image::VdiskInfo vi;
+            auto dev = image::openVdisk(path, &vi);
+            if (!dev) return dev;
+            for (const auto& n : vi.notes) std::fprintf(stderr, "note: %s: %s\n", path.c_str(), n.c_str());
+            return dev;
+        }
+    }
     // Split raw sets (disk.img.000, .001, ...) open as one device, by any member or the prefix.
     if (!std::filesystem::is_block_file(path, ec) && image::findSplitRaw(path)) return image::openSplitRaw(path, writable, ss);
     return platform::openAny(path, writable ? platform::OpenMode::ReadWrite : platform::OpenMode::ReadOnly, ss);

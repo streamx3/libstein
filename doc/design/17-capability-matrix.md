@@ -59,11 +59,12 @@ L0 detect/geometry/label/uuid · L1 used-block map · L2 offline metadata edit
 | raw / split raw | **done** (raw) | **done** (raw) | **done** (raw) | split raw: v1 |
 | `.stein` | **done** | **done** | **done** | spec in `doc/spec/stein-image-v1.md`; encryption/zstd later |
 | E01/EWF | v2 | v2 | v2 | |
-| VHD (fixed/dynamic) | v2 | v2 | v2 | fixed VHD = raw + footer → native Windows attach |
-| VHDX | v2 | v3 | v2 | |
-| qcow2 | v2 | v3 | v2 | |
-| VMDK | v2 | – | v2 | |
+| VHD (fixed/dynamic) | **done** | v2 | **done** | differencing v2; fixed VHD = raw + footer → native Windows attach |
+| VHDX | **done** (dynamic; log must be clean) | v3 | **done** | differencing v2 |
+| qcow2 | **done** (v2/v3, deflate-compressed clusters) | v3 | **done** | backing files, zstd, subclusters v2 |
+| VMDK | **done** (sparse, stream-optimized, multi-extent descriptors) | – | **done** | snapshot chains v2 |
 | DMG/UDIF | v2 | – | v2 | zlib/bzip2/ADC/lzfse |
+| VDI | **done** (dynamic/fixed) | – | **done** | undo/differencing v2 |
 | partclone/Clonezilla | v3 | – | v3 | |
 
 ## Mount backends (stein_mount)
