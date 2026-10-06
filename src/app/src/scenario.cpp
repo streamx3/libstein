@@ -163,6 +163,7 @@ Expected<ScenarioResult> backup(const Profile& profile, const RunOptions& option
     co.compression = profile.image.compression;
     co.chunkSize = profile.image.chunkSize;
     co.splitSize = profile.image.splitSize;
+    co.usedBlocksOnly = profile.image.usedOnly;
     co.sourceName = t->disk.model.empty() ? t->disk.osPath : t->disk.model + " (" + t->disk.osPath + ")";
     co.sourceIdentity = t->isFile ? std::string() : t->disk.identity();
     co.notes = "profile: " + profile.name;
@@ -179,6 +180,8 @@ Expected<ScenarioResult> backup(const Profile& profile, const RunOptions& option
     }
     create.addDetail("stored", formatSize(created->storedBytes));
     create.addDetail("read", formatSize(created->stats.bytesRead));
+    if (created->stats.freeBytesSkipped) create.addDetail("free space skipped", formatSize(created->stats.freeBytesSkipped));
+    for (const auto& n : created->allocationNotes) create.addLine("allocation: " + n);
     if (created->stats.unreadableSectors) create.addDetail("unreadable sectors", std::to_string(created->stats.unreadableSectors));
     create.finish(created->stats.unreadableSectors ? ReportStatus::Warning : ReportStatus::Success);
     r.created = *created;

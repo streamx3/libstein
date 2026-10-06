@@ -101,6 +101,7 @@ Expected<Profile> Profile::fromJson(const json::Value& v) {
     auto split = parseBytes(im.get("split_size"), 0);
     if (!split) return fail(split.error());
     p.image.splitSize = *split;
+    p.image.usedOnly = im.get("used_only").asBool(true);
     const auto& po = v.get("policy");
     p.policy.lockTarget = po.get("lock_target").asBool(true);
     p.policy.requireElevated = po.get("require_elevated").asBool(false);
@@ -138,6 +139,7 @@ json::Value Profile::toJson() const {
     im.set("compression", std::string(image::toString(image.compression)));
     im.set("chunk_size", static_cast<std::uint64_t>(image.chunkSize));
     im.set("split_size", image.splitSize);
+    im.set("used_only", image.usedOnly);
     v.set("image", std::move(im));
     json::Value po = json::Value::object();
     po.set("lock_target", policy.lockTarget);

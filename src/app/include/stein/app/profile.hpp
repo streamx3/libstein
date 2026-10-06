@@ -46,6 +46,7 @@ struct ImageSpec {
     image::Compression compression = image::Compression::Lz4;
     std::uint32_t chunkSize = 4 * MiB;
     ByteCount splitSize = 0;
+    bool usedOnly = true;              // skip free space of filesystems with readable allocation bitmaps
 };
 
 struct Policy {

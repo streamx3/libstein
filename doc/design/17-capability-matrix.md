@@ -10,11 +10,11 @@ L0 detect/geometry/label/uuid · L1 used-block map · L2 offline metadata edit
 
 | FS | L0 | L1 | L2 label/uuid | L2 resize | L2 check | L2 create | L3 | L4 |
 |---|---|---|---|---|---|---|---|---|
-| ext2/3/4 | **done** | v1 | v1 | v2 (x in v1) | v2 (x in v1) | v1 | v1 | v2 |
-| FAT12/16/32 | **done** | v1 | v1 | v2 (FAT32 only, cluster-count rules) | v1 (FreeBSD fsck_msdosfs port) | v1 | v1 | v1 |
-| exFAT | **done** | v1 | v1 | v2 | v2 | v1 | v1 | v1 |
-| NTFS | **done** | v1 | v1 | v3 (x in v1) | – (x) | v2 (x in v1) | v1 | v3 |
-| HFS+ / HFSX | **done** | v1 | v1 | v3 | – | v2 | v2 | v3 |
+| ext2/3/4 | **done** | **done** (allocation map; used-only imaging) | v1 | v2 (x in v1) | v2 (x in v1) | v1 | v1 | v2 |
+| FAT12/16/32 | **done** | **done** (allocation map; used-only imaging) | v1 | v2 (FAT32 only, cluster-count rules) | v1 (FreeBSD fsck_msdosfs port) | v1 | v1 | v1 |
+| exFAT | **done** | **done** (allocation map; used-only imaging) | v1 | v2 | v2 | v1 | v1 | v1 |
+| NTFS | **done** | **done** (allocation map; used-only imaging) | v1 | v3 (x in v1) | – (x) | v2 (x in v1) | v1 | v3 |
+| HFS+ / HFSX | **done** | **done** (allocation map; used-only imaging) | v1 | v3 | – | v2 | v2 | v3 |
 | HFS (classic) | **done** (incl. wrapper) | – | v1 | – | – | – | – | – |
 | APFS (container + volumes) | **done** (container) | v2 | v1 (name) | – | – | – | v2 | – |
 | XFS | **done** | v2 | v1 | x (grow) | x | x | v2 | – |

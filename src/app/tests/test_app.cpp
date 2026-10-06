@@ -279,3 +279,39 @@ TEST_CASE("scenarios: backup, status, restore and verify on a file target") {
     CHECK(refused.error().category() == ErrorCategory::OutOfRange);
     stein::test::removeTree(dir);
 }
+
+TEST_CASE("scenarios: used-only backup through a profile skips free space") {
+    auto dir = tmpDir("stein_test_app_used");
+    auto src = loadSparseFixture("alloc/ext4.sparse");
+    const auto diskPath = dir / "ext4.img";
+    {
+        std::ofstream out(diskPath, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(src->bytes().data()), static_cast<std::streamsize>(src->bytes().size()));
+    }
+    app::Profile p;
+    p.name = "used";
+    p.target.osPath = diskPath.string();
+    p.target.allowVirtual = true;
+    p.image.path = dir / "ext4.stein";
+    p.image.chunkSize = 256 * KiB;
+    REQUIRE(p.validate());
+    NullProgressSink sink;
+    Progress progress(sink);
+    auto b = app::backup(p, app::RunOptions{}, progress);
+    REQUIRE_MESSAGE(b, (b ? std::string() : b.error().toString()));
+    REQUIRE(b->created);
+    CHECK(b->created->stats.freeBytesSkipped > 32 * MiB);
+    CHECK(b->report.toText().find("allocation: ext4") != std::string::npos);
+    auto info = image::imageInfo(p.image.path);
+    REQUIRE(info);
+    CHECK(info->manifest.get("used_blocks_only").asBool());
+    // The profile round-trips the flag, and turning it off is honoured.
+    CHECK(app::Profile::fromJson(p.toJson())->image.usedOnly);
+    p.image.usedOnly = false;
+    p.image.path = dir / "whole.stein";
+    auto w = app::backup(p, app::RunOptions{}, progress);
+    REQUIRE(w);
+    CHECK(w->created->stats.freeBytesSkipped == 0);
+    CHECK_FALSE(image::imageInfo(p.image.path)->manifest.has("used_blocks_only"));
+    stein::test::removeTree(dir);
+}
