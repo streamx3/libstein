@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "stein/pt/partition_table.hpp"
 
+#include "stein/pt/apm_table.hpp"
 #include "stein/pt/gpt_table.hpp"
 #include "stein/pt/mbr_table.hpp"
 
@@ -75,6 +76,12 @@ Expected<std::unique_ptr<PartitionTable>> PartitionTable::read(BlockDevicePtr de
         if (gpt.error().category() != ErrorCategory::NotFound) return fail(gpt.error());
         notes += "gpt: " + gpt.error().message() + "; ";
     }
+    if (options.tryApm) {
+        auto apm = ApmTable::read(device);
+        if (apm) return std::unique_ptr<PartitionTable>(std::move(*apm));
+        if (apm.error().category() != ErrorCategory::NotFound) return fail(apm.error());
+        notes += "apm: " + apm.error().message() + "; ";
+    }
     if (options.tryMbr) {
         auto mbr = MbrTable::read(device);
         if (mbr) return std::unique_ptr<PartitionTable>(std::move(*mbr));
@@ -88,6 +95,7 @@ Expected<std::unique_ptr<PartitionTable>> PartitionTable::createEmpty(TableType 
     switch (type) {
     case TableType::Gpt: return std::unique_ptr<PartitionTable>(GptTable::createEmpty(geometry));
     case TableType::Mbr: return std::unique_ptr<PartitionTable>(MbrTable::createEmpty(geometry));
+    case TableType::Apm: return std::unique_ptr<PartitionTable>(ApmTable::createEmpty(geometry));
     case TableType::None: return std::unique_ptr<PartitionTable>(std::make_unique<NoPartitionTable>(geometry));
     default: return fail(ErrorCategory::Unsupported, std::string("cannot create a ") + std::string(toString(type)) + " table yet");
     }

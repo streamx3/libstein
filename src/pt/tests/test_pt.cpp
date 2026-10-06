@@ -3,6 +3,7 @@
 #include "stein_test.hpp"
 
 #include "stein/core/crc32.hpp"
+#include "stein/pt/apm_table.hpp"
 #include "stein/pt/gpt_table.hpp"
 #include "stein/pt/mbr_table.hpp"
 #include "stein/pt/partition_table.hpp"
@@ -393,10 +394,85 @@ TEST_CASE("MBR: create with logicals, write, read back") {
     CHECK(std::to_integer<int>((*s0)[3]) == 0);
 }
 
+TEST_CASE("APM: read parted fixture, round trip, create") {
+    auto dev = loadSparseFixture("pt/apm_basic.sparse");
+    REQUIRE(dev);
+    auto table = PartitionTable::read(dev);
+    REQUIRE(table);
+    CHECK((*table)->type() == TableType::Apm);
+    auto* apm = dynamic_cast<ApmTable*>(table->get());
+    REQUIRE(apm);
+    CHECK(apm->health() <= Validity::Info);
+    CHECK(apm->mapBlockSize() == 512);
+    CHECK(apm->mapEntries() == 5);
+    CHECK(apm->mapBlocks() == 63);
+    CHECK(apm->firstUsableLba() == 64);
+    // mmls oracle: Apple_HFS 2048..10239 "Data" (slot 2), Apple_UNIX_SVR2 10240..18431 "primary" (slot 3)
+    REQUIRE(apm->partitions().size() == 2);
+    CHECK(apm->partitions()[0].index == 2);
+    CHECK(apm->partitions()[0].firstLba == 2048);
+    CHECK(apm->partitions()[0].lastLba == 10239);
+    CHECK(apm->partitions()[0].type.apmType == "Apple_HFS");
+    CHECK(apm->partitions()[0].name == "Data");
+    CHECK(apm->partitions()[0].attributes == 0x7F);
+    CHECK(apm->partitions()[1].type.apmType == "Apple_UNIX_SVR2");
+    CHECK(apm->partitions()[1].name == "primary");
+    auto freeR = apm->freeRegions();
+    REQUIRE(freeR.size() == 2);
+    CHECK(freeR[0].firstLba == 64);
+    CHECK(freeR[0].lastLba == 2047);
+    CHECK(freeR[1].firstLba == 18432);
+    CHECK(apm->metadataRegions().size() == 1);
+    CHECK(apm->metadataRegions()[0].length == 64 * 512);
+    auto tree = apm->describe();
+    CHECK(tree.children.size() == 6);   // Block0 + 5 entries
+    CHECK(tree.child("map entry 1")->child("pm_par_type")->pretty == "the partition map itself");
+    CHECK(tree.child("map entry 2")->child("pm_part_status")->pretty.find("valid|allocated|in_use") == 0);
+
+    // Write round trip: our writer regenerates the map; re-read must give the same partitions.
+    auto copy = std::make_shared<MemoryDevice>(dev->size(), 512);
+    REQUIRE(apm->write(*copy));
+    auto back = ApmTable::read(copy);
+    REQUIRE(back);
+    REQUIRE((*back)->partitions().size() == 2);
+    CHECK((*back)->partitions()[0].firstLba == 2048);
+    CHECK((*back)->partitions()[1].lastLba == 18431);
+    CHECK((*back)->partitions()[0].name == "Data");
+    CHECK((*back)->health() <= Validity::Info);
+    // Entry 1 (the map) and the partition entries must match parted's bytes in the fields that matter.
+    CHECK(*copy->read(512, 16) == *dev->read(512, 16));
+    CHECK(*copy->read(1024 + 8, 8) == *dev->read(1024 + 8, 8));   // start/count of partition 2
+
+    // Create from scratch.
+    Geometry geo{.sizeBytes = 32 * MiB, .logicalSectorSize = 512};
+    auto fresh = ApmTable::createEmpty(geo, 63);
+    CHECK(fresh->firstUsableLba() == 64);
+    Partition p;
+    p.firstLba = 64;
+    p.lastLba = 64 + 8192 - 1;
+    p.type = PartitionType::apm("Apple_HFS");
+    p.name = "Macintosh HD";
+    REQUIRE(fresh->addPartition(p));
+    CHECK(fresh->partitions()[0].index == 2);
+    Partition bad = p;
+    bad.index = 0;
+    bad.type = PartitionType::apm("Apple_Free");
+    CHECK(!fresh->addPartition(bad));
+    auto d2 = std::make_shared<MemoryDevice>(geo.sizeBytes, 512);
+    REQUIRE(fresh->write(*d2));
+    auto r2 = PartitionTable::read(d2);
+    REQUIRE(r2);
+    CHECK((*r2)->type() == TableType::Apm);
+    CHECK((*r2)->partitions().size() == 1);
+    CHECK((*r2)->partitions()[0].name == "Macintosh HD");
+    CHECK((*r2)->health() <= Validity::Info);
+}
+
 TEST_CASE("PartitionTable::createEmpty dispatch") {
     Geometry geo{.sizeBytes = 8 * MiB, .logicalSectorSize = 512};
     CHECK((*PartitionTable::createEmpty(TableType::Gpt, geo))->type() == TableType::Gpt);
     CHECK((*PartitionTable::createEmpty(TableType::Mbr, geo))->type() == TableType::Mbr);
     CHECK((*PartitionTable::createEmpty(TableType::None, geo))->type() == TableType::None);
-    CHECK(PartitionTable::createEmpty(TableType::Apm, geo).error().category() == ErrorCategory::Unsupported);
+    CHECK((*PartitionTable::createEmpty(TableType::Apm, geo))->type() == TableType::Apm);
+    CHECK(PartitionTable::createEmpty(TableType::Sun, geo).error().category() == ErrorCategory::Unsupported);
 }

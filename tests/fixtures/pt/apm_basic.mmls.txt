@@ -1,0 +1,12 @@
+MAC Partition Map
+Offset Sector: 0
+Units are in 512-byte sectors
+
+      Slot      Start        End          Length       Description
+000:  -------   0000000000   0000000000   0000000001   Unallocated
+001:  000       0000000001   0000000063   0000000063   Apple_partition_map
+002:  Meta      0000000001   0000000005   0000000005   Table
+003:  003       0000000064   0000002047   0000001984   Apple_Free
+004:  001       0000002048   0000010239   0000008192   Apple_HFS
+005:  002       0000010240   0000018431   0000008192   Apple_UNIX_SVR2
+006:  004       0000018432   0000032767   0000014336   Apple_Free

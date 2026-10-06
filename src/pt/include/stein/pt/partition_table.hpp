@@ -69,6 +69,7 @@ struct RepairOptions {
 
 struct ReadOptions {
     bool tryGpt = true;
+    bool tryApm = true;
     bool tryMbr = true;
 };
 
@@ -109,7 +110,7 @@ public:
     Expected<void> validatePlacement(const Partition& candidate, std::optional<std::uint32_t> ignoreIndex) const;
 
     // Detects the scheme and parses it. Never fails for "no table": that returns
-    // a NoPartitionTable. Fails only on I/O errors.
+    // a NoPartitionTable. Fails only on I/O errors. Order: GPT, APM, MBR.
     static Expected<std::unique_ptr<PartitionTable>> read(BlockDevicePtr device, ReadOptions options = {});
     static Expected<std::unique_ptr<PartitionTable>> createEmpty(TableType type, const Geometry& geometry);
 };

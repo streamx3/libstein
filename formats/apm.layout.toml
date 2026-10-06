@@ -1,0 +1,46 @@
+# Apple Partition Map — Inside Macintosh: Devices, "SCSI Manager" (Block0 and Partition map
+# entry record). Big-endian. Block 0 is the Driver Descriptor Map; map entries start at block 1,
+# one per block, and the map describes itself (an Apple_partition_map entry).
+
+[apm_block0]
+doc = "Driver Descriptor Map (block 0)"
+size = 32
+endian = "be"
+fields = [
+  { name = "sb_sig",        offset = 0x00, type = "ascii", size = 2, expect = "ER", doc = "Signature 0x4552" },
+  { name = "sb_blk_size",   offset = 0x02, type = "u16", enum = { "512" = "512", "1024" = "1024", "2048" = "2048", "4096" = "4096" }, doc = "Block size of the device the map was written for" },
+  { name = "sb_blk_count",  offset = 0x04, type = "u32", doc = "Number of blocks on the device" },
+  { name = "sb_dev_type",   offset = 0x08, type = "u16" },
+  { name = "sb_dev_id",     offset = 0x0A, type = "u16" },
+  { name = "sb_data",       offset = 0x0C, type = "u32" },
+  { name = "sb_drvr_count", offset = 0x10, type = "u16", doc = "Number of driver descriptors that follow" },
+  { name = "dd_block",      offset = 0x12, type = "u32", doc = "First driver: starting block" },
+  { name = "dd_size",       offset = 0x16, type = "u16", doc = "First driver: size in 512-byte blocks" },
+  { name = "dd_type",       offset = 0x18, type = "u16", doc = "First driver: OS type (1 = Mac OS)" },
+  { name = "pad",           offset = 0x1A, type = "bytes", size = 6 },
+]
+
+[apm_entry]
+doc = "Partition map entry (one per block from block 1)"
+size = 136
+endian = "be"
+fields = [
+  { name = "pm_sig",          offset = 0x00, type = "ascii", size = 2, expect = "PM", doc = "Signature 0x504D" },
+  { name = "pm_sig_pad",      offset = 0x02, type = "u16" },
+  { name = "pm_map_blk_cnt",  offset = 0x04, type = "u32", nonzero = true, doc = "Number of entries in the map (same in every entry)" },
+  { name = "pm_py_part_start",offset = 0x08, type = "u32", doc = "First physical block of the partition" },
+  { name = "pm_part_blk_cnt", offset = 0x0C, type = "u32", nonzero = true, doc = "Number of blocks in the partition" },
+  { name = "pm_part_name",    offset = 0x10, type = "ascii", size = 32, doc = "Partition name" },
+  { name = "pm_par_type",     offset = 0x30, type = "ascii", size = 32, doc = "Apple_HFS, Apple_APFS, Apple_UFS, Apple_Free, Apple_partition_map, Apple_Driver43, Apple_Boot..." },
+  { name = "pm_lg_data_start",offset = 0x50, type = "u32", doc = "First logical block of the data area" },
+  { name = "pm_data_cnt",     offset = 0x54, type = "u32", doc = "Number of blocks in the data area" },
+  { name = "pm_part_status",  offset = 0x58, type = "bits32", bits = { "0" = "valid", "1" = "allocated", "2" = "in_use", "3" = "boot_info", "4" = "readable", "5" = "writable", "6" = "boot_code_pic", "7" = "unused", "8" = "chain_compatible", "9" = "real_device", "10" = "chain_present", "30" = "automount", "31" = "startup" } },
+  { name = "pm_lg_boot_start",offset = 0x5C, type = "u32" },
+  { name = "pm_boot_size",    offset = 0x60, type = "u32" },
+  { name = "pm_boot_addr",    offset = 0x64, type = "u32" },
+  { name = "pm_boot_addr2",   offset = 0x68, type = "u32" },
+  { name = "pm_boot_entry",   offset = 0x6C, type = "u32" },
+  { name = "pm_boot_entry2",  offset = 0x70, type = "u32" },
+  { name = "pm_boot_cksum",   offset = 0x74, type = "u32" },
+  { name = "pm_processor",    offset = 0x78, type = "ascii", size = 16, doc = "powerpc, 68000" },
+]

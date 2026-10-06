@@ -13,8 +13,10 @@ partition on Windows or macOS), disk images that can be split, compressed,
 verified and mounted anywhere, and proper GPT repair.
 
 Status: milestone M1 in progress. Core types, block devices, the
-manifest-driven structure layer, and GPT/MBR partition tables with
-diagnostics and repair are implemented and tested; see
+manifest-driven structure layer, GPT/MBR partition tables with diagnostics
+and repair, detection of 35 filesystem/container formats, the topology
+probe, the Linux platform layer and the `.stein` imaging format are
+implemented and tested; see
 [`doc/reports/`](doc/reports/) for progress and [`doc/README.md`](doc/README.md)
 for the design.
 
@@ -28,7 +30,13 @@ recommended, `ccache` used automatically when present.
 cmake --preset debug      # or: release, ci, mono
 cmake --build --preset debug
 ctest --preset debug
-./build/debug/tools/stein/stein probe some-disk.img
+./build/debug/tools/stein/stein list                      # disks (Linux)
+./build/debug/tools/stein/stein probe /dev/sdb            # table, partitions, filesystems
+./build/debug/tools/stein/stein inspect /dev/sdb --doc    # every header field, annotated
+./build/debug/tools/stein/stein repair disk.img --dry-run # GPT: rebuild a lost copy
+./build/debug/tools/stein/stein image create /dev/sdb backup.stein --compress lz4
+./build/debug/tools/stein/stein probe backup.stein        # an image is a disk
+./build/debug/tools/stein/stein image restore backup.stein /dev/sdc
 ```
 
 Fixtures under `tests/fixtures/` are regenerated with

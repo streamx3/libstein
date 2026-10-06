@@ -4,6 +4,7 @@ stein_add_module(pt
     src/partition_table.cpp
     src/gpt_table.cpp
     src/mbr_table.cpp
+    src/apm_table.cpp
   PUBLIC_DEPS stein::core stein::block stein::layout)
 
 stein_add_test(test_pt

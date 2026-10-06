@@ -56,8 +56,8 @@ L0 detect/geometry/label/uuid · L1 used-block map · L2 offline metadata edit
 
 | Format | read | write | mount via `ImageDevice` | notes |
 |---|---|---|---|---|
-| raw / split raw | v1 | v1 | v1 | |
-| `.stein` | v1 | v1 | v1 | see `14-imaging.md` |
+| raw / split raw | **done** (raw) | **done** (raw) | **done** (raw) | split raw: v1 |
+| `.stein` | **done** | **done** | **done** | spec in `doc/spec/stein-image-v1.md`; encryption/zstd later |
 | E01/EWF | v2 | v2 | v2 | |
 | VHD (fixed/dynamic) | v2 | v2 | v2 | fixed VHD = raw + footer → native Windows attach |
 | VHDX | v2 | v3 | v2 | |

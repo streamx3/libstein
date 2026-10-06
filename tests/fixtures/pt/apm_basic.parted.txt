@@ -1,0 +1,5 @@
+BYT;
+/tmp/claude-0/-home-user-libstein/8dd51936-c756-5ab7-bdf1-4196bfbb50b9/scratchpad/apm.img:32768s:file:512:512:mac::;
+1:1s:63s:63s::Macintosh:;
+2:2048s:10239s:8192s::Data:;
+3:10240s:18431s:8192s::primary:;
