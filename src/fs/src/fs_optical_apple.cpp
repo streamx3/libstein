@@ -3,6 +3,7 @@
 #include "detectors.hpp"
 #include "stein/core/endian.hpp"
 #include "stein/core/strings.hpp"
+#include "stein/fs/iso_reader.hpp"
 #include "stein/layout/gen/iso9660.hpp"
 #include "stein/layout/gen/misc_fs.hpp"
 
@@ -66,6 +67,7 @@ Result detectIso9660(Dev dev) {
         }
     }
     fs->addRegion(Region{kPvd, end - kPvd});
+    fs->setReaderSource(makeIsoReaderSource());
     return std::unique_ptr<FileSystem>(std::move(fs));
 }
 

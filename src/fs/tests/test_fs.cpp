@@ -567,3 +567,64 @@ TEST_CASE("hfsplus reader: hdiutil fixtures (HFS+, HFSX, journaled) read back ex
         CHECK(st->size == 5);
     }
 }
+
+TEST_CASE("iso9660 reader: genisoimage fixtures read back exactly (Rock Ridge names/links/relocation, Joliet, plain 8.3)") {
+    const char* names[] = {"iso_rr", "iso_joliet", "iso_plain"};
+    for (const char* name : names) {
+        const std::string fixture = name;
+        CAPTURE(fixture);
+        auto dev = loadSparseFixture("isofs/" + fixture + ".sparse");
+        auto probed = fs::probe(dev);
+        REQUIRE(probed);
+        REQUIRE(*probed);
+        CHECK((*probed)->info().type == fs::FsType::Iso9660);
+        REQUIRE(fs::has((*probed)->capabilities(), fs::Capability::Read));
+        auto reader = (*probed)->openReader();
+        REQUIRE_MESSAGE(reader, (reader ? std::string() : reader.error().toString()));
+        const bool rr = fixture == "iso_rr";
+        CHECK((*reader)->caseSensitive() == rr);
+        auto root = (*reader)->root();
+        REQUIRE(root);
+        std::map<std::string, std::pair<char, std::uint64_t>> seen;
+        std::map<std::string, std::string> sha, links;
+        walk(**reader, *root, "", seen, sha, links);
+        const auto o = loadExtOracle(fixture, "isofs");
+        CHECK(seen.size() == o.entries.size());
+        for (const auto& [path, ts] : o.entries) {
+            CAPTURE(path);
+            REQUIRE(seen.count(path));
+            CHECK(seen[path].first == ts.first);
+            if (ts.first == 'f') CHECK(seen[path].second == ts.second);
+        }
+        for (const auto& [path, h] : o.sha) {
+            CAPTURE(path);
+            CHECK(sha[path] == h);
+        }
+        for (const auto& [path, t] : o.links) {
+            CAPTURE(path);
+            CHECK(links[path] == t);
+        }
+        if (rr) {
+            auto hl = fs::resolvePath(**reader, "hardlink.txt");
+            REQUIRE(hl);
+            CHECK((*reader)->stat(*hl)->nlink == 2);
+            CHECK((*reader)->stat(*hl)->mtime == 1704164645);   // Rock Ridge TF
+            CHECK(*fs::resolvePath(**reader, "link_short") == *fs::resolvePath(**reader, "hello.txt"));
+            CHECK_FALSE(fs::resolvePath(**reader, "DIR/UPPER.TXT"));
+            auto deep = fs::resolvePath(**reader, "a/b/c/d/e/f/g/h/i/deep.txt");   // through the CL relocation
+            REQUIRE(deep);
+            CHECK((*reader)->stat(*deep)->size == 24);
+        } else {
+            const char* upper = fixture == "iso_plain" ? "dir/upper.txt" : "DIR/UPPER.TXT";
+            const char* stored = fixture == "iso_plain" ? "DIR/UPPER.TXT" : "dir/upper.txt";
+            CHECK(*fs::resolvePath(**reader, upper) == *fs::resolvePath(**reader, stored));
+        }
+        CHECK(*fs::resolvePath(**reader, "dir/nested/deep/../deep") == *fs::resolvePath(**reader, "dir/nested/deep"));
+        // A stat without a prior listing re-parses the record in place.
+        auto fresh = (*probed)->openReader();
+        REQUIRE(fresh);
+        auto hello = fs::resolvePath(**reader, rr ? "hello.txt" : "HELLO.TXT");
+        REQUIRE(hello);
+        CHECK((*fresh)->stat(*hello)->size == 20);
+    }
+}
