@@ -1,0 +1,20 @@
+{
+  "version": 6,
+  "configurePresets": [
+    { "name": "base", "hidden": true, "generator": "Ninja", "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": { "CMAKE_EXPORT_COMPILE_COMMANDS": "ON" } },
+    { "name": "debug",   "inherits": "base", "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "STEIN_SANITIZERS": "ON" } },
+    { "name": "release", "inherits": "base", "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" } },
+    { "name": "ci",      "inherits": "debug", "cacheVariables": { "STEIN_WERROR": "ON" } },
+    { "name": "mono",    "inherits": "release", "cacheVariables": { "STEIN_MONOLITHIC": "ON" } }
+  ],
+  "buildPresets": [
+    { "name": "debug",   "configurePreset": "debug" },
+    { "name": "release", "configurePreset": "release" },
+    { "name": "ci",      "configurePreset": "ci" }
+  ],
+  "testPresets": [
+    { "name": "debug", "configurePreset": "debug", "output": { "outputOnFailure": true } },
+    { "name": "ci",    "configurePreset": "ci",    "output": { "outputOnFailure": true } }
+  ]
+}
