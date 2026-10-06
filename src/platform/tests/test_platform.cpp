@@ -88,3 +88,64 @@ TEST_CASE("linux: loop attach, open raw device, probe, mounts, detach") {
     stein::test::removeTree(dir);
 }
 #endif
+
+#include "../src/aligned_device.hpp"
+#include "stein/block/memory_device.hpp"
+
+namespace {
+// A "raw" device that insists on sector alignment, like rdisk / PhysicalDrive.
+class StrictRaw final : public stein::platform::AlignedDevice {
+public:
+    explicit StrictRaw(std::shared_ptr<MemoryDevice> m) : m_mem(std::move(m)) {}
+    std::string name() const override { return "strict"; }
+    Geometry geometry() const override { return m_mem->geometry(); }
+    bool isReadOnly() const override { return false; }
+    Expected<void> flush() override { return {}; }
+    int rawCalls = 0;
+
+protected:
+    Expected<void> rawRead(ByteCount offset, std::span<std::byte> dst) override {
+        ++rawCalls;
+        if (offset % 512 || dst.size() % 512) return fail(ErrorCategory::Internal, "unaligned raw read");
+        return m_mem->readAt(offset, dst);
+    }
+    Expected<void> rawWrite(ByteCount offset, std::span<const std::byte> src) override {
+        ++rawCalls;
+        if (offset % 512 || src.size() % 512) return fail(ErrorCategory::Internal, "unaligned raw write");
+        return m_mem->writeAt(offset, src);
+    }
+
+private:
+    std::shared_ptr<MemoryDevice> m_mem;
+};
+} // namespace
+
+TEST_CASE("AlignedDevice: unaligned reads and writes become sector-aligned raw I/O") {
+    auto mem = std::make_shared<MemoryDevice>(64 * KiB);
+    for (std::size_t i = 0; i < mem->bytes().size(); ++i) mem->bytes()[i] = static_cast<std::byte>(i * 7 + 3);
+    StrictRaw raw(mem);
+    // Straddling several sectors with ragged ends.
+    auto r = raw.read(1000, 3000);
+    REQUIRE(r);
+    for (std::size_t i = 0; i < 3000; ++i) REQUIRE(r->at(i) == mem->bytes()[1000 + i]);
+    // Aligned read goes straight through.
+    raw.rawCalls = 0;
+    CHECK(raw.read(4096, 8192));
+    CHECK(raw.rawCalls == 1);
+    // Tail of the device, partial.
+    auto t = raw.read(64 * KiB - 5, 5);
+    REQUIRE(t);
+    CHECK(t->at(4) == mem->bytes()[64 * KiB - 1]);
+    CHECK(raw.read(64 * KiB - 5, 6).error().category() == ErrorCategory::OutOfRange);
+    // Unaligned write: read-modify-write keeps the neighbours.
+    std::vector<std::byte> w(700, std::byte{0xEE});
+    REQUIRE(raw.writeAt(511, w));
+    CHECK(mem->bytes()[510] == static_cast<std::byte>(510 * 7 + 3));
+    CHECK(mem->bytes()[511] == std::byte{0xEE});
+    CHECK(mem->bytes()[511 + 699] == std::byte{0xEE});
+    CHECK(mem->bytes()[511 + 700] == static_cast<std::byte>((511 + 700) * 7 + 3));
+    // Single byte in the middle of a sector.
+    REQUIRE(raw.writeAt(12345, stein::test::bytesOf("Q")));
+    CHECK(mem->bytes()[12345] == std::byte{'Q'});
+    CHECK(mem->bytes()[12344] == static_cast<std::byte>(12344 * 7 + 3));
+}

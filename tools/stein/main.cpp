@@ -107,9 +107,11 @@ Args parse(int argc, char** argv) {
 
 Expected<std::shared_ptr<BlockDevice>> openImage(const std::string& path, bool writable, std::uint32_t ss) {
     // A .stein image opens as a (read-only) device like any disk.
-    if (!writable && std::filesystem::is_regular_file(path) && image::SteinReader::looksLikeStein(path)) return image::openImage(path);
+    std::error_code ec;
+    if (platform::isDevicePath(path)) return platform::openAny(path, writable ? platform::OpenMode::ReadWrite : platform::OpenMode::ReadOnly, ss);
+    if (!writable && std::filesystem::is_regular_file(path, ec) && image::SteinReader::looksLikeStein(path)) return image::openImage(path);
     // Split raw sets (disk.img.000, .001, ...) open as one device, by any member or the prefix.
-    if (!std::filesystem::is_block_file(path) && image::findSplitRaw(path)) return image::openSplitRaw(path, writable, ss);
+    if (!std::filesystem::is_block_file(path, ec) && image::findSplitRaw(path)) return image::openSplitRaw(path, writable, ss);
     return platform::openAny(path, writable ? platform::OpenMode::ReadWrite : platform::OpenMode::ReadOnly, ss);
 }
 

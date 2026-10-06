@@ -80,6 +80,8 @@ Platform& current();
 
 // Convenience: open `pathOrFile` as a BlockDevice — a raw device through the
 // platform when it is one, otherwise a regular file (FileDevice).
+// True for OS device-namespace paths that std::filesystem cannot stat (Windows "\\.\PhysicalDrive0").
+bool isDevicePath(const std::string& path);
 Expected<std::shared_ptr<BlockDevice>> openAny(const std::string& pathOrFile, OpenMode mode, std::uint32_t fileSectorSize = 512);
 
 } // namespace stein::platform

@@ -2,6 +2,7 @@
 #include "stein/platform/platform.hpp"
 
 #include "stein/block/file_device.hpp"
+#include "stein/core/strings.hpp"
 
 namespace stein::platform {
 
@@ -34,7 +35,13 @@ std::string DiskInfo::identity() const {
     return id;
 }
 
+bool isDevicePath(const std::string& path) {
+    // Windows device namespace, or a PhysicalDriveN shorthand; the platform decides what it means.
+    return path.rfind("\\\\.\\", 0) == 0 || path.rfind("\\\\?\\", 0) == 0 || toLower(path).rfind("physicaldrive", 0) == 0;
+}
+
 Expected<std::shared_ptr<BlockDevice>> openAny(const std::string& path, OpenMode mode, std::uint32_t fileSectorSize) {
+    if (isDevicePath(path)) return current().open(path, mode);
     std::error_code ec;
     const auto status = std::filesystem::status(path, ec);
     if (ec) return fail(ErrorCategory::NotFound, "cannot stat " + path + ": " + ec.message(), ec.value());
