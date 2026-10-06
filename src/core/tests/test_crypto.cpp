@@ -2,6 +2,7 @@
 #include "stein_test.hpp"
 
 #include "crypto_vectors.hpp"
+#include "kdf_vectors.hpp"
 #include "stein/core/crypto.hpp"
 #include "stein/core/hash.hpp"
 #include "stein/core/strings.hpp"
@@ -100,4 +101,51 @@ TEST_CASE("random bytes and constant-time compare") {
     CHECK(crypto::equalConstantTime(a, a));
     CHECK_FALSE(crypto::equalConstantTime(a, b));
     CHECK_FALSE(crypto::equalConstantTime(std::span<const std::uint8_t>(a).first(16), a));
+}
+
+TEST_CASE("blake2b: unkeyed and keyed vectors, all output lengths") {
+    for (const auto& v : test::vectors::kBlake2b) {
+        std::vector<std::uint8_t> out(v.outLen);
+        crypto::blake2b(out, hexBytes(v.message), hexBytes(v.key));
+        CHECK(Hasher::hex(out) == v.digest);
+    }
+}
+
+TEST_CASE("argon2id: RFC 9106 vector and oracle vectors") {
+    for (const auto& v : test::vectors::kArgon2id) {
+        std::vector<std::uint8_t> out(v.outLen);
+        auto r = crypto::argon2id(hexBytes(v.password), hexBytes(v.salt), v.t, v.mKiB, v.p, out, hexBytes(v.secret), hexBytes(v.ad));
+        REQUIRE(r);
+        CHECK(Hasher::hex(out) == v.tag);
+    }
+    std::vector<std::uint8_t> out(32);
+    CHECK_FALSE(crypto::argon2id(hexBytes("00"), hexBytes("0000000000000000"), 0, 64, 1, out));
+    CHECK_FALSE(crypto::argon2id(hexBytes("00"), hexBytes("0000000000000000"), 1, 4, 1, out));
+    CHECK_FALSE(crypto::argon2id(hexBytes("00"), hexBytes("0000"), 1, 64, 1, out));
+}
+
+#include "stein/core/keys.hpp"
+
+TEST_CASE("key area: argon2id and pbkdf2 slots side by side, JSON round trip") {
+    auto keys = Keys::create("alpha", KdfParams::fast(), "first");
+    REQUIRE(keys);
+    REQUIRE(keys->master());
+    auto id = keys->addSlot(*keys->master(), "beta", KdfParams::pbkdf2(1000), "legacy");
+    REQUIRE(id);
+    CHECK(*id == 1);
+    const std::string json = keys->toJson();
+    CHECK(json.find("\"argon2id\"") != std::string::npos);
+    CHECK(json.find("\"pbkdf2-hmac-sha256\"") != std::string::npos);
+    auto back = Keys::fromJson(json);
+    REQUIRE(back);
+    CHECK(back->slots().size() == 2);
+    CHECK(back->slots()[0].kdf.kind == KdfParams::Kind::Argon2id);
+    CHECK(back->slots()[1].kdf.kind == KdfParams::Kind::Pbkdf2Sha256);
+    CHECK(back->slots()[1].kdf.cost == 1000);
+    CHECK(*back->unlock("alpha") == *keys->master());
+    CHECK(*back->unlock("beta") == *keys->master());
+    CHECK(back->unlock("gamma").error().category() == ErrorCategory::Integrity);
+    CHECK_FALSE(Keys::create("x", KdfParams::pbkdf2(10)));
+    CHECK_FALSE(Keys::create("x", KdfParams::argon2id(1, 4, 1)));
+    CHECK(KdfParams().kind == KdfParams::Kind::Argon2id);
 }

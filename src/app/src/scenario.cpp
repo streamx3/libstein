@@ -174,7 +174,7 @@ Expected<ScenarioResult> backup(const Profile& profile, const RunOptions& option
     if (profile.image.encrypt) {
         if (options.passphrase.empty()) return fail(ErrorCategory::InvalidArgument, "this profile encrypts its image; a passphrase is required");
         co.passphrase = options.passphrase;
-        co.kdfIterations = profile.image.kdfIterations;
+        co.kdf = profile.image.kdf;
     }
     co.sourceName = t->disk.model.empty() ? t->disk.osPath : t->disk.model + " (" + t->disk.osPath + ")";
     co.sourceIdentity = t->isFile ? std::string() : t->disk.identity();

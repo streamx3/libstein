@@ -64,7 +64,8 @@ int usage() {
                "  stein image info    <in.stein>\n"
                "  stein image keys    <in.stein> list | add [--new-passphrase P] [--name LABEL] | remove <id>\n"
                "      --passphrase P | --passphrase-file F | $STEIN_PASSPHRASE unlock encrypted images (else a prompt);\n"
-               "      image create with --passphrase encrypts (chacha20-poly1305, passphrase key slots)\n"
+               "      image create with --passphrase encrypts (chacha20-poly1305, passphrase key slots);\n"
+               "      --kdf argon2id|pbkdf2 --kdf-cost N --kdf-memory KiB tune the passphrase stretching\n"
                "  stein fs      <image> [--doc]       filesystem / container signature, label, uuid\n"
                "  stein fs dump <image> <piece.sparse> [--part N]   save the filesystem's metadata regions alone\n"
                "  stein fs restore <piece.sparse> <image>\n"
@@ -92,8 +93,8 @@ struct Args {
     int level = 0;
     std::string compress, split, chunk;
     std::string start, size, end, type, name, index;
-    std::string passphrase, passphraseFile, newPassphrase;
-    std::uint32_t kdfIterations = 0;
+    std::string passphrase, passphraseFile, newPassphrase, kdf;
+    std::uint32_t kdfCost = 0, kdfMemoryKiB = 0;
     std::uint32_t quick = 0;
     bool keep = false;
     std::uint32_t sectorSize = 512;
@@ -126,7 +127,9 @@ Args parse(int argc, char** argv) {
         else if (s == "--passphrase" && i + 1 < argc) a.passphrase = argv[++i];
         else if (s == "--passphrase-file" && i + 1 < argc) a.passphraseFile = argv[++i];
         else if (s == "--new-passphrase" && i + 1 < argc) a.newPassphrase = argv[++i];
-        else if (s == "--kdf-iterations" && i + 1 < argc) a.kdfIterations = static_cast<std::uint32_t>(std::stoul(argv[++i]));
+        else if (s == "--kdf" && i + 1 < argc) a.kdf = argv[++i];
+        else if (s == "--kdf-cost" && i + 1 < argc) a.kdfCost = static_cast<std::uint32_t>(std::stoul(argv[++i]));
+        else if (s == "--kdf-memory" && i + 1 < argc) a.kdfMemoryKiB = static_cast<std::uint32_t>(std::stoul(argv[++i]));
         else a.positional.push_back(s);
     }
     return a;
@@ -185,6 +188,16 @@ std::string readPassphrase(const Args& a, const char* prompt) {
 
 std::string g_passphrase;   // set from the arguments once; used when an encrypted image is opened as a device
 
+// --kdf argon2id|pbkdf2, --kdf-cost (passes or iterations), --kdf-memory KiB
+Expected<KdfParams> kdfFromArgs(const Args& a) {
+    KdfParams k;
+    if (a.kdf == "pbkdf2" || a.kdf == "pbkdf2-hmac-sha256") k = KdfParams::pbkdf2();
+    else if (!a.kdf.empty() && a.kdf != "argon2id") return fail(ErrorCategory::InvalidArgument, "unknown --kdf " + a.kdf + " (argon2id or pbkdf2)");
+    if (a.kdfCost) k.cost = a.kdfCost;
+    if (a.kdfMemoryKiB && k.kind == KdfParams::Kind::Argon2id) k.memoryKiB = a.kdfMemoryKiB;
+    return k;
+}
+
 Expected<std::shared_ptr<BlockDevice>> openImage(const std::string& path, bool writable, std::uint32_t ss) {
     // A .stein image opens as a (read-only) device like any disk.
     std::error_code ec;
@@ -240,10 +253,12 @@ int cmdImage(const Args& a) {
         if (!a.chunk.empty()) co.chunkSize = static_cast<std::uint32_t>(parseSize(a.chunk));
         co.sourceName = a.positional[2];
         co.usedBlocksOnly = a.usedOnly;
-        if (!a.passphrase.empty() || !a.passphraseFile.empty() || a.kdfIterations) {
+        if (!a.passphrase.empty() || !a.passphraseFile.empty() || !a.kdf.empty() || a.kdfCost) {
             co.passphrase = readPassphrase(a, "Passphrase for the new image: ");
             if (co.passphrase.empty()) return die(Error(ErrorCategory::InvalidArgument, "empty passphrase"));
-            if (a.kdfIterations) co.kdfIterations = a.kdfIterations;
+            auto k = kdfFromArgs(a);
+            if (!k) return die(k.error());
+            co.kdf = *k;
         }
         if (auto d = platform::current().describe(a.positional[2])) co.sourceIdentity = d->identity();
         auto r = image::createImage(*dev, a.positional[3], co, progress);
@@ -316,7 +331,7 @@ int cmdImage(const Args& a) {
             auto k = image::imageKeys(a.positional[2]);
             if (!k) return die(k.error());
             for (const auto& slot : k->slots())
-                std::printf("slot %d: passphrase, pbkdf2-hmac-sha256 %u iterations%s\n", slot.id, slot.iterations, slot.label.empty() ? "" : (" \"" + slot.label + "\"").c_str());
+                std::printf("slot %d: passphrase, %s%s\n", slot.id, slot.kdf.describe().c_str(), slot.label.empty() ? "" : (" \"" + slot.label + "\"").c_str());
             return 0;
         }
         const std::string current = readPassphrase(a, "Current passphrase: ");
@@ -329,7 +344,9 @@ int cmdImage(const Args& a) {
                 fresh = readPassphrase(b, "New passphrase: ");
             }
             if (fresh.empty()) return die(Error(ErrorCategory::InvalidArgument, "empty new passphrase"));
-            auto id = image::addImageKey(a.positional[2], current, fresh, a.kdfIterations ? a.kdfIterations : image::Keys::kDefaultIterations, a.name);
+            auto k = kdfFromArgs(a);
+            if (!k) return die(k.error());
+            auto id = image::addImageKey(a.positional[2], current, fresh, *k, a.name);
             if (!id) return die(id.error());
             std::printf("added key slot %d\n", *id);
             return 0;
@@ -484,7 +501,7 @@ int cmdPt(const Args& a) {
         if ((*t)->type() == pt::TableType::None) return die(Error(ErrorCategory::NotFound, "no partition table to dump"));
         auto piece = SparseFile::capture(**dev, (*t)->metadataRegions());
         if (!piece) return die(piece.error());
-        if (auto w = SparseFile::write(a.positional[3], *piece, g_passphrase, a.kdfIterations ? a.kdfIterations : 600000); !w) return die(w.error());
+        if (auto w = SparseFile::write(a.positional[3], *piece, g_passphrase, kdfFromArgs(a).value_or(KdfParams{})); !w) return die(w.error());
         std::printf("saved %zu metadata regions of a %s table to %s\n", piece->runs.size(),
                     std::string(pt::toString((*t)->type())).c_str(), a.positional[3].c_str());
         return 0;
@@ -710,7 +727,7 @@ int cmdFsPiece(const Args& a) {
         for (const auto& r : (*fsr)->metadataRegions()) regions.push_back(Region{base + r.offset, r.length});
         auto piece = SparseFile::capture(**dev, regions);
         if (!piece) return die(piece.error());
-        if (auto w = SparseFile::write(a.positional[3], *piece, g_passphrase, a.kdfIterations ? a.kdfIterations : 600000); !w) return die(w.error());
+        if (auto w = SparseFile::write(a.positional[3], *piece, g_passphrase, kdfFromArgs(a).value_or(KdfParams{})); !w) return die(w.error());
         ByteCount bytes = 0;
         for (const auto& r : regions) bytes += r.length;
         std::printf("saved %zu metadata regions (%s) of %s to %s\n", regions.size(), formatSize(bytes).c_str(),

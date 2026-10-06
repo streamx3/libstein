@@ -32,6 +32,13 @@ Expected<void> aeadDecrypt(const Key256& key, const Nonce96& nonce, std::span<co
 std::array<std::uint8_t, 32> hmacSha256(std::span<const std::byte> key, std::span<const std::byte> message);
 void pbkdf2Sha256(std::span<const std::byte> password, std::span<const std::byte> salt, std::uint32_t iterations, std::span<std::uint8_t> out);
 
+// BLAKE2b (RFC 7693): 1..64 byte digest, optional key up to 64 bytes.
+void blake2b(std::span<std::uint8_t> out, std::span<const std::byte> message, std::span<const std::byte> key = {});
+
+// Argon2id (RFC 9106, version 0x13). memoryKiB >= 8 * parallelism; passes >= 1.
+Expected<void> argon2id(std::span<const std::byte> password, std::span<const std::byte> salt, std::uint32_t passes, std::uint32_t memoryKiB,
+                        std::uint32_t parallelism, std::span<std::uint8_t> out, std::span<const std::byte> secret = {}, std::span<const std::byte> ad = {});
+
 // Cryptographically secure random bytes from the OS.
 Expected<void> randomBytes(std::span<std::uint8_t> out);
 

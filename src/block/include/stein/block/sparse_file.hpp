@@ -7,6 +7,7 @@
 
 #include "stein/block/block_device.hpp"
 #include "stein/block/memory_device.hpp"
+#include "stein/core/keys.hpp"
 
 #include <filesystem>
 #include <memory>
@@ -33,7 +34,7 @@ public:
     static Expected<Contents> read(const std::filesystem::path& path, const std::string& passphrase = {});
     // Non-empty `passphrase`: write an encrypted piece with one key slot.
     static Expected<void> write(const std::filesystem::path& path, const Contents& contents, const std::string& passphrase = {},
-                                std::uint32_t kdfIterations = 600000);
+                                const KdfParams& kdf = {});
     static bool isEncrypted(const std::filesystem::path& path);
 
     std::vector<std::byte> static serialize(const Contents& contents);

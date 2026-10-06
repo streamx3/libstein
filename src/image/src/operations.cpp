@@ -78,7 +78,7 @@ Expected<CreateResult> createImage(std::shared_ptr<BlockDevice> source, const st
     WriterOptions wo;
     std::optional<Keys> keys;
     if (!options.passphrase.empty()) {
-        auto k = Keys::create(options.passphrase, options.kdfIterations, "created with the image");
+        auto k = Keys::create(options.passphrase, options.kdf, "created with the image");
         if (!k) return fail(k.error());
         keys = std::move(*k);
         wo.encryptionKey = keys->master();
@@ -275,7 +275,7 @@ Expected<Keys> imageKeys(const std::filesystem::path& image) {
     return Keys::fromJson((*reader)->keysJson());
 }
 
-Expected<int> addImageKey(const std::filesystem::path& image, const std::string& passphrase, const std::string& newPassphrase, std::uint32_t iterations, std::string label) {
+Expected<int> addImageKey(const std::filesystem::path& image, const std::string& passphrase, const std::string& newPassphrase, const KdfParams& kdf, std::string label) {
     auto reader = SteinReader::open(image);
     if (!reader) return fail(reader.error());
     if (!(*reader)->encrypted()) return fail(ErrorCategory::InvalidArgument, "image is not encrypted");
@@ -283,7 +283,7 @@ Expected<int> addImageKey(const std::filesystem::path& image, const std::string&
     if (!keys) return fail(keys.error());
     auto master = keys->unlock(passphrase);
     if (!master) return fail(master.error());
-    auto id = keys->addSlot(*master, newPassphrase, iterations, std::move(label));
+    auto id = keys->addSlot(*master, newPassphrase, kdf, std::move(label));
     if (!id) return fail(id.error());
     if (auto w = (*reader)->writeKeys(keys->toJson()); !w) return fail(w.error());
     return *id;

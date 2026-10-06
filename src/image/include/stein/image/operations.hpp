@@ -27,7 +27,7 @@ struct CreateOptions {
     bool recordTopology = true;       // probe the source and store the tree in the manifest
     bool usedBlocksOnly = false;      // read allocation bitmaps and store free space as zero chunks
     std::string passphrase;           // non-empty: encrypt (ChaCha20-Poly1305, key area with one passphrase slot)
-    std::uint32_t kdfIterations = Keys::kDefaultIterations;
+    KdfParams kdf;                    // Argon2id t=3 m=64MiB p=4 by default
     std::string sourceName;           // defaults to device->name()
     std::string sourceIdentity;       // platform identity when known
     std::string notes;
@@ -90,7 +90,7 @@ Expected<ImageInfo> imageInfo(const std::filesystem::path& image, const std::str
 Expected<std::shared_ptr<BlockDevice>> openImage(const std::filesystem::path& image, const std::string& passphrase = {});
 // Key slot management on an existing encrypted image (the file is rewritten in place).
 Expected<Keys> imageKeys(const std::filesystem::path& image);
-Expected<int> addImageKey(const std::filesystem::path& image, const std::string& passphrase, const std::string& newPassphrase, std::uint32_t iterations = Keys::kDefaultIterations, std::string label = {});
+Expected<int> addImageKey(const std::filesystem::path& image, const std::string& passphrase, const std::string& newPassphrase, const KdfParams& kdf = {}, std::string label = {});
 Expected<void> removeImageKey(const std::filesystem::path& image, const std::string& passphrase, int slotId);
 
 // Split raw images: disk.img.000/.001/..., disk.img.001-based sets, or

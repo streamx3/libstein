@@ -402,7 +402,7 @@ TEST_CASE("scenarios: encrypted profile needs the passphrase on both sides") {
     p.image.path = dir / "enc.stein";
     p.image.chunkSize = 1 * MiB;
     p.image.encrypt = true;
-    p.image.kdfIterations = 1000;
+    p.image.kdf = KdfParams::fast();
     REQUIRE(p.validate());
     CHECK(app::Profile::fromJson(p.toJson())->image.encrypt);
     NullProgressSink sink;

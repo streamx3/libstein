@@ -305,6 +305,313 @@ void pbkdf2Sha256(std::span<const std::byte> password, std::span<const std::byte
     }
 }
 
+// ----------------------------------------------------------------------------- BLAKE2b
+
+namespace {
+
+constexpr std::uint64_t kBlake2bIv[8] = {0x6a09e667f3bcc908ull, 0xbb67ae8584caa73bull, 0x3c6ef372fe94f82bull, 0xa54ff53a5f1d36f1ull,
+                                        0x510e527fade682d1ull, 0x9b05688c2b3e6c1full, 0x1f83d9abfb41bd6bull, 0x5be0cd19137e2179ull};
+constexpr std::uint8_t kBlake2bSigma[12][16] = {
+    {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}, {14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3},
+    {11, 8, 12, 0, 5, 2, 15, 13, 10, 14, 3, 6, 7, 1, 9, 4}, {7, 9, 3, 1, 13, 12, 11, 14, 2, 6, 5, 10, 4, 0, 15, 8},
+    {9, 0, 5, 7, 2, 4, 10, 15, 14, 1, 11, 12, 6, 8, 3, 13}, {2, 12, 6, 10, 0, 11, 8, 3, 4, 13, 7, 5, 15, 14, 1, 9},
+    {12, 5, 1, 15, 14, 13, 4, 10, 0, 7, 6, 3, 9, 2, 8, 11}, {13, 11, 7, 14, 12, 1, 3, 9, 5, 0, 15, 4, 8, 6, 2, 10},
+    {6, 15, 14, 9, 11, 3, 0, 8, 12, 2, 13, 7, 1, 4, 10, 5}, {10, 2, 8, 4, 7, 6, 1, 5, 15, 11, 9, 14, 3, 12, 13, 0},
+    {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}, {14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3}};
+
+inline std::uint64_t rotr64(std::uint64_t v, int n) { return (v >> n) | (v << (64 - n)); }
+
+struct Blake2bState {
+    std::uint64_t h[8];
+    std::uint64_t t[2] = {0, 0};
+    std::uint8_t buf[128];
+    std::size_t bufLen = 0;
+    std::size_t outLen;
+
+    Blake2bState(std::size_t outlen, std::size_t keylen) : outLen(outlen) {
+        for (int i = 0; i < 8; ++i) h[i] = kBlake2bIv[i];
+        h[0] ^= 0x01010000ull ^ (static_cast<std::uint64_t>(keylen) << 8) ^ static_cast<std::uint64_t>(outlen);
+    }
+
+    void compress(const std::uint8_t block[128], bool last) {
+        std::uint64_t m[16], v[16];
+        for (int i = 0; i < 16; ++i) m[i] = loadLe64(reinterpret_cast<const std::byte*>(block) + 8 * i);
+        for (int i = 0; i < 8; ++i) {
+            v[i] = h[i];
+            v[i + 8] = kBlake2bIv[i];
+        }
+        v[12] ^= t[0];
+        v[13] ^= t[1];
+        if (last) v[14] = ~v[14];
+        auto g = [&](int r, int i, int a, int b, int c, int d) {
+            v[a] = v[a] + v[b] + m[kBlake2bSigma[r][2 * i]];
+            v[d] = rotr64(v[d] ^ v[a], 32);
+            v[c] = v[c] + v[d];
+            v[b] = rotr64(v[b] ^ v[c], 24);
+            v[a] = v[a] + v[b] + m[kBlake2bSigma[r][2 * i + 1]];
+            v[d] = rotr64(v[d] ^ v[a], 16);
+            v[c] = v[c] + v[d];
+            v[b] = rotr64(v[b] ^ v[c], 63);
+        };
+        for (int r = 0; r < 12; ++r) {
+            g(r, 0, 0, 4, 8, 12);
+            g(r, 1, 1, 5, 9, 13);
+            g(r, 2, 2, 6, 10, 14);
+            g(r, 3, 3, 7, 11, 15);
+            g(r, 4, 0, 5, 10, 15);
+            g(r, 5, 1, 6, 11, 12);
+            g(r, 6, 2, 7, 8, 13);
+            g(r, 7, 3, 4, 9, 14);
+        }
+        for (int i = 0; i < 8; ++i) h[i] ^= v[i] ^ v[i + 8];
+    }
+
+    void update(const std::uint8_t* p, std::size_t n) {
+        while (n) {
+            if (bufLen == 128) {
+                t[0] += 128;
+                if (t[0] < 128) ++t[1];
+                compress(buf, false);
+                bufLen = 0;
+            }
+            const std::size_t take = std::min(n, 128 - bufLen);
+            std::memcpy(buf + bufLen, p, take);
+            bufLen += take;
+            p += take;
+            n -= take;
+        }
+    }
+
+    void finish(std::uint8_t* out) {
+        t[0] += bufLen;
+        if (t[0] < bufLen) ++t[1];
+        std::memset(buf + bufLen, 0, 128 - bufLen);
+        compress(buf, true);
+        std::uint8_t full[64];
+        for (int i = 0; i < 8; ++i) storeLe64(reinterpret_cast<std::byte*>(full) + 8 * i, h[i]);
+        std::memcpy(out, full, outLen);
+    }
+};
+
+} // namespace
+
+void blake2b(std::span<std::uint8_t> out, std::span<const std::byte> message, std::span<const std::byte> key) {
+    const std::size_t outLen = std::min<std::size_t>(out.size(), 64);
+    Blake2bState st(outLen, key.size());
+    if (!key.empty()) {
+        std::uint8_t block[128] = {};
+        std::memcpy(block, key.data(), std::min<std::size_t>(key.size(), 64));
+        st.update(block, 128);
+    }
+    st.update(reinterpret_cast<const std::uint8_t*>(message.data()), message.size());
+    st.finish(out.data());
+}
+
+// ----------------------------------------------------------------------------- Argon2id
+
+namespace {
+
+constexpr std::size_t kArgonBlockWords = 128;   // 1024 bytes
+struct ArgonBlock {
+    std::uint64_t v[kArgonBlockWords];
+};
+
+inline void argonXor(ArgonBlock& dst, const ArgonBlock& a, const ArgonBlock& b) {
+    for (std::size_t i = 0; i < kArgonBlockWords; ++i) dst.v[i] = a.v[i] ^ b.v[i];
+}
+
+inline std::uint64_t mulLo(std::uint64_t a, std::uint64_t b) { return 2 * (a & 0xFFFFFFFFull) * (b & 0xFFFFFFFFull); }
+
+inline void argonGb(std::uint64_t& a, std::uint64_t& b, std::uint64_t& c, std::uint64_t& d) {
+    a = a + b + mulLo(a, b); d = rotr64(d ^ a, 32);
+    c = c + d + mulLo(c, d); b = rotr64(b ^ c, 24);
+    a = a + b + mulLo(a, b); d = rotr64(d ^ a, 16);
+    c = c + d + mulLo(c, d); b = rotr64(b ^ c, 63);
+}
+
+inline void argonP(std::uint64_t& v0, std::uint64_t& v1, std::uint64_t& v2, std::uint64_t& v3, std::uint64_t& v4, std::uint64_t& v5, std::uint64_t& v6, std::uint64_t& v7,
+                   std::uint64_t& v8, std::uint64_t& v9, std::uint64_t& v10, std::uint64_t& v11, std::uint64_t& v12, std::uint64_t& v13, std::uint64_t& v14, std::uint64_t& v15) {
+    argonGb(v0, v4, v8, v12); argonGb(v1, v5, v9, v13); argonGb(v2, v6, v10, v14); argonGb(v3, v7, v11, v15);
+    argonGb(v0, v5, v10, v15); argonGb(v1, v6, v11, v12); argonGb(v2, v7, v8, v13); argonGb(v3, v4, v9, v14);
+}
+
+// G(X, Y): the Argon2 compression function. `out` may alias neither input.
+void argonG(const ArgonBlock& x, const ArgonBlock& y, ArgonBlock& out) {
+    ArgonBlock r;
+    argonXor(r, x, y);
+    ArgonBlock q = r;
+    std::uint64_t* w = q.v;
+    for (int i = 0; i < 8; ++i) {   // rows: 16 consecutive words
+        std::uint64_t* p = w + 16 * i;
+        argonP(p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15]);
+    }
+    for (int i = 0; i < 8; ++i) {   // columns: word pairs (2i, 2i+1) of every row
+        argonP(w[2 * i], w[2 * i + 1], w[16 + 2 * i], w[16 + 2 * i + 1], w[32 + 2 * i], w[32 + 2 * i + 1], w[48 + 2 * i], w[48 + 2 * i + 1],
+               w[64 + 2 * i], w[64 + 2 * i + 1], w[80 + 2 * i], w[80 + 2 * i + 1], w[96 + 2 * i], w[96 + 2 * i + 1], w[112 + 2 * i], w[112 + 2 * i + 1]);
+    }
+    argonXor(out, q, r);
+}
+
+// Variable-length hash H'(X) of RFC 9106 §3.3.
+void argonHPrime(std::span<std::uint8_t> out, std::span<const std::byte> input) {
+    const std::uint32_t t = static_cast<std::uint32_t>(out.size());
+    std::vector<std::byte> buf(4 + input.size());
+    storeLe32(buf.data(), t);
+    std::memcpy(buf.data() + 4, input.data(), input.size());
+    if (t <= 64) {
+        blake2b(out, buf);
+        return;
+    }
+    const std::size_t r = (t + 31) / 32 - 2;
+    std::array<std::uint8_t, 64> v{};
+    blake2b(v, buf);
+    std::size_t pos = 0;
+    for (std::size_t i = 0; i < r; ++i) {
+        std::memcpy(out.data() + pos, v.data(), 32);
+        pos += 32;
+        if (i + 1 < r) {   // V_{r+1} below is derived from V_r itself
+            std::array<std::uint8_t, 64> next{};
+            blake2b(next, std::span<const std::byte>(reinterpret_cast<const std::byte*>(v.data()), 64));
+            v = next;
+        }
+    }
+    const std::size_t rest = t - 32 * r;
+    std::array<std::uint8_t, 64> last{};
+    blake2b(std::span<std::uint8_t>(last).first(rest), std::span<const std::byte>(reinterpret_cast<const std::byte*>(v.data()), 64));
+    std::memcpy(out.data() + pos, last.data(), rest);
+}
+
+void le32push(std::vector<std::byte>& v, std::uint32_t x) {
+    std::byte b[4];
+    storeLe32(b, x);
+    v.insert(v.end(), b, b + 4);
+}
+
+} // namespace
+
+Expected<void> argon2id(std::span<const std::byte> password, std::span<const std::byte> salt, std::uint32_t passes, std::uint32_t memoryKiB,
+                        std::uint32_t parallelism, std::span<std::uint8_t> out, std::span<const std::byte> secret, std::span<const std::byte> ad) {
+    if (parallelism == 0 || parallelism > 0xFFFFFF) return fail(ErrorCategory::InvalidArgument, "argon2: bad parallelism");
+    if (passes == 0) return fail(ErrorCategory::InvalidArgument, "argon2: passes must be >= 1");
+    if (memoryKiB < 8 * parallelism) return fail(ErrorCategory::InvalidArgument, "argon2: memory must be at least 8 KiB per lane");
+    if (out.size() < 4) return fail(ErrorCategory::InvalidArgument, "argon2: output too short");
+    if (salt.size() < 8) return fail(ErrorCategory::InvalidArgument, "argon2: salt must be at least 8 bytes");
+    constexpr std::uint32_t kVersion = 0x13, kTypeId = 2;
+    // H0
+    std::vector<std::byte> h0in;
+    le32push(h0in, parallelism);
+    le32push(h0in, static_cast<std::uint32_t>(out.size()));
+    le32push(h0in, memoryKiB);
+    le32push(h0in, passes);
+    le32push(h0in, kVersion);
+    le32push(h0in, kTypeId);
+    le32push(h0in, static_cast<std::uint32_t>(password.size()));
+    h0in.insert(h0in.end(), password.begin(), password.end());
+    le32push(h0in, static_cast<std::uint32_t>(salt.size()));
+    h0in.insert(h0in.end(), salt.begin(), salt.end());
+    le32push(h0in, static_cast<std::uint32_t>(secret.size()));
+    h0in.insert(h0in.end(), secret.begin(), secret.end());
+    le32push(h0in, static_cast<std::uint32_t>(ad.size()));
+    h0in.insert(h0in.end(), ad.begin(), ad.end());
+    std::array<std::uint8_t, 64> h0{};
+    blake2b(h0, h0in);
+
+    const std::uint32_t lanes = parallelism;
+    const std::uint32_t mPrime = 4 * lanes * (memoryKiB / (4 * lanes));
+    const std::uint32_t q = mPrime / lanes;          // lane length
+    const std::uint32_t segLen = q / 4;
+    std::vector<ArgonBlock> memory(mPrime);
+    auto block = [&](std::uint32_t lane, std::uint32_t index) -> ArgonBlock& { return memory[static_cast<std::size_t>(lane) * q + index]; };
+
+    // First two blocks of every lane.
+    for (std::uint32_t l = 0; l < lanes; ++l) {
+        for (std::uint32_t j = 0; j < 2; ++j) {
+            std::vector<std::byte> in(h0.size() + 8);
+            std::memcpy(in.data(), h0.data(), h0.size());
+            storeLe32(in.data() + 64, j);
+            storeLe32(in.data() + 68, l);
+            std::array<std::uint8_t, 1024> raw{};
+            argonHPrime(raw, in);
+            for (std::size_t w = 0; w < kArgonBlockWords; ++w) block(l, j).v[w] = loadLe64(reinterpret_cast<const std::byte*>(raw.data()) + 8 * w);
+        }
+    }
+
+    ArgonBlock zero{};
+    std::memset(zero.v, 0, sizeof zero.v);
+    for (std::uint32_t pass = 0; pass < passes; ++pass) {
+        for (std::uint32_t slice = 0; slice < 4; ++slice) {
+            for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+                const bool independent = pass == 0 && slice < 2;   // Argon2id: data-independent addressing for the first half of pass 0
+                ArgonBlock addr{}, inputBlock{};
+                std::memset(inputBlock.v, 0, sizeof inputBlock.v);
+                inputBlock.v[0] = pass;
+                inputBlock.v[1] = lane;
+                inputBlock.v[2] = slice;
+                inputBlock.v[3] = mPrime;
+                inputBlock.v[4] = passes;
+                inputBlock.v[5] = kTypeId;
+                std::uint32_t start = (pass == 0 && slice == 0) ? 2 : 0;
+                if (independent && start != 0) {
+                    // Generate the first address block (counter 1) even though indices 0,1 are prefilled.
+                    inputBlock.v[6] = 1;
+                    ArgonBlock tmp;
+                    argonG(zero, inputBlock, tmp);
+                    argonG(zero, tmp, addr);
+                }
+                for (std::uint32_t index = start; index < segLen; ++index) {
+                    std::uint32_t j1, j2;
+                    if (independent) {
+                        if (index % 128 == 0) {
+                            inputBlock.v[6] = index / 128 + 1;
+                            ArgonBlock tmp;
+                            argonG(zero, inputBlock, tmp);
+                            argonG(zero, tmp, addr);
+                        }
+                        const std::uint64_t pr = addr.v[index % 128];
+                        j1 = static_cast<std::uint32_t>(pr);
+                        j2 = static_cast<std::uint32_t>(pr >> 32);
+                    } else {
+                        const std::uint32_t cur = slice * segLen + index;
+                        const std::uint32_t prev = cur == 0 ? q - 1 : cur - 1;
+                        const std::uint64_t pr = block(lane, prev).v[0];
+                        j1 = static_cast<std::uint32_t>(pr);
+                        j2 = static_cast<std::uint32_t>(pr >> 32);
+                    }
+                    const std::uint32_t refLane = (pass == 0 && slice == 0) ? lane : j2 % lanes;
+                    const bool sameLane = refLane == lane;
+                    std::uint64_t refArea;
+                    if (pass == 0) {
+                        if (slice == 0) refArea = index - 1;
+                        else if (sameLane) refArea = static_cast<std::uint64_t>(slice) * segLen + index - 1;
+                        else refArea = static_cast<std::uint64_t>(slice) * segLen - (index == 0 ? 1 : 0);
+                    } else {
+                        if (sameLane) refArea = static_cast<std::uint64_t>(q) - segLen + index - 1;
+                        else refArea = static_cast<std::uint64_t>(q) - segLen - (index == 0 ? 1 : 0);
+                    }
+                    std::uint64_t rel = j1;
+                    rel = (rel * rel) >> 32;
+                    rel = refArea - 1 - ((refArea * rel) >> 32);
+                    const std::uint32_t startPos = pass == 0 ? 0 : (slice == 3 ? 0 : (slice + 1) * segLen);
+                    const std::uint32_t refIndex = static_cast<std::uint32_t>((startPos + rel) % q);
+                    const std::uint32_t cur = slice * segLen + index;
+                    const std::uint32_t prev = cur == 0 ? q - 1 : cur - 1;
+                    ArgonBlock fresh;
+                    argonG(block(lane, prev), block(refLane, refIndex), fresh);
+                    if (pass == 0) block(lane, cur) = fresh;
+                    else argonXor(block(lane, cur), block(lane, cur), fresh);
+                }
+            }
+        }
+    }
+    // Final block: XOR of the last block of every lane.
+    ArgonBlock c = block(0, q - 1);
+    for (std::uint32_t l = 1; l < lanes; ++l) argonXor(c, c, block(l, q - 1));
+    std::array<std::byte, 1024> cbytes{};
+    for (std::size_t w = 0; w < kArgonBlockWords; ++w) storeLe64(cbytes.data() + 8 * w, c.v[w]);
+    argonHPrime(out, cbytes);
+    return {};
+}
+
 Expected<void> randomBytes(std::span<std::uint8_t> out) {
     if (out.empty()) return {};
 #if defined(_WIN32)

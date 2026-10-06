@@ -83,14 +83,14 @@ Expected<SparseFile::Contents> SparseFile::read(const std::filesystem::path& pat
     return parse(data, path.string());
 }
 
-Expected<void> SparseFile::write(const std::filesystem::path& path, const Contents& c, const std::string& passphrase, std::uint32_t kdfIterations) {
+Expected<void> SparseFile::write(const std::filesystem::path& path, const Contents& c, const std::string& passphrase, const KdfParams& kdf) {
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     if (!out) return fail(ErrorCategory::Io, "cannot create " + path.string());
     const auto body = serialize(c);
     if (passphrase.empty()) {
         out.write(reinterpret_cast<const char*>(body.data()), static_cast<std::streamsize>(body.size()));
     } else {
-        auto keys = Keys::create(passphrase, kdfIterations, "piece");
+        auto keys = Keys::create(passphrase, kdf, "piece");
         if (!keys) return fail(keys.error());
         const std::string keysJson = keys->toJson();
         std::vector<std::byte> cipher(body.size() + crypto::kTagSize);

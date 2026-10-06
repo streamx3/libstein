@@ -119,19 +119,27 @@ and padded to a multiple of 4096 bytes so slots can be added or removed in
 place. The manifest follows the key area.
 
 ```json
-{"version":1,"cipher":"chacha20-poly1305","kdf":"pbkdf2-hmac-sha256",
- "digest":{"salt":"<16 bytes hex>","iterations":600000,"hash":"<32 bytes hex>"},
- "slots":[{"id":0,"type":"passphrase","label":"...","salt":"<16 hex>","iterations":600000,
+{"version":1,"cipher":"chacha20-poly1305",
+ "digest":{"salt":"<16 bytes hex>","iterations":1000,"hash":"<32 bytes hex>"},
+ "slots":[{"id":0,"type":"passphrase","label":"...","salt":"<16 hex>",
+           "kdf":"argon2id","time":3,"memory_kib":65536,"parallelism":4,
+           "nonce":"<12 hex>","wrapped":"<48 hex>"},
+          {"id":1,"type":"passphrase","salt":"<16 hex>",
+           "kdf":"pbkdf2-hmac-sha256","iterations":600000,
            "nonce":"<12 hex>","wrapped":"<48 hex>"}]}
 ```
 
 - One random 256-bit **master key** per image. `digest.hash` is
   PBKDF2-HMAC-SHA256(master key, `digest.salt`, `digest.iterations`, 32) and
-  tells a wrong passphrase from a damaged slot.
-- A **slot** wraps the master key with AEAD_CHACHA20_POLY1305 under the key
-  PBKDF2-HMAC-SHA256(passphrase, `salt`, `iterations`, 32), nonce `nonce`,
-  additional data `"stein-key-slot"`; `wrapped` is ciphertext (32) + tag (16).
-  Up to 8 slots; the last one cannot be removed.
+  tells a wrong passphrase from a damaged slot (the master key is random, so
+  the digest needs no slow KDF).
+- A **slot** wraps the master key with AEAD_CHACHA20_POLY1305 under a key
+  derived from the passphrase by the slot's `kdf`: `argon2id` (RFC 9106,
+  version 0x13; `time` passes, `memory_kib`, `parallelism`; the default is
+  t=3, 64 MiB, p=4) or `pbkdf2-hmac-sha256` (`iterations`, at least 1000).
+  Nonce `nonce`, additional data `"stein-key-slot"`; `wrapped` is ciphertext
+  (32) + tag (16). Up to 8 slots; the last one cannot be removed. A top-level
+  `"kdf"` key (first drafts) applies to slots that lack their own.
 - **Nonces** are 12 bytes: `le64(n) || tag`, where `tag` is `CHNK` with the
   chunk index, `MANF` with 0 for the manifest, `HASH` with 0 for the image hash.
   The master key is used for one image only, so every nonce is unique.

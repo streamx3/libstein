@@ -364,7 +364,7 @@ TEST_CASE("encrypted images: locked structure, unlock, wrong passphrase, tamper,
     CreateOptions co;
     co.chunkSize = 1 * MiB;
     co.passphrase = "correct horse";
-    co.kdfIterations = 1000;   // fast for tests; the default is 600000
+    co.kdf = KdfParams::fast();   // the default is Argon2id t=3 m=64MiB p=4
     co.notes = "secret note";
     auto created = createImage(src, dir / "enc.stein", co, progress);
     REQUIRE_MESSAGE(created, (created ? std::string() : created.error().toString()));
@@ -418,12 +418,12 @@ TEST_CASE("encrypted images: locked structure, unlock, wrong passphrase, tamper,
     CHECK(restoreImage(dir / "enc.stein", *target, RestoreOptions{}, progress).error().category() == ErrorCategory::Permission);
 
     // Key slots: add a second passphrase, open with it, remove the first, the first stops working.
-    auto id = addImageKey(dir / "enc.stein", "correct horse", "battery staple", 1000, "second");
+    auto id = addImageKey(dir / "enc.stein", "correct horse", "battery staple", KdfParams::fast(), "second");
     REQUIRE_MESSAGE(id, (id ? std::string() : id.error().toString()));
     CHECK(*id == 1);
     CHECK(imageKeys(dir / "enc.stein")->slots().size() == 2);
     CHECK(imageInfo(dir / "enc.stein", "battery staple")->unlocked);
-    CHECK_FALSE(addImageKey(dir / "enc.stein", "nope", "x", 1000));
+    CHECK_FALSE(addImageKey(dir / "enc.stein", "nope", "x", KdfParams::fast()));
     REQUIRE(removeImageKey(dir / "enc.stein", "battery staple", 0));
     CHECK_FALSE(imageInfo(dir / "enc.stein", "correct horse"));
     CHECK(imageInfo(dir / "enc.stein", "battery staple")->unlocked);

@@ -103,7 +103,15 @@ Expected<Profile> Profile::fromJson(const json::Value& v) {
     p.image.splitSize = *split;
     p.image.usedOnly = im.get("used_only").asBool(true);
     p.image.encrypt = im.get("encrypt").asBool(false);
-    p.image.kdfIterations = static_cast<std::uint32_t>(im.get("kdf_iterations").asUInt(600000));
+    if (im.has("kdf")) {
+        const auto& k = im.get("kdf");
+        const std::string kind = k.get("kind").asString();
+        if (kind == "pbkdf2-hmac-sha256") p.image.kdf = KdfParams::pbkdf2(static_cast<std::uint32_t>(k.get("iterations").asUInt(600000)));
+        else if (kind == "argon2id" || kind.empty())
+            p.image.kdf = KdfParams::argon2id(static_cast<std::uint32_t>(k.get("time").asUInt(3)), static_cast<std::uint32_t>(k.get("memory_kib").asUInt(65536)),
+                                              static_cast<std::uint32_t>(k.get("parallelism").asUInt(4)));
+        else return fail(ErrorCategory::InvalidFormat, "unknown image.kdf.kind: " + kind);
+    }
     const auto& po = v.get("policy");
     p.policy.lockTarget = po.get("lock_target").asBool(true);
     p.policy.requireElevated = po.get("require_elevated").asBool(false);
@@ -144,7 +152,19 @@ json::Value Profile::toJson() const {
     im.set("split_size", image.splitSize);
     im.set("used_only", image.usedOnly);
     im.set("encrypt", image.encrypt);
-    if (image.encrypt) im.set("kdf_iterations", static_cast<std::uint64_t>(image.kdfIterations));
+    if (image.encrypt) {
+        json::Value k = json::Value::object();
+        if (image.kdf.kind == KdfParams::Kind::Pbkdf2Sha256) {
+            k.set("kind", "pbkdf2-hmac-sha256");
+            k.set("iterations", static_cast<std::uint64_t>(image.kdf.cost));
+        } else {
+            k.set("kind", "argon2id");
+            k.set("time", static_cast<std::uint64_t>(image.kdf.cost));
+            k.set("memory_kib", static_cast<std::uint64_t>(image.kdf.memoryKiB));
+            k.set("parallelism", static_cast<std::uint64_t>(image.kdf.parallelism));
+        }
+        im.set("kdf", std::move(k));
+    }
     v.set("image", std::move(im));
     json::Value po = json::Value::object();
     po.set("lock_target", policy.lockTarget);
@@ -191,7 +211,7 @@ Expected<void> Profile::validate() const {
     if (image.chunkSize < 64 * KiB || image.chunkSize > 64 * MiB || (image.chunkSize & (image.chunkSize - 1)))
         return fail(ErrorCategory::InvalidArgument, "image.chunk_size must be a power of two between 64K and 64M");
     if (image.splitSize && image.splitSize < image.chunkSize) return fail(ErrorCategory::InvalidArgument, "image.split_size smaller than a chunk");
-    if (image.encrypt && image.kdfIterations < 1000) return fail(ErrorCategory::InvalidArgument, "image.kdf_iterations must be at least 1000");
+    if (image.encrypt && image.kdf.kind == KdfParams::Kind::Pbkdf2Sha256 && image.kdf.cost < 1000) return fail(ErrorCategory::InvalidArgument, "image.kdf iterations must be at least 1000");
     if (target.sizeTolerance < 0 || target.sizeTolerance > 0.5) return fail(ErrorCategory::InvalidArgument, "target.size_tolerance must be within 0..0.5");
     return {};
 }

@@ -185,7 +185,7 @@ TEST_CASE("SparseFile: encrypted pieces round-trip, refuse without or with a wro
     auto piece = SparseFile::capture(*dev, {Region{0, 4096}, Region{700 * 1024, 512}});
     REQUIRE(piece);
     const auto path = dir / "p.piece";
-    REQUIRE(SparseFile::write(path, *piece, "pw", 1000));
+    REQUIRE(SparseFile::write(path, *piece, "pw", KdfParams::fast()));
     CHECK(SparseFile::isEncrypted(path));
     CHECK(SparseFile::read(path).error().category() == ErrorCategory::Permission);
     CHECK(SparseFile::read(path, "wrong").error().category() == ErrorCategory::Integrity);
