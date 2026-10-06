@@ -4,6 +4,7 @@
 #include "stein/block/block_device.hpp"
 #include "stein/fs/reader.hpp"
 
+#include <array>
 #include <functional>
 #include <unordered_map>
 

@@ -14,9 +14,9 @@ namespace stein::fs::detail {
 namespace {
 constexpr ByteCount kSuperOffset = 65536;
 constexpr std::size_t kHeaderSize = 101, kItemSize = 25, kKeyPtrSize = 33;
-constexpr std::uint64_t kRootTreeObjectid = 1, kFsTreeObjectid = 5, kFirstChunkTreeObjectid = 256, kFirstFreeObjectid = 256, kLastFreeObjectid = 0xFFFFFFFFFFFFFF00ull;
+constexpr std::uint64_t kFsTreeObjectid = 5, kFirstChunkTreeObjectid = 256;
 constexpr std::uint8_t kInodeItem = 1, kDirIndex = 96, kExtentData = 108, kRootItem = 132, kChunkItem = 228;
-constexpr std::uint8_t kExtentInline = 0, kExtentRegular = 1, kExtentPrealloc = 2;
+constexpr std::uint8_t kExtentInline = 0, kExtentPrealloc = 2;
 constexpr std::uint64_t kBlockGroupRaid0 = 1ull << 3, kBlockGroupRaid1 = 1ull << 4, kBlockGroupDup = 1ull << 5, kBlockGroupRaid10 = 1ull << 6, kBlockGroupRaid5 = 1ull << 7,
                         kBlockGroupRaid6 = 1ull << 8, kBlockGroupRaid1c3 = 1ull << 9, kBlockGroupRaid1c4 = 1ull << 10;
 
