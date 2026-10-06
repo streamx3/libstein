@@ -11,6 +11,7 @@ add_library(stein::compiler_flags ALIAS stein_compiler_flags)
 
 if(MSVC)
   target_compile_options(stein_compiler_flags INTERFACE /W4 /permissive- /utf-8 /Zc:__cplusplus /EHsc)
+  target_compile_definitions(stein_compiler_flags INTERFACE _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
   if(STEIN_WERROR)
     target_compile_options(stein_compiler_flags INTERFACE /WX)
   endif()
