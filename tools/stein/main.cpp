@@ -20,6 +20,7 @@
 #include "stein/fs/filesystem.hpp"
 #include "stein/app/scenario.hpp"
 #include "stein/image/operations.hpp"
+#include "stein/ops/media_test.hpp"
 #include "stein/ops/stack.hpp"
 #include "stein/pt/gpt_table.hpp"
 #include "stein/pt/partition_table.hpp"
@@ -68,6 +69,8 @@ int usage() {
                "  stein fs dump <image> <piece.sparse> [--part N]   save the filesystem's metadata regions alone\n"
                "  stein fs restore <piece.sparse> <image>\n"
                "  <image> may be a file, a .stein image, a split raw set (disk.img.000 ...) or a block device\n"
+               "  stein media scan <device|file>                      read-only surface scan (unreadable sectors)\n"
+               "  stein media test <device|file> [--quick N] [--keep] --force   DESTRUCTIVE capacity/fake-flash test\n"
                "  stein types [gpt|mbr]\n"
                "  stein app init    <profile.json> <device> <image.stein>   write a profile for a disk (identity from the OS)\n"
                "  stein app status  <profile.json> [--unlock]\n"
@@ -91,6 +94,8 @@ struct Args {
     std::string start, size, end, type, name, index;
     std::string passphrase, passphraseFile, newPassphrase;
     std::uint32_t kdfIterations = 0;
+    std::uint32_t quick = 0;
+    bool keep = false;
     std::uint32_t sectorSize = 512;
 };
 
@@ -116,6 +121,8 @@ Args parse(int argc, char** argv) {
         else if (s == "--no-wipe") a.noWipe = true;
         else if (s == "--unlock") a.unlock = true;
         else if (s == "--used-only") a.usedOnly = true;
+        else if (s == "--quick" && i + 1 < argc) a.quick = static_cast<std::uint32_t>(std::stoul(argv[++i]));
+        else if (s == "--keep") a.keep = true;
         else if (s == "--passphrase" && i + 1 < argc) a.passphrase = argv[++i];
         else if (s == "--passphrase-file" && i + 1 < argc) a.passphraseFile = argv[++i];
         else if (s == "--new-passphrase" && i + 1 < argc) a.newPassphrase = argv[++i];
@@ -819,6 +826,46 @@ int cmdApp(const Args& a) {
     return r->ok ? 0 : 1;
 }
 
+int cmdMedia(const Args& a) {
+    if (a.positional.size() < 3) return usage();
+    const std::string& sub = a.positional[1];
+    const std::string& path = a.positional[2];
+    TtyProgress tty;
+    Progress progress(tty);
+    if (sub == "scan") {
+        auto dev = openImage(path, false, a.sectorSize);
+        if (!dev) return die(dev.error());
+        Report report("Surface scan");
+        report.start();
+        auto r = ops::surfaceScan(**dev, progress, report);
+        if (!r) return die(r.error());
+        report.finish(r->healthy() ? ReportStatus::Success : ReportStatus::Error);
+        std::fputs(report.toText().c_str(), stdout);
+        std::printf("%s: %s read in %.1f s, %llu unreadable sector(s)\n", r->healthy() ? "OK" : "DAMAGED", formatSize(r->bytesRead).c_str(), r->seconds,
+                    static_cast<unsigned long long>(r->unreadableSectors));
+        return r->healthy() ? 0 : 2;
+    }
+    if (sub == "test") {
+        if (isRealDevice(path) && !a.force) return die(Error(ErrorCategory::Permission, "the capacity test overwrites the whole device; re-run with --force"));
+        auto dev = openImage(path, true, a.sectorSize);
+        if (!dev) return die(dev.error());
+        ops::CapacityTestOptions o;
+        o.quickStride = a.quick;
+        o.keepPattern = a.keep;
+        Report report("Capacity test");
+        report.start();
+        auto r = ops::capacityTest(**dev, o, progress, report);
+        if (!r) return die(r.error());
+        report.finish(r->healthy() ? ReportStatus::Success : ReportStatus::Error);
+        std::fputs(report.toText().c_str(), stdout);
+        if (r->healthy()) std::printf("OK: %s verified, %d MiB/s write, %d MiB/s read\n", formatSize(r->bytesVerified).c_str(), static_cast<int>(r->writeMiBps), static_cast<int>(r->readMiBps));
+        else if (r->realCapacityEstimate) std::printf("FAKE OR DAMAGED: claims %s, real capacity about %s\n", formatSize(r->claimedBytes).c_str(), formatSize(*r->realCapacityEstimate).c_str());
+        else std::printf("DAMAGED: %llu bad chunk(s)\n", static_cast<unsigned long long>(r->chunksBad));
+        return r->healthy() ? 0 : 2;
+    }
+    return usage();
+}
+
 int cmdTypes(const Args& a) {
     const std::string filter = a.positional.size() > 1 ? a.positional[1] : "";
     for (const auto& info : pt::types::all()) {
@@ -848,5 +895,6 @@ int main(int argc, char** argv) {
     if (cmd == "fs") return cmdFs(a);
     if (cmd == "types") return cmdTypes(a);
     if (cmd == "app") return cmdApp(a);
+    if (cmd == "media") return cmdMedia(a);
     return usage();
 }

@@ -200,3 +200,173 @@ TEST_CASE("ops: read-only device refuses apply, clear() drops everything") {
     CHECK_FALSE(stack.preview().table);
     CHECK_FALSE(stack.pop());
 }
+
+#include "stein/ops/media_test.hpp"
+
+namespace {
+// A "32 GiB" stick with 8 MiB of real flash: addresses wrap modulo the real capacity.
+class FakeFlash final : public BlockDevice {
+public:
+    FakeFlash(ByteCount claimed, ByteCount real) : m_claimed(claimed), m_real(real), m_cells(real) {}
+    std::string name() const override { return "fake-flash"; }
+    Geometry geometry() const override {
+        Geometry g;
+        g.sizeBytes = m_claimed;
+        return g;
+    }
+    bool isReadOnly() const override { return false; }
+    Expected<void> readAt(ByteCount offset, std::span<std::byte> dst) override {
+        if (auto r = checkRange(offset, dst.size()); !r) return r;
+        for (std::size_t i = 0; i < dst.size(); ++i) dst[i] = m_cells[(offset + i) % m_real];
+        return {};
+    }
+    Expected<void> writeAt(ByteCount offset, std::span<const std::byte> src) override {
+        if (auto r = checkRange(offset, src.size()); !r) return r;
+        for (std::size_t i = 0; i < src.size(); ++i) m_cells[(offset + i) % m_real] = src[i];
+        return {};
+    }
+    Expected<void> flush() override { return {}; }
+
+private:
+    ByteCount m_claimed, m_real;
+    std::vector<std::byte> m_cells;
+};
+
+// Reads fail inside one sector.
+class BadSectorDevice final : public BlockDevice {
+public:
+    explicit BadSectorDevice(ByteCount size, ByteCount badOffset) : m_mem(size), m_bad(badOffset) {}
+    std::string name() const override { return "bad-sector"; }
+    Geometry geometry() const override { return m_mem.geometry(); }
+    bool isReadOnly() const override { return false; }
+    Expected<void> readAt(ByteCount offset, std::span<std::byte> dst) override {
+        if (offset <= m_bad && m_bad < offset + dst.size()) return fail(ErrorCategory::Io, "medium error");
+        return m_mem.readAt(offset, dst);
+    }
+    Expected<void> writeAt(ByteCount offset, std::span<const std::byte> src) override { return m_mem.writeAt(offset, src); }
+    Expected<void> flush() override { return {}; }
+
+private:
+    MemoryDevice m_mem;
+    ByteCount m_bad;
+};
+} // namespace
+
+TEST_CASE("media: capacity test detects fake flash and reports the real capacity") {
+    FakeFlash fake(64 * MiB, 8 * MiB);
+    NullProgressSink sink;
+    Progress progress(sink);
+    Report report("capacity");
+    ops::CapacityTestOptions o;
+    o.chunkSize = 1 * MiB;
+    o.seed = 42;
+    auto r = ops::capacityTest(fake, o, progress, report);
+    REQUIRE(r);
+    CHECK_FALSE(r->healthy());
+    REQUIRE(r->firstMismatch);
+    CHECK(*r->firstMismatch == 0);   // low addresses were overwritten by the wrapped high writes
+    CHECK(r->wraparound);
+    REQUIRE(r->realCapacityEstimate);
+    CHECK(*r->realCapacityEstimate == 8 * MiB);
+    CHECK(r->chunksTested == 64);
+    CHECK(r->chunksBad == 56);   // only the last 8 MiB written survives
+    CHECK(report.toText().find("FAKE CAPACITY") != std::string::npos);
+
+    // Quick mode: every 4th chunk plus the tail still finds it.
+    FakeFlash fake2(64 * MiB, 8 * MiB);
+    Report report2("quick");
+    o.quickStride = 4;
+    auto q = ops::capacityTest(fake2, o, progress, report2);
+    REQUIRE(q);
+    CHECK(q->chunksTested < 64);
+    REQUIRE(q->realCapacityEstimate);
+    CHECK(*q->realCapacityEstimate == 8 * MiB);
+
+    // A genuine device passes and is left zeroed.
+    auto good = std::make_shared<MemoryDevice>(16 * MiB);
+    Report report3("good");
+    o.quickStride = 0;
+    auto g = ops::capacityTest(*good, o, progress, report3);
+    REQUIRE(g);
+    CHECK(g->healthy());
+    CHECK(g->bytesVerified == 16 * MiB);
+    CHECK(std::all_of(good->bytes().begin(), good->bytes().end(), [](std::byte b) { return b == std::byte{0}; }));
+    o.keepPattern = true;
+    REQUIRE(ops::capacityTest(*good, o, progress, report3));
+    CHECK_FALSE(std::all_of(good->bytes().begin(), good->bytes().end(), [](std::byte b) { return b == std::byte{0}; }));
+    // The pattern is deterministic per (seed, offset) and differs between offsets.
+    std::vector<std::byte> a(4096), b(4096), c(4096);
+    ops::fillPattern(42, 0, a);
+    ops::fillPattern(42, 0, b);
+    ops::fillPattern(42, 4096, c);
+    CHECK(a == b);
+    CHECK(a != c);
+}
+
+namespace {
+// A stick that silently drops writes beyond its real capacity and reads zeros there.
+class DroppingFlash final : public BlockDevice {
+public:
+    DroppingFlash(ByteCount claimed, ByteCount real) : m_claimed(claimed), m_real(real), m_cells(real) {}
+    std::string name() const override { return "dropping-flash"; }
+    Geometry geometry() const override {
+        Geometry g;
+        g.sizeBytes = m_claimed;
+        return g;
+    }
+    bool isReadOnly() const override { return false; }
+    Expected<void> readAt(ByteCount offset, std::span<std::byte> dst) override {
+        if (auto r = checkRange(offset, dst.size()); !r) return r;
+        for (std::size_t i = 0; i < dst.size(); ++i) dst[i] = offset + i < m_real ? m_cells[offset + i] : std::byte{0};
+        return {};
+    }
+    Expected<void> writeAt(ByteCount offset, std::span<const std::byte> src) override {
+        if (auto r = checkRange(offset, src.size()); !r) return r;
+        for (std::size_t i = 0; i < src.size() && offset + i < m_real; ++i) m_cells[offset + i] = src[i];
+        return {};
+    }
+    Expected<void> flush() override { return {}; }
+
+private:
+    ByteCount m_claimed, m_real;
+    std::vector<std::byte> m_cells;
+};
+} // namespace
+
+TEST_CASE("media: capacity test on a stick that drops writes beyond its real size") {
+    DroppingFlash dev(32 * MiB, 12 * MiB);
+    NullProgressSink sink;
+    Progress progress(sink);
+    Report report("drop");
+    ops::CapacityTestOptions o;
+    o.chunkSize = 1 * MiB;
+    o.seed = 7;
+    auto r = ops::capacityTest(dev, o, progress, report);
+    REQUIRE(r);
+    CHECK_FALSE(r->wraparound);
+    REQUIRE(r->firstMismatch);
+    CHECK(*r->firstMismatch == 12 * MiB);
+    REQUIRE(r->realCapacityEstimate);
+    CHECK(*r->realCapacityEstimate == 12 * MiB);
+    CHECK(r->bytesVerified == 12 * MiB);
+}
+
+TEST_CASE("media: surface scan lists unreadable sectors without writing") {
+    BadSectorDevice dev(8 * MiB, 3 * MiB + 1536);
+    NullProgressSink sink;
+    Progress progress(sink);
+    Report report("scan");
+    auto r = ops::surfaceScan(dev, progress, report);
+    REQUIRE(r);
+    CHECK_FALSE(r->healthy());
+    CHECK(r->unreadableSectors == 1);
+    REQUIRE(r->badRegions.size() == 1);
+    CHECK(r->badRegions[0].offset == 3 * MiB + 1536);
+    CHECK(r->badRegions[0].length == 512);
+    CHECK(r->bytesRead == 8 * MiB);
+    MemoryDevice ok(4 * MiB);
+    Report report2("scan2");
+    auto s = ops::surfaceScan(ok, progress, report2);
+    REQUIRE(s);
+    CHECK(s->healthy());
+}
