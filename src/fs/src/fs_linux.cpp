@@ -3,6 +3,7 @@
 // Minix, EROFS, SquashFS, swap.
 #include "detectors.hpp"
 #include "stein/fs/btrfs_reader.hpp"
+#include "stein/fs/squashfs_reader.hpp"
 #include "stein/fs/xfs_reader.hpp"
 #include "stein/core/endian.hpp"
 #include "stein/core/strings.hpp"
@@ -301,6 +302,7 @@ Result detectSquashFs(Dev dev) {
     fs->setTreeName("SquashFS image");
     fs->addNode(std::move(t));
     fs->addRegion(Region{0, 96});
+    if (sb.versionMajor() == 4) fs->setReaderSource(makeSquashfsReaderSource());
     return std::unique_ptr<FileSystem>(std::move(fs));
 }
 

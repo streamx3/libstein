@@ -131,14 +131,14 @@ std::vector<std::byte> compress(std::span<const std::byte> input, int accelerati
     return out;
 }
 
-Expected<void> decompress(std::span<const std::byte> input, std::span<std::byte> output) {
+static Expected<std::size_t> decompressImpl(std::span<const std::byte> input, std::span<std::byte> output, bool exact) {
     const std::byte* ip = input.data();
     const std::byte* const iend = ip + input.size();
     std::byte* op = output.data();
     std::byte* const oend = op + output.size();
     auto bad = [](const char* why) { return fail(ErrorCategory::InvalidFormat, std::string("lz4: ") + why); };
 
-    if (input.empty()) return output.empty() ? Expected<void>{} : bad("empty input for non-empty output");
+    if (input.empty()) return (output.empty() || !exact) ? Expected<std::size_t>{0} : Expected<std::size_t>(bad("empty input for non-empty output"));
     while (true) {
         if (ip >= iend) return bad("truncated at token");
         const unsigned token = std::to_integer<unsigned>(*ip++);
@@ -157,8 +157,8 @@ Expected<void> decompress(std::span<const std::byte> input, std::span<std::byte>
         ip += literalLen;
         op += literalLen;
         if (ip == iend) {
-            if (op != oend) return bad("output size mismatch");
-            return {};   // end of block: last sequence has only literals
+            if (exact && op != oend) return bad("output size mismatch");
+            return static_cast<std::size_t>(op - output.data());   // end of block: last sequence has only literals
         }
         if (iend - ip < 2) return bad("truncated offset");
         const std::size_t offset = loadLe16(ip);
@@ -183,6 +183,14 @@ Expected<void> decompress(std::span<const std::byte> input, std::span<std::byte>
         op += matchLen;
     }
 }
+
+Expected<void> decompress(std::span<const std::byte> input, std::span<std::byte> output) {
+    auto n = decompressImpl(input, output, true);
+    if (!n) return fail(n.error());
+    return {};
+}
+
+Expected<std::size_t> decompressUpTo(std::span<const std::byte> input, std::span<std::byte> output) { return decompressImpl(input, output, false); }
 
 Expected<std::vector<std::byte>> decompress(std::span<const std::byte> input, std::size_t originalSize) {
     std::vector<std::byte> out(originalSize);

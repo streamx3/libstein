@@ -740,6 +740,68 @@ TEST_CASE("btrfs reader: mkfs.btrfs --rootdir fixtures read back exactly (inline
     }
 }
 
+TEST_CASE("squashfs reader: mksquashfs fixtures with every compressor, uncompressed tables, forced fragments and sparse files read back exactly") {
+    // squashfs_bcj was made with -Xbcj x86: mksquashfs keeps the filter only for blocks it shrinks,
+    // which never happens for this tree, so it reads like plain xz (a filtered block would be refused).
+    const char* names[] = {"squashfs_gzip", "squashfs_lzo", "squashfs_xz", "squashfs_lz4", "squashfs_zstd", "squashfs_lzma", "squashfs_plain", "squashfs_frags", "squashfs_bcj"};
+    const auto o = loadExtOracle("squashfs", "squashfs");
+    for (const char* name : names) {
+        const std::string fixture = name;
+        CAPTURE(fixture);
+        auto dev = loadSparseFixture("squashfs/" + fixture + ".sparse");
+        auto probed = fs::probe(dev);
+        REQUIRE(probed);
+        REQUIRE(*probed);
+        CHECK((*probed)->info().type == fs::FsType::SquashFs);
+        REQUIRE(fs::has((*probed)->capabilities(), fs::Capability::Read));
+        auto reader = (*probed)->openReader();
+        REQUIRE_MESSAGE(reader, (reader ? std::string() : reader.error().toString()));
+        auto root = (*reader)->root();
+        REQUIRE(root);
+        std::map<std::string, std::pair<char, std::uint64_t>> seen;
+        std::map<std::string, std::string> sha, links;
+        walk(**reader, *root, "", seen, sha, links);
+        CHECK(seen.size() == o.entries.size());
+        for (const auto& [path, ts] : o.entries) {
+            CAPTURE(path);
+            REQUIRE(seen.count(path));
+            CHECK(seen[path].first == ts.first);
+            if (ts.first == 'f') CHECK(seen[path].second == ts.second);
+        }
+        for (const auto& [path, h] : o.sha) {
+            CAPTURE(path);
+            CHECK(sha[path] == h);
+        }
+        for (const auto& [path, t] : o.links) {
+            CAPTURE(path);
+            CHECK(links[path] == t);
+        }
+        auto hl = fs::resolvePath(**reader, "hardlink.txt");
+        REQUIRE(hl);
+        CHECK((*reader)->stat(*hl)->nlink == 2);
+        CHECK((*reader)->stat(*hl)->mtime == 1704164645);
+        CHECK((*reader)->stat(*hl)->mode == 0644);
+        CHECK((*reader)->stat(*hl)->uid == 0);
+        CHECK_FALSE(fs::resolvePath(**reader, "HELLO.TXT"));
+        CHECK((*reader)->readdir(*fs::resolvePath(**reader, "many"))->size() == 400);
+        CHECK(*fs::resolvePath(**reader, "link_short") == *hl);
+        // Partial reads across a block boundary and into the fragment tail.
+        auto big = fs::resolvePath(**reader, "big.bin");
+        REQUIRE(big);
+        auto whole = fs::readAll(**reader, *big, 1 << 20);
+        REQUIRE(whole);
+        std::vector<std::byte> part(5000);
+        auto n = (*reader)->read(*big, 131072 - 2500, part);
+        REQUIRE(n);
+        CHECK(*n == 5000);
+        CHECK(std::equal(part.begin(), part.end(), whole->begin() + 131072 - 2500));
+        n = (*reader)->read(*big, 2 * 131072 - 10, part);
+        REQUIRE(n);
+        CHECK(*n == 133);
+        CHECK(std::equal(part.begin(), part.begin() + 133, whole->begin() + 2 * 131072 - 10));
+    }
+}
+
 TEST_CASE("udf reader: genisoimage UDF 1.02 (bridge and UDF-only) read back exactly; mkudffs 2.50 metadata partition opens") {
     for (const char* name : {"udf_only", "udf_bridge"}) {
         const std::string fixture = name;
