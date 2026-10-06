@@ -8,6 +8,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <random>
 #include <chrono>
 #include <thread>
 
@@ -25,7 +26,7 @@ TEST_CASE("mount: an ext4 fixture mounted through FUSE reads like the kernel mou
     REQUIRE(*probed);
     auto reader = (*probed)->openReader();
     REQUIRE(reader);
-    const auto mp = std::filesystem::temp_directory_path() / ("stein_mount_test_" + std::to_string(::getpid()));
+    const auto mp = std::filesystem::temp_directory_path() / ("stein_mount_test_" + std::to_string(std::random_device{}()));
     std::filesystem::create_directories(mp);
     auto m = mount::Mount::create(std::move(*reader), mp);
     if (!m) {
