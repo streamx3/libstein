@@ -96,7 +96,7 @@ filesystems from the first try" credible rather than reckless):
 | ext2/3/4 | v1 (own, from lwext4's BSD-3 files + own extents/xattr/casefold) | v2 (own; jbd2 replay + journaled writes; `metadata_csum`, `64bit`, `flex_bg`, `extra_isize`, `inline_data`); optional libext2fs (LGPL, dynamic) backend in v1 for write | The headline feature ("ext4 on Windows") |
 | NTFS | v1 (own; MFT, attribute lists, non-resident runs, compression, sparse, `$UpCase`, reparse points, ADS) | v3 (own; clean-volume-only initially) | ntfs-3g (GPL) is reference-only; libfsntfs docs are the spec | Second most valuable: NTFS on macOS r/w |
 | HFS+ | v2 | v3 | Apple TN1150 (public spec) | Journaled volumes read-only until journal replay lands |
-| APFS | v2 (read; unencrypted volumes; FileVault later via libfvde docs) | — | Apple APFS Reference (public) | Containers, snapshots, encryption make write a far-future item |
+| APFS | **done** (read; unencrypted volumes, first volume of the container; FileVault later via libfvde docs) | — | Apple APFS Reference (public) | Containers, snapshots, encryption make write a far-future item |
 | ISO9660/Joliet/RockRidge, UDF | v1 read | — | ECMA-119/167, UDF 2.60 (public) | Trivial, valuable for images |
 | XFS | v2 read | — | public on-disk docs; v5 CRCs | |
 | btrfs | v2 read (single device, no compression → with zstd/lzo/zlib in v3) | — | public wiki docs | |

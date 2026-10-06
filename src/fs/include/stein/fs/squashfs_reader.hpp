@@ -8,6 +8,8 @@
 
 namespace stein::fs::detail {
 
+class ReaderSource;
+
 // SquashFS 4.0 reader: gzip, lzo, xz, lz4, zstd and lzma compressors, metadata
 // blocks, basic and extended inodes, fragments, sparse blocks, directory
 // indexes skipped (listings are read whole). Inode ids are inode references

@@ -802,6 +802,57 @@ TEST_CASE("squashfs reader: mksquashfs fixtures with every compressor, uncompres
     }
 }
 
+TEST_CASE("apfs reader: hdiutil fixtures (case-insensitive and case-sensitive) read back exactly (hard links, symlinks, sparse files, case rules)") {
+    struct Case { const char* name; bool caseSensitive; };
+    const Case cases[] = {{"apfs", false}, {"apfsx", true}};
+    for (const auto& c : cases) {
+        const std::string fixture = c.name;
+        CAPTURE(fixture);
+        if (!std::filesystem::exists(std::string(STEIN_FIXTURE_DIR) + "/apfs/" + fixture + ".sparse")) {
+            MESSAGE("fixture apfs/", fixture, " missing (built by the macOS fixture workflow); skipping");
+            continue;
+        }
+        auto dev = loadSparseFixture("apfs/" + fixture + ".sparse");
+        auto probed = fs::probe(dev);
+        REQUIRE(probed);
+        REQUIRE(*probed);
+        CHECK((*probed)->info().type == fs::FsType::Apfs);
+        REQUIRE(fs::has((*probed)->capabilities(), fs::Capability::Read));
+        auto reader = (*probed)->openReader();
+        REQUIRE_MESSAGE(reader, (reader ? std::string() : reader.error().toString()));
+        CHECK((*reader)->caseSensitive() == c.caseSensitive);
+        auto root = (*reader)->root();
+        REQUIRE(root);
+        std::map<std::string, std::pair<char, std::uint64_t>> seen;
+        std::map<std::string, std::string> sha, links;
+        walk(**reader, *root, "", seen, sha, links);
+        const auto o = loadExtOracle(fixture, "apfs");
+        for (const auto& [path, ts] : o.entries) {
+            CAPTURE(path);
+            REQUIRE(seen.count(path));
+            CHECK(seen[path].first == ts.first);
+            if (ts.first == 'f') CHECK(seen[path].second == ts.second);
+        }
+        for (const auto& [path, h] : o.sha) {
+            CAPTURE(path);
+            CHECK(sha[path] == h);
+        }
+        for (const auto& [path, t] : o.links) {
+            CAPTURE(path);
+            CHECK(links[path] == t);
+        }
+        auto hl = fs::resolvePath(**reader, "hardlink.txt");
+        REQUIRE(hl);
+        CHECK(*hl == *fs::resolvePath(**reader, "hello.txt"));
+        CHECK((*reader)->stat(*hl)->nlink == 3);
+        CHECK((*reader)->stat(*hl)->mtime == 1704164645);
+        CHECK(static_cast<bool>(fs::resolvePath(**reader, "HELLO.TXT")) == !c.caseSensitive);
+        CHECK((*reader)->readdir(*fs::resolvePath(**reader, "many"))->size() == 300);
+        CHECK(*fs::resolvePath(**reader, "link_short") == *hl);
+        if (c.caseSensitive) CHECK(seen.count("case.txt") + seen.count("Case.txt") == 2);
+    }
+}
+
 TEST_CASE("udf reader: genisoimage UDF 1.02 (bridge and UDF-only) read back exactly; mkudffs 2.50 metadata partition opens") {
     for (const char* name : {"udf_only", "udf_bridge"}) {
         const std::string fixture = name;

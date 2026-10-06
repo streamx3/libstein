@@ -42,7 +42,7 @@ ctest --preset debug
 ./build/debug/tools/stein/stein app init office.json /dev/sdb /backups/office.stein   # dr_stein-style profile
 ./build/debug/tools/stein/stein app status office.json && ./build/debug/tools/stein/stein app restore office.json
 ./build/debug/tools/stein/stein media test /dev/sdX --force    # fake-flash capacity test (destructive); `media scan` is read-only
-./build/debug/tools/stein/stein ls backup.stein --part 2 /home              # browse ext4/NTFS/FAT/exFAT/HFS+/ISO/UDF/XFS/btrfs/squashfs inside an image, partition,
+./build/debug/tools/stein/stein ls backup.stein --part 2 /home              # browse ext4/NTFS/FAT/exFAT/HFS+/APFS/ISO/UDF/XFS/btrfs/squashfs inside an image, partition,
 ./build/debug/tools/stein/stein cp disk.img --passphrase ... --lv root /etc/fstab fstab   # LUKS container or LVM volume
 ./build/debug/tools/stein/stein luks info /dev/sdb2 && ./build/debug/tools/stein/stein lvm list /dev/sdb3
 ./build/debug/tools/stein/stein tcrypt unlock vault.hc --passphrase ... --pim 0   # VeraCrypt/TrueCrypt: header found by trial decryption
@@ -55,7 +55,7 @@ maps for ext/FAT/exFAT/NTFS/HFS+ (used-block imaging); `.stein` images with
 LZ4, split segments and ChaCha20-Poly1305 encryption (Argon2id key slots);
 qcow2/VHD/VHDX/VMDK/VDI, E01 and DMG containers opened read-only;
 LUKS1/2 unlock; VeraCrypt/TrueCrypt volumes (AES-XTS, SHA-512/SHA-256, hidden volumes); LVM2 linear/striped volumes; file readers for ext2/3/4,
-NTFS, FAT, exFAT, HFS+, ISO 9660, UDF, XFS, btrfs (zlib/lzo/zstd compression) and SquashFS (every compressor), mountable through FUSE on Linux and WinFsp on Windows; profile-driven one-button
+NTFS, FAT, exFAT, HFS+, APFS, ISO 9660, UDF, XFS, btrfs (zlib/lzo/zstd compression) and SquashFS (every compressor), mountable through FUSE on Linux and WinFsp on Windows; profile-driven one-button
 backup/restore; fake-flash and surface tests. See `doc/reports/` for the detailed status.
 
 Fixtures under `tests/fixtures/` are regenerated with the scripts in

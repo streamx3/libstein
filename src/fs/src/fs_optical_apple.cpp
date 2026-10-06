@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // ISO 9660 (+Joliet), UDF, APFS container.
 #include "detectors.hpp"
+#include "stein/fs/apfs_reader.hpp"
 #include "stein/core/endian.hpp"
 #include "stein/core/strings.hpp"
 #include "stein/fs/iso_reader.hpp"
@@ -154,6 +155,7 @@ Result detectApfs(Dev dev) {
     fs->setTreeName("APFS container");
     fs->addNode(nx.describe(0));
     fs->addRegion(Region{0, nx.nxBlockSize()});
+    fs->setReaderSource(makeApfsReaderSource());   // the first volume
     return std::unique_ptr<FileSystem>(std::move(fs));
 }
 
