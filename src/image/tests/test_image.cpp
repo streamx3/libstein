@@ -248,3 +248,39 @@ TEST_CASE("copy engine: bad sector policy") {
     CHECK(target.bytes()[5631] == std::byte{0});
     CHECK(target.bytes()[5632] == std::byte{0x11});
 }
+
+TEST_CASE("split raw image set opens as one device") {
+    auto dir = tmpDir("stein_test_splitraw");
+    auto disk = loadSparseFixture("pt/gpt_basic.sparse");
+    const ByteCount piece = 6 * MiB;
+    std::vector<std::filesystem::path> files;
+    for (ByteCount off = 0, i = 0; off < disk->size(); off += piece, ++i) {
+        char suffix[8];
+        std::snprintf(suffix, sizeof suffix, ".%03llu", static_cast<unsigned long long>(i));
+        auto path = dir / ("disk.img" + std::string(suffix));
+        const ByteCount n = std::min(piece, disk->size() - off);
+        std::ofstream out(path, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(disk->bytes().data() + off), static_cast<std::streamsize>(n));
+        files.push_back(path);
+    }
+    REQUIRE(files.size() == 3);
+    auto set = image::findSplitRaw(dir / "disk.img");
+    REQUIRE(set);
+    CHECK(set->members.size() == 3);
+    CHECK(set->totalBytes == disk->size());
+    CHECK(image::findSplitRaw(dir / "disk.img.001"));
+    CHECK_FALSE(image::findSplitRaw(dir / "other.img"));
+    auto dev = image::openSplitRaw(dir / "disk.img.000", false);
+    REQUIRE(dev);
+    CHECK((*dev)->size() == disk->size());
+    auto table = pt::PartitionTable::read(*dev);
+    REQUIRE(table);
+    CHECK((*table)->type() == pt::TableType::Gpt);
+    CHECK((*table)->partitions().size() == 3);
+    CHECK((*table)->health() == layout::Validity::Ok);
+    // Whole-image comparison across the piece boundaries.
+    auto all = (*dev)->read(0, (*dev)->size());
+    REQUIRE(all);
+    CHECK(std::equal(all->begin(), all->end(), disk->bytes().begin()));
+    std::filesystem::remove_all(dir);
+}

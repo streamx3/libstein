@@ -80,4 +80,16 @@ Expected<ImageInfo> imageInfo(const std::filesystem::path& image);
 // Open a .stein image as a read-only block device (R5d: images are devices).
 Expected<std::shared_ptr<BlockDevice>> openImage(const std::filesystem::path& image);
 
+// Split raw images: disk.img.000/.001/..., disk.img.001-based sets, or
+// `split -d` style disk.img.00/.01. `path` may be any member or the common
+// prefix. The set must be contiguous; files are opened in order and
+// concatenated (ConcatDevice).
+struct SplitRawSet {
+    std::filesystem::path prefix;
+    std::vector<std::filesystem::path> members;   // sorted
+    ByteCount totalBytes = 0;
+};
+std::optional<SplitRawSet> findSplitRaw(const std::filesystem::path& path);
+Expected<std::shared_ptr<BlockDevice>> openSplitRaw(const std::filesystem::path& path, bool writable, std::uint32_t sectorSize = 512);
+
 } // namespace stein::image

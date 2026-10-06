@@ -2,6 +2,7 @@
 #include "stein_test.hpp"
 
 #include "stein/block/file_device.hpp"
+#include "stein/block/concat_device.hpp"
 #include "stein/block/memory_device.hpp"
 #include "stein/block/overlay_device.hpp"
 #include "stein/block/slice_device.hpp"
@@ -138,4 +139,38 @@ TEST_CASE("OverlayDevice: copy-on-write, dirty regions, commit") {
     CHECK(base->bytes()[500] == std::byte{'Z'});
     CHECK(!ov->hasChanges());
     CHECK(ov->read(70 * KiB, 1).error().category() == ErrorCategory::OutOfRange);
+}
+
+TEST_CASE("ConcatDevice: parts laid end to end") {
+    auto a = std::make_shared<MemoryDevice>(4096);
+    auto b = std::make_shared<MemoryDevice>(1024);
+    auto c = std::make_shared<MemoryDevice>(700);   // last part may be ragged
+    std::fill(a->bytes().begin(), a->bytes().end(), std::byte{'A'});
+    std::fill(b->bytes().begin(), b->bytes().end(), std::byte{'B'});
+    std::fill(c->bytes().begin(), c->bytes().end(), std::byte{'C'});
+    auto cat = ConcatDevice::create({a, b, c});
+    REQUIRE(cat);
+    CHECK((*cat)->size() == 4096 + 1024 + 700);
+    CHECK((*cat)->sectorSize() == 512);
+    auto r = (*cat)->read(4090, 1030 + 6);
+    REQUIRE(r);
+    CHECK(r->at(0) == std::byte{'A'});
+    CHECK(r->at(5) == std::byte{'A'});
+    CHECK(r->at(6) == std::byte{'B'});
+    CHECK(r->at(6 + 1023) == std::byte{'B'});
+    CHECK(r->at(6 + 1024) == std::byte{'C'});
+    CHECK(r->back() == std::byte{'C'});
+    // Write straddling all three parts.
+    std::vector<std::byte> w(4096 - 4000 + 1024 + 10, std::byte{'x'});
+    REQUIRE((*cat)->writeAt(4000, w));
+    CHECK(a->bytes()[4000] == std::byte{'x'});
+    CHECK(b->bytes()[0] == std::byte{'x'});
+    CHECK(b->bytes()[1023] == std::byte{'x'});
+    CHECK(c->bytes()[9] == std::byte{'x'});
+    CHECK(c->bytes()[10] == std::byte{'C'});
+    CHECK((*cat)->read(5820, 1).error().category() == ErrorCategory::OutOfRange);
+    CHECK((*cat)->locate(4096) == std::pair<std::size_t, ByteCount>{1, 0});
+    // A ragged middle part is refused.
+    CHECK_FALSE(ConcatDevice::create({c, a}));
+    CHECK_FALSE(ConcatDevice::create({}));
 }

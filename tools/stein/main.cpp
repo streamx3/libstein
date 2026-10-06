@@ -58,6 +58,9 @@ int usage() {
                "  stein image verify  <in.stein> [--level 1|2|3]\n"
                "  stein image info    <in.stein>\n"
                "  stein fs      <image> [--doc]       filesystem / container signature, label, uuid\n"
+               "  stein fs dump <image> <piece.sparse> [--part N]   save the filesystem's metadata regions alone\n"
+               "  stein fs restore <piece.sparse> <image>\n"
+               "  <image> may be a file, a .stein image, a split raw set (disk.img.000 ...) or a block device\n"
                "  stein types [gpt|mbr]\n",
                stderr);
     return 64;
@@ -95,7 +98,7 @@ Args parse(int argc, char** argv) {
         else if (s == "--end" && i + 1 < argc) a.end = argv[++i];
         else if (s == "--type" && i + 1 < argc) a.type = argv[++i];
         else if (s == "--name" && i + 1 < argc) a.name = argv[++i];
-        else if (s == "--index" && i + 1 < argc) a.index = argv[++i];
+        else if ((s == "--index" || s == "--part") && i + 1 < argc) a.index = argv[++i];
         else if (s == "--no-wipe") a.noWipe = true;
         else a.positional.push_back(s);
     }
@@ -105,6 +108,8 @@ Args parse(int argc, char** argv) {
 Expected<std::shared_ptr<BlockDevice>> openImage(const std::string& path, bool writable, std::uint32_t ss) {
     // A .stein image opens as a (read-only) device like any disk.
     if (!writable && std::filesystem::is_regular_file(path) && image::SteinReader::looksLikeStein(path)) return image::openImage(path);
+    // Split raw sets (disk.img.000, .001, ...) open as one device, by any member or the prefix.
+    if (!std::filesystem::is_block_file(path) && image::findSplitRaw(path)) return image::openSplitRaw(path, writable, ss);
     return platform::openAny(path, writable ? platform::OpenMode::ReadWrite : platform::OpenMode::ReadOnly, ss);
 }
 
@@ -543,8 +548,63 @@ int cmdPtEdit(const Args& a) {
     return usage();
 }
 
+int cmdFsPiece(const Args& a) {
+    const std::string& sub = a.positional[1];
+    if (a.positional.size() < 4) return usage();
+    if (sub == "dump") {
+        auto dev = openImage(a.positional[2], false, a.sectorSize);
+        if (!dev) return die(dev.error());
+        // Whole device, or one partition's content located through the probe tree.
+        ByteCount base = 0;
+        std::shared_ptr<BlockDevice> target = *dev;
+        if (!a.index.empty()) {
+            auto tree = probe::probe(*dev);
+            if (!tree) return die(tree.error());
+            const auto want = static_cast<std::uint32_t>(std::stoul(a.index));
+            const probe::Node* node = nullptr;
+            for (const auto& c : tree->children)
+                if (c.partition && c.partition->index == want) node = &c;
+            if (!node) return die(Error(ErrorCategory::NotFound, "no partition " + a.index));
+            base = node->region.offset;
+            target = node->device;
+        }
+        auto fsr = fs::probe(target);
+        if (!fsr) return die(fsr.error());
+        if (!*fsr) return die(Error(ErrorCategory::NotFound, "no known filesystem or container signature"));
+        std::vector<Region> regions;
+        for (const auto& r : (*fsr)->metadataRegions()) regions.push_back(Region{base + r.offset, r.length});
+        auto piece = SparseFile::capture(**dev, regions);
+        if (!piece) return die(piece.error());
+        if (auto w = SparseFile::write(a.positional[3], *piece); !w) return die(w.error());
+        ByteCount bytes = 0;
+        for (const auto& r : regions) bytes += r.length;
+        std::printf("saved %zu metadata regions (%s) of %s to %s\n", regions.size(), formatSize(bytes).c_str(),
+                    std::string(fs::displayName((*fsr)->type())).c_str(), a.positional[3].c_str());
+        std::puts("note: this is the identification header (superblock/boot sector, descriptor tables, backups),\n"
+                  "      not the allocation bitmaps or inode/MFT tables; it brings a wiped signature back, not lost data");
+        return 0;
+    }
+    if (sub == "restore") {
+        auto piece = SparseFile::read(a.positional[2]);
+        if (!piece) return die(piece.error());
+        auto dev = openImage(a.positional[3], true, piece->sectorSize);
+        if (!dev) return die(dev.error());
+        if ((*dev)->size() != piece->totalSize)
+            std::fprintf(stderr, "warning: piece was taken from a %s device, target is %s\n",
+                         formatSize(piece->totalSize).c_str(), formatSize((*dev)->size()).c_str());
+        if (auto r = SparseFile::apply(*piece, **dev); !r) return die(r.error());
+        std::printf("restored %zu regions; device now probes as:\n", piece->runs.size());
+        auto tree = probe::probe(*dev);
+        if (!tree) return die(tree.error());
+        std::fputs(probe::toText(*tree).c_str(), stdout);
+        return 0;
+    }
+    return usage();
+}
+
 int cmdFs(const Args& a) {
     if (a.positional.size() < 2) return usage();
+    if (a.positional[1] == "dump" || a.positional[1] == "restore") return cmdFsPiece(a);
     auto dev = openImage(a.positional[1], false, a.sectorSize);
     if (!dev) return die(dev.error());
     auto r = fs::probe(*dev);

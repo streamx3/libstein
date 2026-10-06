@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: MIT
 #include "stein/image/operations.hpp"
 
+#include <algorithm>
+#include <cctype>
+
+#include "stein/block/concat_device.hpp"
+#include "stein/block/file_device.hpp"
 #include "stein/core/hash.hpp"
 #include "stein/core/strings.hpp"
 #include "stein/probe/topology.hpp"
@@ -207,6 +212,59 @@ Expected<std::shared_ptr<BlockDevice>> openImage(const std::filesystem::path& im
     auto reader = SteinReader::open(image);
     if (!reader) return fail(reader.error());
     return (*reader)->asDevice();
+}
+
+namespace {
+bool allDigits(const std::string& s) {
+    return !s.empty() && std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isdigit(c) != 0; });
+}
+} // namespace
+
+std::optional<SplitRawSet> findSplitRaw(const std::filesystem::path& path) {
+    std::error_code ec;
+    // Strip a numeric extension to get the prefix.
+    std::filesystem::path prefix = path;
+    std::string ext = path.extension().string();
+    if (!ext.empty() && ext.front() == '.' && allDigits(ext.substr(1))) prefix = path.parent_path() / path.stem();
+    const auto dir = prefix.parent_path().empty() ? std::filesystem::path(".") : prefix.parent_path();
+    const std::string stem = prefix.filename().string();
+    std::vector<std::pair<unsigned long, std::filesystem::path>> found;
+    std::size_t width = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+        if (!entry.is_regular_file(ec)) continue;
+        const std::string name = entry.path().filename().string();
+        if (name.size() <= stem.size() + 1 || name.compare(0, stem.size(), stem) != 0 || name[stem.size()] != '.') continue;
+        const std::string digits = name.substr(stem.size() + 1);
+        if (!allDigits(digits) || digits.size() > 6) continue;
+        if (width && digits.size() != width) continue;
+        width = digits.size();
+        found.emplace_back(std::stoul(digits), entry.path());
+    }
+    if (found.size() < 2) return std::nullopt;
+    std::sort(found.begin(), found.end());
+    // Contiguous from 0 or 1.
+    if (found.front().first > 1) return std::nullopt;
+    for (std::size_t i = 1; i < found.size(); ++i)
+        if (found[i].first != found[i - 1].first + 1) return std::nullopt;
+    SplitRawSet set;
+    set.prefix = prefix;
+    for (auto& [n, p] : found) {
+        set.totalBytes += std::filesystem::file_size(p, ec);
+        set.members.push_back(std::move(p));
+    }
+    return set;
+}
+
+Expected<std::shared_ptr<BlockDevice>> openSplitRaw(const std::filesystem::path& path, bool writable, std::uint32_t sectorSize) {
+    auto set = findSplitRaw(path);
+    if (!set) return fail(ErrorCategory::NotFound, "no split raw image set at " + path.string());
+    std::vector<BlockDevicePtr> parts;
+    for (const auto& m : set->members) {
+        auto f = FileDevice::open(m, writable ? FileDevice::Mode::ReadWrite : FileDevice::Mode::ReadOnly, sectorSize);
+        if (!f) return fail(f.error());
+        parts.push_back(*f);
+    }
+    return ConcatDevice::create(std::move(parts), set->prefix.string() + " (" + std::to_string(set->members.size()) + " parts)");
 }
 
 } // namespace stein::image
