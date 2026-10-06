@@ -11,33 +11,36 @@ architecture and design notes (`design/10..18`), owner review round 1 and
 the resulting decision log (`DECISIONS.md` D1–D15). Open: OQ3/OQ4/OQ5
 (owner still reading).
 
-## M1 — Skeleton + core + block + platform (read-only) + probe (L0) + imaging v1
+## M1 — Skeleton + core + block + platform + probe (L0/L1) + imaging v1 — **largely done (2026-10-06)**
 
-Deliverable: `stein` CLI that on all three OSes can `list` disks with
-identity and geometry, `probe` any disk or image and print the Topology tree
-with diagnostics (GPT/MBR/APM, nested BSD, LUKS/LVM/md detection, all L0
-filesystems), `image create/restore/verify` raw, split-raw and `.stein`
-(chunked, zstd, hashed, sparse-aware, resumable, optionally encrypted),
-`dump`/`restore` of individual pieces (tables, fs headers, LUKS headers),
-`inspect` printing the `LayoutTree` of any header, `gpt verify/repair`, and
-`open` an image to browse and mount its partitions (Linux FUSE first).
+Delivered (see `reports/2026-10-06-progress.md` for detail):
 
-- `stein_core`, `stein_layout` (manifest generator + `LayoutTree`; GPT, MBR,
-  APM, ext, FAT, NTFS, LUKS, LVM manifests), `stein_block`, `stein_platform`
-  (enumerate/open/geometry/lock/reread/loop-attach; SMART read), `stein_pt` (GPT/MBR/EBR/APM/BSD/LDM
-  read, GPT/MBR write + GPT repair), `stein_fs` L0 for every type in the
-  matrix, `stein_container` and `stein_volume` detect-only, `stein_probe`,
-  `stein_image` (raw/split/stein + copy engine), `stein_ops` (stack, runner,
-  report; operations: CreateTable, RepairTable, Create/Delete/Resize
-  partition entries (no fs resize yet), CreateImage, RestoreImage, VerifyImage,
-  WipeSignatures).
-- CI on Linux/macOS/Windows; fixtures checked in; Linux CI additionally
-  cross-checks against `sfdisk --json`, `sgdisk -v`, `blkid -p`, `mmls`.
-- Licence lint: core targets compile no non-MIT/BSD code.
+- `stein_core` (errors, units, GUIDs, CRC-32/32C with hardware paths, MD5,
+  SHA-256 with SHA-NI/ARMv8, BLAKE2b, ChaCha20-Poly1305, HMAC, PBKDF2,
+  Argon2id, key slots, JSON, LZ4, progress, reports, logging), `stein_layout`
+  (manifest-generated structures, `LayoutTree`), `stein_block` (memory, file,
+  slice, concat, overlay, sparse pieces incl. encrypted), `stein_pt`
+  (GPT/MBR/EBR/APM read, write, repair; byte-identical with sgdisk/sfdisk),
+  `stein_fs` (35 formats at L0; allocation maps for ext2/3/4, FAT, exFAT,
+  NTFS, HFS+), `stein_probe`, `stein_platform` (Linux, macOS, Windows:
+  enumerate, open, mounts, unmount/lock, re-read, loop/hdiutil attach),
+  `stein_image` (`.stein` v1 with split segments, LZ4, used-block-only,
+  encryption; raw and split-raw input; create/restore/verify/info/open),
+  `stein_ops` (operation stack simulated on an overlay; table create/add/
+  delete/update/repair/wipe; surface scan; fake-flash capacity test),
+  `stein_app` (profiles and backup/restore/verify scenarios).
+- `stein` CLI covering all of the above; CI green on Linux (ASan/UBSan),
+  macOS (arm64) and Windows (MSVC).
+
+Still open from the original M1 list: BSD disklabel / LDM parsing, hot-plug
+events, SMART, `stein_container`/`stein_volume` beyond detection (LUKS and
+LVM are detected, not opened), FUSE browsing of images.
 
 ## M2 — dr_stein v2 (the one-button app) + FAT/exFAT r/w + LUKS/LVM open
 
-Deliverable: `stein_app` with profiles; a minimal native UI per OS (or one
+Started: `stein_app` profiles/scenarios, used-block imaging for ext4/NTFS/
+FAT/exFAT/HFS+ and encrypted images landed early (see M1). Remaining
+deliverable: a minimal native UI per OS (or one
 first, chosen by the owner) that does Backup / Restore / Verify with a locked
 device selector; `.stein` images with used-block-only mode for ext4/NTFS/FAT/
 exFAT/HFS+/XFS/btrfs (L1 maps); LUKS1/2 unlock in-process; LVM linear/striped
