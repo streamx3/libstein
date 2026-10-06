@@ -30,7 +30,7 @@ CpuFeatures detect() {
         return f;
     }
 #if defined(STEIN_ARCH_X86)
-    unsigned a = 0, b = 0, c = 0, d = 0;
+    unsigned b = 0, c = 0;
 #if defined(_MSC_VER)
     int regs[4] = {0, 0, 0, 0};
     __cpuid(regs, 0);
@@ -47,6 +47,7 @@ CpuFeatures detect() {
         b = static_cast<unsigned>(regs[1]);
     }
 #else
+    unsigned a = 0, d = 0;
     const unsigned maxLeaf = __get_cpuid_max(0, nullptr);
     if (maxLeaf >= 1) __get_cpuid(1, &a, &b, &c, &d);
     bool ssse3 = (c >> 9) & 1, sse41 = (c >> 19) & 1;
