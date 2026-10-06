@@ -11,7 +11,7 @@
 //   stein pt restore <piece.sparse> <image>
 //   stein types [gpt|mbr]                 list known partition types
 //
-// Images are regular files for now; raw devices arrive with stein_platform.
+// <image> is a regular file or (on Linux) a raw block device such as /dev/sdb.
 #include "stein/block/file_device.hpp"
 #include "stein/block/sparse_file.hpp"
 #include "stein/core/strings.hpp"
@@ -19,6 +19,7 @@
 #include "stein/fs/filesystem.hpp"
 #include "stein/pt/gpt_table.hpp"
 #include "stein/pt/partition_table.hpp"
+#include "stein/platform/platform.hpp"
 #include "stein/probe/topology.hpp"
 
 #include <cstdio>
@@ -31,7 +32,8 @@ namespace {
 
 int usage() {
     std::fputs("usage: stein <probe|inspect|verify|repair|types> ... | stein pt <dump|restore> ...\n"
-               "  stein probe   <image> [--sector-size N]   topology tree: table, partitions, filesystems\n"
+               "  stein list                                disks the OS knows about\n"
+               "  stein probe   <image|device> [--sector-size N]   topology tree: table, partitions, filesystems\n"
                "  stein table   <image>                     partition table details\n"
                "  stein inspect <image> [--doc] [--sector-size N]\n"
                "  stein verify  <image>\n"
@@ -67,8 +69,28 @@ Args parse(int argc, char** argv) {
     return a;
 }
 
-Expected<std::shared_ptr<FileDevice>> openImage(const std::string& path, bool writable, std::uint32_t ss) {
-    return FileDevice::open(path, writable ? FileDevice::Mode::ReadWrite : FileDevice::Mode::ReadOnly, ss);
+Expected<std::shared_ptr<BlockDevice>> openImage(const std::string& path, bool writable, std::uint32_t ss) {
+    return platform::openAny(path, writable ? platform::OpenMode::ReadWrite : platform::OpenMode::ReadOnly, ss);
+}
+
+int cmdList(const Args&) {
+    auto& p = platform::current();
+    auto disks = p.enumerate();
+    if (!disks) return die(disks.error());
+    if (!p.isElevated()) std::fprintf(stderr, "note: not elevated; opening devices will likely fail\n");
+    std::printf("%-14s %12s %6s %-8s %-6s %-24s %s\n", "Device", "Size", "Sector", "Bus", "Flags", "Model", "Serial / backing file");
+    for (const auto& d : *disks) {
+        std::string flags;
+        if (d.removable) flags += "R";
+        if (d.rotational) flags += "H";
+        if (d.readOnly) flags += "ro";
+        if (d.isVirtual) flags += "V";
+        std::string id = d.serial;
+        if (d.backingFile) id = d.backingFile->string();
+        std::printf("%-14s %12s %6u %-8s %-6s %-24s %s\n", d.osPath.c_str(), formatSize(d.geometry.sizeBytes).c_str(),
+                    d.geometry.logicalSectorSize, std::string(platform::toString(d.bus)).c_str(), flags.c_str(), d.model.c_str(), id.c_str());
+    }
+    return 0;
 }
 
 void printTable(const pt::PartitionTable& t) {
@@ -252,6 +274,7 @@ int main(int argc, char** argv) {
     Args a = parse(argc, argv);
     if (a.positional.empty()) return usage();
     const std::string& cmd = a.positional[0];
+    if (cmd == "list") return cmdList(a);
     if (cmd == "probe") return cmdProbe(a);
     if (cmd == "table") return cmdTable(a);
     if (cmd == "inspect") return cmdInspect(a);
