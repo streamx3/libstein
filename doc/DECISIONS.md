@@ -26,7 +26,7 @@ supersedes it, never by editing the old one.
 **Decision.** Encrypted `.stein` images use AEAD_CHACHA20_POLY1305 (RFC 8439)
 per chunk and for the manifest, one random master key per image wrapped in up
 to eight passphrase slots. Slots stretch the passphrase with **Argon2id**
-(RFC 9106; default t=3, 64 MiB, p=4, like LUKS2) or PBKDF2-HMAC-SHA256 for
+(RFC 9106; default t=3, 256 MiB, p=4, in the range LUKS2 calibrates to) or PBKDF2-HMAC-SHA256 for
 tiny devices; both are own implementations (BLAKE2b included) checked
 against the RFC 9106 vector and the Python `cryptography` package. The image hash is
 keyed so it does not confirm known plaintext; keyless readers still verify

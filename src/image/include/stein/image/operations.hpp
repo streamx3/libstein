@@ -27,7 +27,7 @@ struct CreateOptions {
     bool recordTopology = true;       // probe the source and store the tree in the manifest
     bool usedBlocksOnly = false;      // read allocation bitmaps and store free space as zero chunks
     std::string passphrase;           // non-empty: encrypt (ChaCha20-Poly1305, key area with one passphrase slot)
-    KdfParams kdf;                    // Argon2id t=3 m=64MiB p=4 by default
+    KdfParams kdf;                    // Argon2id t=3 m=256MiB p=4 by default
     std::string sourceName;           // defaults to device->name()
     std::string sourceIdentity;       // platform identity when known
     std::string notes;

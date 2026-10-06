@@ -23,10 +23,10 @@ struct KdfParams {
     enum class Kind : std::uint8_t { Argon2id, Pbkdf2Sha256 };
     Kind kind = Kind::Argon2id;
     std::uint32_t cost = 3;            // Argon2id passes, or PBKDF2 iterations
-    std::uint32_t memoryKiB = 65536;   // Argon2id only (64 MiB)
+    std::uint32_t memoryKiB = 262144;  // Argon2id only (256 MiB; ~0.7 s on a 2 GHz core, fits a 1 GB single-board computer)
     std::uint32_t parallelism = 4;     // Argon2id only
 
-    static KdfParams argon2id(std::uint32_t passes = 3, std::uint32_t memoryKiB = 65536, std::uint32_t parallelism = 4) {
+    static KdfParams argon2id(std::uint32_t passes = 3, std::uint32_t memoryKiB = 262144, std::uint32_t parallelism = 4) {
         return KdfParams{Kind::Argon2id, passes, memoryKiB, parallelism};
     }
     static KdfParams pbkdf2(std::uint32_t iterations = 600000) { return KdfParams{Kind::Pbkdf2Sha256, iterations, 0, 0}; }

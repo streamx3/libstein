@@ -41,6 +41,7 @@ ctest --preset debug
 ./build/debug/tools/stein/stein image restore backup.stein /dev/sdc
 ./build/debug/tools/stein/stein app init office.json /dev/sdb /backups/office.stein   # dr_stein-style profile
 ./build/debug/tools/stein/stein app status office.json && ./build/debug/tools/stein/stein app restore office.json
+./build/debug/tools/stein/stein media test /dev/sdX --force    # fake-flash capacity test (destructive); `media scan` is read-only
 ```
 
 Fixtures under `tests/fixtures/` are regenerated with

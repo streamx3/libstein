@@ -108,7 +108,7 @@ Expected<Profile> Profile::fromJson(const json::Value& v) {
         const std::string kind = k.get("kind").asString();
         if (kind == "pbkdf2-hmac-sha256") p.image.kdf = KdfParams::pbkdf2(static_cast<std::uint32_t>(k.get("iterations").asUInt(600000)));
         else if (kind == "argon2id" || kind.empty())
-            p.image.kdf = KdfParams::argon2id(static_cast<std::uint32_t>(k.get("time").asUInt(3)), static_cast<std::uint32_t>(k.get("memory_kib").asUInt(65536)),
+            p.image.kdf = KdfParams::argon2id(static_cast<std::uint32_t>(k.get("time").asUInt(3)), static_cast<std::uint32_t>(k.get("memory_kib").asUInt(262144)),
                                               static_cast<std::uint32_t>(k.get("parallelism").asUInt(4)));
         else return fail(ErrorCategory::InvalidFormat, "unknown image.kdf.kind: " + kind);
     }

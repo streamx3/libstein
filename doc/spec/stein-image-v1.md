@@ -122,7 +122,7 @@ place. The manifest follows the key area.
 {"version":1,"cipher":"chacha20-poly1305",
  "digest":{"salt":"<16 bytes hex>","iterations":1000,"hash":"<32 bytes hex>"},
  "slots":[{"id":0,"type":"passphrase","label":"...","salt":"<16 hex>",
-           "kdf":"argon2id","time":3,"memory_kib":65536,"parallelism":4,
+           "kdf":"argon2id","time":3,"memory_kib":262144,"parallelism":4,
            "nonce":"<12 hex>","wrapped":"<48 hex>"},
           {"id":1,"type":"passphrase","salt":"<16 hex>",
            "kdf":"pbkdf2-hmac-sha256","iterations":600000,
@@ -136,7 +136,7 @@ place. The manifest follows the key area.
 - A **slot** wraps the master key with AEAD_CHACHA20_POLY1305 under a key
   derived from the passphrase by the slot's `kdf`: `argon2id` (RFC 9106,
   version 0x13; `time` passes, `memory_kib`, `parallelism`; the default is
-  t=3, 64 MiB, p=4) or `pbkdf2-hmac-sha256` (`iterations`, at least 1000).
+  t=3, 256 MiB, p=4) or `pbkdf2-hmac-sha256` (`iterations`, at least 1000).
   Nonce `nonce`, additional data `"stein-key-slot"`; `wrapped` is ciphertext
   (32) + tag (16). Up to 8 slots; the last one cannot be removed. A top-level
   `"kdf"` key (first drafts) applies to slots that lack their own.
