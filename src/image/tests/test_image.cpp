@@ -471,11 +471,12 @@ TEST_CASE("encrypted images: locked structure, unlock, wrong passphrase, tamper,
 #include "stein/block/sparse_file.hpp"
 #include "stein/image/vdisk.hpp"
 
-TEST_CASE("vdisk: qcow2 (v2/v3/compressed/4K clusters), VHD (dynamic/fixed), VHDX, VMDK (sparse/stream-optimized) and VDI reproduce the raw disk byte for byte") {
+TEST_CASE("vdisk: qcow2 (v2/v3/deflate and zstd compressed/4K clusters), VHD (dynamic/fixed), VHDX, VMDK (sparse/stream-optimized) and VDI reproduce the raw disk byte for byte") {
     struct Case { const char* name; image::VdiskFormat format; const char* variant; bool compressed; };
     const Case cases[] = {
         {"qcow2", image::VdiskFormat::Qcow2, "v3", false},          {"qcow2_compressed", image::VdiskFormat::Qcow2, "v3", false},
         {"qcow2_v2", image::VdiskFormat::Qcow2, "v2", false},       {"qcow2_64k", image::VdiskFormat::Qcow2, "v3", false},
+        {"qcow2_zstd", image::VdiskFormat::Qcow2, "v3", false},
         {"vhd_dynamic", image::VdiskFormat::Vhd, "dynamic", false}, {"vhd_fixed", image::VdiskFormat::Vhd, "fixed", false},
         {"vhdx", image::VdiskFormat::Vhdx, "dynamic", false},       {"vmdk_sparse", image::VdiskFormat::Vmdk, "monolithicSparse", false},
         {"vmdk_stream", image::VdiskFormat::Vmdk, "streamOptimized", true}, {"vdi", image::VdiskFormat::Vdi, "dynamic", false},

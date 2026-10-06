@@ -1,0 +1,7 @@
+format=qcow2
+virtual_size=25165824
+raw_size=25165824
+sha256=7a6f1d4af1c32d78266d959c14f18c2d8efe1b0338dec5891374ed87d36018a0
+cluster_size=65536
+compat=1.1
+compression_type=zstd

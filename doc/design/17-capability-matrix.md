@@ -18,7 +18,7 @@ L0 detect/geometry/label/uuid · L1 used-block map · L2 offline metadata edit
 | HFS (classic) | **done** (incl. wrapper) | – | v1 | – | – | – | – | – |
 | APFS (container + volumes) | **done** (container) | v2 | v1 (name) | – | – | – | v2 | – |
 | XFS | **done** | v2 | v1 | x (grow) | x | x | **done** (reader: v4/v5 inodes, extents and bmbt forks, sf/block/leaf/node dirs) | – |
-| btrfs | **done** | v2 | v1 | x | x | x | **done** (reader: chunk map, fs/subvolume trees, inline/regular extents, zlib and lzo compression; zstd refused until a decoder exists) | – |
+| btrfs | **done** | v2 | v1 | x | x | x | **done** (reader: chunk map, fs/subvolume trees, inline/regular extents, zlib/lzo/zstd compression) | – |
 | F2FS, JFS, nilfs2, bcachefs, reiser*, minix, ocfs2 | **done** (+erofs, squashfs) | – | v1 (read) | x | x | x | – | – |
 | UDF | **done** | – | v1 | – | – | x | **done** (reader: physical/sparable/metadata maps, FE/EFE, inline/short/long ADs, symlinks; VAT v2) | – |
 | ISO9660 | **done** (+Joliet) | v1 (used = everything) | v1 | – | – | – | **done** (reader: Rock Ridge names/links/relocation, Joliet, plain) | – |
@@ -61,7 +61,7 @@ L0 detect/geometry/label/uuid · L1 used-block map · L2 offline metadata edit
 | E01/EWF | **done** (EnCase 5/6 v1 format, segments, deflate chunks, stored MD5/SHA-1) | v2 | **done** | EWF2 (EnCase 7), smart, logical evidence v2 |
 | VHD (fixed/dynamic) | **done** | v2 | **done** | differencing v2; fixed VHD = raw + footer → native Windows attach |
 | VHDX | **done** (dynamic; log must be clean) | v3 | **done** | differencing v2 |
-| qcow2 | **done** (v2/v3, deflate-compressed clusters) | v3 | **done** | backing files, zstd, subclusters v2 |
+| qcow2 | **done** (v2/v3, deflate- and zstd-compressed clusters) | v3 | **done** | backing files, subclusters v2 |
 | VMDK | **done** (sparse, stream-optimized, multi-extent descriptors) | – | **done** | snapshot chains v2 |
 | DMG/UDIF | **done** (UDRO raw, UDZO zlib, UDBZ bzip2, UDCO ADC; ignored/zero blocks) | – | **done** | lzfse (ULFO), lzma (ULMO), segmented and encrypted images v2 |
 | VDI | **done** (dynamic/fixed) | – | **done** | undo/differencing v2 |

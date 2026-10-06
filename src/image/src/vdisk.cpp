@@ -9,6 +9,7 @@
 #include "stein/core/endian.hpp"
 #include "stein/core/hash.hpp"
 #include "stein/core/inflate.hpp"
+#include "stein/core/zstd.hpp"
 #include "stein/core/strings.hpp"
 #include "stein/image/stein_format.hpp"
 #include "stein/image/operations.hpp"
@@ -182,7 +183,7 @@ Expected<std::shared_ptr<BlockDevice>> openQcow2(std::shared_ptr<BlockDevice> fi
     } else {
         info.variant = "v2";
     }
-    if (compressionType == 1) info.notes.push_back("zstd compression: compressed clusters cannot be read yet");
+    if (compressionType == 1) info.notes.push_back("zstd-compressed clusters");
     else if (compressionType != 0) return fail(ErrorCategory::Unsupported, "unknown qcow2 compression type");
     const std::uint32_t clusterSize = 1u << clusterBits;
     const std::uint64_t l2Entries = clusterSize / 8;
@@ -220,7 +221,6 @@ Expected<std::shared_ptr<BlockDevice>> openQcow2(std::shared_ptr<BlockDevice> fi
         if (!l2) return fail(l2.error());
         const std::uint64_t e = (**l2)[l2Index];
         if (e & (1ull << 62)) {
-            if (compressionType != 0) return fail(ErrorCategory::Unsupported, "zstd-compressed qcow2 cluster");
             m.kind = MappedDevice::Kind::Compressed;
             m.unit = (std::uint64_t{l1Index} << 32) | l2Index;   // decoder re-derives the entry from the tables
             return m;
@@ -242,7 +242,7 @@ Expected<std::shared_ptr<BlockDevice>> openQcow2(std::shared_ptr<BlockDevice> fi
         const std::uint64_t compressedLen = sectors * 512 - (host & 511);
         auto comp = readExact(*file, host, compressedLen);
         if (!comp) return fail(comp.error());
-        auto n = compress::inflateRaw(*comp, out);
+        auto n = compressionType == 1 ? compress::zstdDecompressFrame(*comp, out) : compress::inflateRaw(*comp, out);
         if (!n) return fail(n.error());
         // Short output is legal (the rest of the cluster is zero); longer input is clamped by the sector count.
         return {};

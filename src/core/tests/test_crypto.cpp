@@ -405,3 +405,49 @@ TEST_CASE("lzo1x: liblzo2 vectors (lzo1x_999 and lzo1x_1), truncation and small 
     const std::byte badMarker[] = {std::byte{0x12}, std::byte{0}, std::byte{0}};   // length code 2 with distance 0
     CHECK_FALSE(compress::lzo1xDecompress(badMarker, out));
 }
+
+#include "stein/core/zstd.hpp"
+#include "zstd_vectors.hpp"
+
+TEST_CASE("zstd: reference CLI vectors at several levels, checksums, concatenated frames, truncation and small buffers") {
+    for (const auto& v : test::vectors::kZstd) {
+        CAPTURE(v.name);
+        auto comp = hexBytes(std::string(v.compressedHex).c_str());
+        std::vector<std::byte> out(v.size + 16);
+        auto n = compress::zstdDecompress(comp, out);
+        REQUIRE_MESSAGE(n, (n ? std::string() : n.error().toString()));
+        CHECK(*n == v.size);
+        CHECK(Hasher::hex(Hasher::digest(HashAlgorithm::Sha256, std::span<const std::byte>(out).subspan(0, *n))) == v.sha256);
+        if (v.size > 1) {
+            std::vector<std::byte> small(v.size - 1);
+            auto s = compress::zstdDecompress(comp, small);
+            REQUIRE_FALSE(s);
+            CHECK(s.error().category() == ErrorCategory::OutOfRange);
+        }
+        auto t = compress::zstdDecompress(std::span<const std::byte>(comp).subspan(0, comp.size() - 2), out);
+        CHECK_FALSE(t);
+        if (std::string_view(v.name).find("nc") == std::string_view::npos && v.size > 0) {
+            auto size = compress::zstdContentSize(comp);
+            REQUIRE(size);
+            CHECK(*size == v.size);
+            // Flip a byte of the payload: the content checksum catches it (or the format does).
+            auto bad = comp;
+            bad[bad.size() / 2] ^= std::byte{0x55};
+            CHECK_FALSE(compress::zstdDecompress(bad, out));
+        }
+    }
+    // Single-frame decoding stops at the first frame: the concatenated vector's first frame is "short".
+    for (const auto& v : test::vectors::kZstd)
+        if (std::string_view(v.name) == "concat") {
+            auto comp = hexBytes(std::string(v.compressedHex).c_str());
+            std::vector<std::byte> out(v.size);
+            auto n = compress::zstdDecompressFrame(comp, out);
+            REQUIRE(n);
+            CHECK(*n == 28);
+            CHECK(std::string(reinterpret_cast<const char*>(out.data()), *n) == "hello hello hello hello zstd");
+        }
+    // XXH64 reference values.
+    CHECK(compress::xxh64({}) == 0xEF46DB3751D8E999ull);
+    const char* msg = "Nobody inspects the spammish repetition";
+    CHECK(compress::xxh64(std::span<const std::byte>(reinterpret_cast<const std::byte*>(msg), std::strlen(msg))) == 0xFBCEA83C8A378BF1ull);
+}

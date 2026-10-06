@@ -684,8 +684,8 @@ TEST_CASE("xfs reader: protofile-built v5 fixtures read back exactly (shortform/
     }
 }
 
-TEST_CASE("btrfs reader: mkfs.btrfs --rootdir fixtures read back exactly (inline and regular extents, holes, hard links, symlinks, mixed block groups, zlib and lzo compression)") {
-    const char* names[] = {"btrfs", "btrfs_mixed", "btrfs_zlib", "btrfs_lzo"};
+TEST_CASE("btrfs reader: mkfs.btrfs --rootdir fixtures read back exactly (inline and regular extents, holes, hard links, symlinks, mixed block groups, zlib/lzo/zstd compression)") {
+    const char* names[] = {"btrfs", "btrfs_mixed", "btrfs_zlib", "btrfs_lzo", "btrfs_zstd"};
     for (const char* name : names) {
         const std::string fixture = name;
         CAPTURE(fixture);
@@ -737,20 +737,6 @@ TEST_CASE("btrfs reader: mkfs.btrfs --rootdir fixtures read back exactly (inline
         REQUIRE(n);
         CHECK(*n == 5000);
         CHECK(std::equal(part.begin(), part.end(), whole->begin() + 131072 - 2500));
-    }
-    // zstd-compressed extents are recognised and refused until a decoder exists.
-    {
-        auto dev = loadSparseFixture("btrfsfs/btrfs_zstd.sparse");
-        auto probed = fs::probe(dev);
-        REQUIRE(probed);
-        auto reader = (*probed)->openReader();
-        REQUIRE(reader);
-        auto f = fs::resolvePath(**reader, "compressible.txt");
-        REQUIRE(f);
-        auto r = fs::readAll(**reader, *f, 1 << 20);
-        REQUIRE_FALSE(r);
-        CHECK(r.error().category() == ErrorCategory::Unsupported);
-        CHECK((*reader)->readdir(*fs::resolvePath(**reader, "many"))->size() == 400);   // metadata is uncompressed
     }
 }
 

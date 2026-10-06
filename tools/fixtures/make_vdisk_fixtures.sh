@@ -60,6 +60,7 @@ make_one qcow2            qcow2
 make_one qcow2_compressed qcow2 -c
 make_one qcow2_v2         qcow2 -o compat=0.10
 make_one qcow2_64k        qcow2 -o cluster_size=4096
+make_one qcow2_zstd       qcow2 -c -o compression_type=zstd
 make_one vhd_dynamic      vpc
 make_one vhd_fixed        vpc   -o subformat=fixed
 make_one vhdx             vhdx

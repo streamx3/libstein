@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: MIT
 // btrfs reader: superblock and chunk tree for logical -> physical mapping,
 // root tree for the subvolume roots, fs tree items (INODE_ITEM, DIR_INDEX,
-// EXTENT_DATA inline/regular/prealloc, zlib and lzo compressed), range scans
+// EXTENT_DATA inline/regular/prealloc, zlib/lzo/zstd compressed), range scans
 // over the B-tree.
 #include "detectors.hpp"
 #include "stein/core/endian.hpp"
 #include "stein/core/inflate.hpp"
 #include "stein/core/lzo.hpp"
+#include "stein/core/zstd.hpp"
 #include "stein/fs/btrfs_reader.hpp"
 
 #include <algorithm>
@@ -430,8 +431,8 @@ Expected<std::size_t> lzoExtent(std::span<const std::byte> in, std::span<std::by
 Expected<std::span<const std::byte>> BtrfsReader::decompressed(std::uint64_t fileId, const ExtentItem& e) {
     const std::uint64_t key = e.type == kExtentInline ? (fileId | (1ull << 63)) : e.diskBytenr;
     if (key == m_decompKey) return std::span<const std::byte>(m_decompData);
-    if (e.compression == kCompressZstd) return fail(ErrorCategory::Unsupported, "zstd-compressed btrfs extents are not supported yet");
-    if (e.compression != kCompressZlib && e.compression != kCompressLzo) return fail(ErrorCategory::Unsupported, "unknown btrfs compression type " + std::to_string(e.compression));
+    if (e.compression != kCompressZlib && e.compression != kCompressLzo && e.compression != kCompressZstd)
+        return fail(ErrorCategory::Unsupported, "unknown btrfs compression type " + std::to_string(e.compression));
     if (e.ramBytes > (256u << 20)) return fail(ErrorCategory::InvalidFormat, "compressed extent claims " + std::to_string(e.ramBytes) + " decompressed bytes");
     std::vector<std::byte> raw;
     std::span<const std::byte> in;
@@ -444,7 +445,9 @@ Expected<std::span<const std::byte>> BtrfsReader::decompressed(std::uint64_t fil
         in = raw;
     }
     std::vector<std::byte> out(static_cast<std::size_t>(e.ramBytes));
-    Expected<std::size_t> n = e.compression == kCompressZlib ? compress::inflateZlib(in, out) : lzoExtent(in, out, m_sectorSize);
+    Expected<std::size_t> n = e.compression == kCompressZlib ? compress::inflateZlib(in, out)
+                              : e.compression == kCompressLzo ? lzoExtent(in, out, m_sectorSize)
+                                                              : compress::zstdDecompress(in, out);
     if (!n) return fail(n.error());
     if (*n < out.size()) std::fill(out.begin() + static_cast<std::ptrdiff_t>(*n), out.end(), std::byte{0});
     m_decompData = std::move(out);
