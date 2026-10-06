@@ -344,10 +344,10 @@ Expected<std::size_t> lzvnDecompress(std::span<const std::byte> inBytes, std::sp
             ip += 3;
         } else if (row == 0x7 || row == 0xD) {
             return fail(ErrorCategory::InvalidFormat, "undefined lzvn opcode");
-        } else if (low == 7) {   // large distance
-            if (ip + 4 > n) return fail(ErrorCategory::InvalidFormat, "truncated lzvn opcode");
+        } else if (low == 7) {   // large distance: opcode and a 16-bit distance
+            if (ip + 3 > n) return fail(ErrorCategory::InvalidFormat, "truncated lzvn opcode");
             D = in[ip + 1] | (std::size_t{in[ip + 2]} << 8);
-            ip += 4;
+            ip += 3;
         } else if (low == 6) {
             if (opc == 0x06) return op;   // end of stream
             if (opc == 0x0E || opc == 0x16) {

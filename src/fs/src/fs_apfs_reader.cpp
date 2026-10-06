@@ -14,6 +14,8 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace stein::fs::detail {
@@ -579,10 +581,13 @@ Expected<std::shared_ptr<const std::vector<std::byte>>> ApfsReader::decompressed
         return {};
     };
     // One in-xattr payload, or one resource-fork block, into `to` (exactly to.size() bytes).
+    static const bool debug = std::getenv("STEIN_APFS_DEBUG") != nullptr;
+    if (debug) std::fprintf(stderr, "decmpfs inode %llu type %u size %llu payload %zu\n", static_cast<unsigned long long>(id), d->type, static_cast<unsigned long long>(d->size), d->payload.size());
     auto decodeBlock = [&](std::uint32_t type, std::span<const std::byte> src, std::span<std::byte> to) -> Expected<void> {
         if (to.empty()) return {};
         if (src.empty()) return fail(ErrorCategory::InvalidFormat, "decmpfs block is empty");
         const std::uint8_t marker = std::to_integer<std::uint8_t>(src[0]);
+        if (debug) std::fprintf(stderr, "  block in %zu bytes (first 0x%02x 0x%02x) -> out %zu\n", src.size(), marker, src.size() > 1 ? std::to_integer<unsigned>(src[1]) : 0u, to.size());
         Expected<std::size_t> n;
         switch (type) {
         case kCmpZlibXattr:
