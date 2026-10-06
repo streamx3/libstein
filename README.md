@@ -59,7 +59,11 @@ NTFS, FAT, exFAT, HFS+, APFS, ISO 9660, UDF, XFS, btrfs (zlib/lzo/zstd compressi
 backup/restore; fake-flash and surface tests. See `doc/reports/` for the detailed status.
 
 Fixtures under `tests/fixtures/` are regenerated with the scripts in
-`tools/fixtures/` (partition tables, filesystems, LUKS, LVM; they need the
-matching mkfs/cryptsetup/lvm tools, loop devices and root).
+`tools/fixtures/` (partition tables, filesystems, LUKS, LVM, VeraCrypt,
+virtual disks, E01, squashfs, EROFS; they need the matching mkfs,
+cryptsetup, lvm, qemu-img, ewfacquire, mksquashfs and mkfs.erofs tools,
+loop devices and root). HFS+, APFS and DMG fixtures come from
+`.github/workflows/fixtures-macos.yml`, which runs hdiutil on macOS and
+commits the results.
 
 License: MIT.
