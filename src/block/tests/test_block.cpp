@@ -10,6 +10,7 @@
 
 #include <array>
 #include <filesystem>
+#include <fstream>
 
 using namespace stein;
 using stein::test::bytesOf;
@@ -173,4 +174,44 @@ TEST_CASE("ConcatDevice: parts laid end to end") {
     // A ragged middle part is refused.
     CHECK_FALSE(ConcatDevice::create({c, a}));
     CHECK_FALSE(ConcatDevice::create({}));
+}
+
+TEST_CASE("SparseFile: encrypted pieces round-trip, refuse without or with a wrong passphrase, detect tampering") {
+    auto dir = std::filesystem::temp_directory_path() / "stein_test_piece_enc";
+    std::filesystem::create_directories(dir);
+    auto dev = std::make_shared<MemoryDevice>(1 * MiB);
+    for (std::size_t i = 0; i < 4096; ++i) dev->bytes()[i] = static_cast<std::byte>(i);
+    for (std::size_t i = 0; i < 512; ++i) dev->bytes()[700 * 1024 + i] = std::byte{0xAB};
+    auto piece = SparseFile::capture(*dev, {Region{0, 4096}, Region{700 * 1024, 512}});
+    REQUIRE(piece);
+    const auto path = dir / "p.piece";
+    REQUIRE(SparseFile::write(path, *piece, "pw", 1000));
+    CHECK(SparseFile::isEncrypted(path));
+    CHECK(SparseFile::read(path).error().category() == ErrorCategory::Permission);
+    CHECK(SparseFile::read(path, "wrong").error().category() == ErrorCategory::Integrity);
+    auto back = SparseFile::read(path, "pw");
+    REQUIRE(back);
+    CHECK(back->totalSize == 1 * MiB);
+    REQUIRE(back->runs.size() == 2);
+    CHECK(back->runs[1].offset == 700 * 1024);
+    CHECK(back->runs[0].bytes == piece->runs[0].bytes);
+    // The plaintext does not appear in the file.
+    {
+        std::ifstream in(path, std::ios::binary);
+        std::string all((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        CHECK(all.find("STEINSPARSE1") == std::string::npos);
+        CHECK(all.find("STEINPIECE1E") == 0);
+        CHECK(all.find("chacha20-poly1305") != std::string::npos);
+        // Tamper with the last byte of the ciphertext.
+        all.back() = static_cast<char>(all.back() ^ 1);
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        out.write(all.data(), static_cast<std::streamsize>(all.size()));
+    }
+    CHECK(SparseFile::read(path, "pw").error().category() == ErrorCategory::Integrity);
+    // Plain pieces still read as before.
+    REQUIRE(SparseFile::write(dir / "plain.sparse", *piece));
+    CHECK_FALSE(SparseFile::isEncrypted(dir / "plain.sparse"));
+    CHECK(SparseFile::read(dir / "plain.sparse")->runs.size() == 2);
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
 }

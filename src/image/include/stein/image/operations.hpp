@@ -9,7 +9,6 @@
 #include "stein/core/json.hpp"
 #include "stein/core/progress.hpp"
 #include "stein/image/copy.hpp"
-#include "stein/image/keys.hpp"
 #include "stein/image/stein_format.hpp"
 
 #include <filesystem>

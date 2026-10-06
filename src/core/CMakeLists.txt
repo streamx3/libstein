@@ -14,7 +14,8 @@ stein_add_module(core
     src/log.cpp
     src/json.cpp
     src/lz4.cpp
-    src/crypto.cpp)
+    src/crypto.cpp
+    src/keys.cpp)
 
 # The hardware kernels are compiled with their ISA extension enabled; they run
 # only after cpuFeatures() confirms the CPU has it.

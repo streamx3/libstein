@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "stein/image/stein_format.hpp"
 
-#include "stein/image/keys.hpp"
 
 #include "stein/core/crc32.hpp"
 #include "stein/core/endian.hpp"

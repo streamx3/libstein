@@ -27,9 +27,17 @@ public:
     };
 
     static constexpr const char* kMagic = "STEINSPARSE1";
+    static constexpr const char* kEncryptedMagic = "STEINPIECE1E";   // key area + AEAD(STEINSPARSE1 body)
 
-    static Expected<Contents> read(const std::filesystem::path& path);
-    static Expected<void> write(const std::filesystem::path& path, const Contents& contents);
+    // `passphrase` opens encrypted pieces (Permission error when missing, Integrity when wrong).
+    static Expected<Contents> read(const std::filesystem::path& path, const std::string& passphrase = {});
+    // Non-empty `passphrase`: write an encrypted piece with one key slot.
+    static Expected<void> write(const std::filesystem::path& path, const Contents& contents, const std::string& passphrase = {},
+                                std::uint32_t kdfIterations = 600000);
+    static bool isEncrypted(const std::filesystem::path& path);
+
+    std::vector<std::byte> static serialize(const Contents& contents);
+    static Expected<Contents> parse(std::span<const std::byte> bytes, const std::string& what);
 
     // Load into a fresh in-memory device (fixtures).
     static Expected<std::shared_ptr<MemoryDevice>> loadIntoMemory(const std::filesystem::path& path);

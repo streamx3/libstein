@@ -6,6 +6,7 @@
 #include "stein/core/error.hpp"
 #include "stein/core/guid.hpp"
 #include "stein/core/crypto.hpp"
+#include "stein/core/keys.hpp"
 #include "stein/core/hash.hpp"
 #include "stein/core/json.hpp"
 #include "stein/core/units.hpp"
@@ -20,6 +21,11 @@
 #include <vector>
 
 namespace stein::image {
+
+using Keys = stein::Keys;
+inline crypto::Nonce96 chunkNonce(std::uint64_t chunkIndex) { return domainNonce("CHNK", chunkIndex); }
+inline crypto::Nonce96 manifestNonce() { return domainNonce("MANF", 0); }
+inline crypto::Nonce96 imageHashNonce() { return domainNonce("HASH", 0); }
 
 enum class Compression : std::uint8_t { None = 0, Lz4 = 1 };
 std::string_view toString(Compression c);

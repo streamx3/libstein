@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Key area of an encrypted .stein image: LUKS2-style. One random 256-bit
+// Key area of an encrypted .stein image or piece: LUKS2-style. One random 256-bit
 // master key encrypts the image; each slot wraps it under a key derived from
 // a passphrase (PBKDF2-HMAC-SHA256 for now, "kdf" names it so Argon2id can
 // follow). A digest of the master key lets a reader tell a wrong passphrase
@@ -15,7 +15,7 @@
 #include <string>
 #include <vector>
 
-namespace stein::image {
+namespace stein {
 
 struct KeySlot {
     int id = 0;
@@ -55,9 +55,7 @@ private:
     std::optional<crypto::Key256> m_master;
 };
 
-// Nonce derivation shared by writer and reader: 8-byte index + 4-byte domain tag.
-crypto::Nonce96 chunkNonce(std::uint64_t chunkIndex);
-crypto::Nonce96 manifestNonce();
-crypto::Nonce96 imageHashNonce();
+// Nonce convention for everything the key protects: 8-byte index + 4-byte domain tag.
+crypto::Nonce96 domainNonce(const char tag[4], std::uint64_t index);
 
-} // namespace stein::image
+} // namespace stein

@@ -49,6 +49,7 @@ int usage() {
                "  stein repair  <image> [--dry-run]\n"
                "  stein pt dump <image> <piece.sparse>\n"
                "  stein pt restore <piece.sparse> <image>\n"
+               "      pieces are encrypted when --passphrase (or $STEIN_PASSPHRASE) is given\n"
                "  stein pt create  <image> gpt|mbr|apm [--dry-run] [--force]\n"
                "  stein pt add     <image> [--start LBA|SIZE] [--size SIZE|--end LBA] [--type CODE] [--name NAME] [--index N] [--no-wipe]\n"
                "  stein pt rm      <image> <index>\n"
@@ -476,13 +477,13 @@ int cmdPt(const Args& a) {
         if ((*t)->type() == pt::TableType::None) return die(Error(ErrorCategory::NotFound, "no partition table to dump"));
         auto piece = SparseFile::capture(**dev, (*t)->metadataRegions());
         if (!piece) return die(piece.error());
-        if (auto w = SparseFile::write(a.positional[3], *piece); !w) return die(w.error());
+        if (auto w = SparseFile::write(a.positional[3], *piece, g_passphrase, a.kdfIterations ? a.kdfIterations : 600000); !w) return die(w.error());
         std::printf("saved %zu metadata regions of a %s table to %s\n", piece->runs.size(),
                     std::string(pt::toString((*t)->type())).c_str(), a.positional[3].c_str());
         return 0;
     }
     if (sub == "restore") {
-        auto piece = SparseFile::read(a.positional[2]);
+        auto piece = SparseFile::read(a.positional[2], g_passphrase);
         if (!piece) return die(piece.error());
         auto dev = openImage(a.positional[3], true, piece->sectorSize);
         if (!dev) return die(dev.error());
@@ -702,7 +703,7 @@ int cmdFsPiece(const Args& a) {
         for (const auto& r : (*fsr)->metadataRegions()) regions.push_back(Region{base + r.offset, r.length});
         auto piece = SparseFile::capture(**dev, regions);
         if (!piece) return die(piece.error());
-        if (auto w = SparseFile::write(a.positional[3], *piece); !w) return die(w.error());
+        if (auto w = SparseFile::write(a.positional[3], *piece, g_passphrase, a.kdfIterations ? a.kdfIterations : 600000); !w) return die(w.error());
         ByteCount bytes = 0;
         for (const auto& r : regions) bytes += r.length;
         std::printf("saved %zu metadata regions (%s) of %s to %s\n", regions.size(), formatSize(bytes).c_str(),
@@ -712,7 +713,7 @@ int cmdFsPiece(const Args& a) {
         return 0;
     }
     if (sub == "restore") {
-        auto piece = SparseFile::read(a.positional[2]);
+        auto piece = SparseFile::read(a.positional[2], g_passphrase);
         if (!piece) return die(piece.error());
         auto dev = openImage(a.positional[3], true, piece->sectorSize);
         if (!dev) return die(dev.error());

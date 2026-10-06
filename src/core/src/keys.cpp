@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-#include "stein/image/keys.hpp"
+#include "stein/core/keys.hpp"
 
 #include "stein/core/endian.hpp"
 #include "stein/core/hash.hpp"
@@ -8,7 +8,7 @@
 #include <algorithm>
 #include <cstring>
 
-namespace stein::image {
+namespace stein {
 
 namespace {
 
@@ -43,20 +43,10 @@ constexpr std::string_view kSlotAad = "stein-key-slot";
 
 } // namespace
 
-crypto::Nonce96 chunkNonce(std::uint64_t chunkIndex) {
+crypto::Nonce96 domainNonce(const char tag[4], std::uint64_t index) {
     crypto::Nonce96 n{};
-    storeLe64(reinterpret_cast<std::byte*>(n.data()), chunkIndex);
-    std::memcpy(n.data() + 8, "CHNK", 4);
-    return n;
-}
-crypto::Nonce96 manifestNonce() {
-    crypto::Nonce96 n{};
-    std::memcpy(n.data() + 8, "MANF", 4);
-    return n;
-}
-crypto::Nonce96 imageHashNonce() {
-    crypto::Nonce96 n{};
-    std::memcpy(n.data() + 8, "HASH", 4);
+    storeLe64(reinterpret_cast<std::byte*>(n.data()), index);
+    std::memcpy(n.data() + 8, tag, 4);
     return n;
 }
 
@@ -178,4 +168,4 @@ Expected<Keys> Keys::fromJson(std::string_view text) {
     return k;
 }
 
-} // namespace stein::image
+} // namespace stein
