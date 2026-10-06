@@ -10,6 +10,7 @@
 #include "stein/core/error.hpp"
 #include "stein/core/units.hpp"
 #include "stein/fs/allocation_map.hpp"
+#include "stein/fs/reader.hpp"
 #include "stein/layout/node.hpp"
 
 #include <cstdint>
@@ -93,6 +94,8 @@ public:
     // L1: read the allocation bitmap. Unsupported unless capabilities() has UsedBlocks.
     // A filesystem that is not cleanly unmounted refuses (its bitmap may be stale).
     virtual Expected<AllocationMap> allocationMap() const;
+    // L3: a reader for files and directories. Unsupported unless capabilities() has Read.
+    virtual Expected<std::unique_ptr<Reader>> openReader() const;
 
     const std::shared_ptr<BlockDevice>& device() const { return m_device; }
     layout::Validity health() const;

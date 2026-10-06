@@ -2,6 +2,7 @@
 #include "detectors.hpp"
 #include "stein/core/endian.hpp"
 #include "stein/core/strings.hpp"
+#include "stein/fs/ext_reader.hpp"
 #include "stein/layout/gen/ext.hpp"
 
 namespace stein::fs::detail {
@@ -108,6 +109,7 @@ Result detectExt(Dev dev) {
         alloc->is64 = is64;
         alloc->needsRecovery = (incompat & (1u << 2)) != 0;
         fs->setAllocationSource(std::move(alloc));
+        fs->setReaderSource(makeExtReaderSource());
     }
     // First backup superblock (group 1) when it exists.
     if (groups > 1) {

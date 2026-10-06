@@ -246,3 +246,117 @@ TEST_CASE("allocation maps: a dirty filesystem refuses to hand out its bitmap") 
     REQUIRE_FALSE(map);
     CHECK(map.error().category() == ErrorCategory::Busy);
 }
+
+// ---- L3: ext reader ----------------------------------------------------------
+
+#include "stein/core/hash.hpp"
+#include "stein/fs/reader.hpp"
+
+namespace {
+struct ExtOracle {
+    std::map<std::string, std::pair<char, std::uint64_t>> entries;   // path -> (type, size)
+    std::map<std::string, std::string> sha;
+    std::map<std::string, std::string> links;
+};
+ExtOracle loadExtOracle(const std::string& name) {
+    ExtOracle o;
+    std::ifstream in(std::string(STEIN_FIXTURE_DIR) + "/extfs/" + name + ".oracle.txt");
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.rfind("sha256 ", 0) == 0) {
+            const auto sp = line.find(' ', 7);
+            o.sha[line.substr(sp + 1)] = line.substr(7, sp - 7);
+        } else if (line.rfind("link ", 0) == 0) {
+            const auto arrow = line.find(" -> ");
+            o.links[line.substr(5, arrow - 5)] = line.substr(arrow + 4);
+        } else if (line.size() > 4 && (line[0] == 'f' || line[0] == 'd' || line[0] == 'l')) {
+            const auto sp1 = line.find(' ', 2);
+            o.entries[line.substr(sp1 + 1)] = {line[0], std::stoull(line.substr(2, sp1 - 2))};
+        }
+    }
+    return o;
+}
+void walk(fs::Reader& r, const fs::Inode& dir, const std::string& prefix, std::map<std::string, std::pair<char, std::uint64_t>>& seen, std::map<std::string, std::string>& sha,
+          std::map<std::string, std::string>& links) {
+    auto entries = r.readdir(dir);
+    REQUIRE(entries);
+    for (const auto& e : *entries) {
+        const std::string path = prefix.empty() ? e.name : prefix + "/" + e.name;
+        auto st = r.stat(e.inode);
+        REQUIRE(st);
+        if (e.type != fs::FileType::Unknown) CHECK(e.type == st->type);
+        char t = st->type == fs::FileType::Directory ? 'd' : st->type == fs::FileType::Symlink ? 'l' : 'f';
+        seen[path] = {t, st->size};
+        if (t == 'd') walk(r, e.inode, path, seen, sha, links);
+        else if (t == 'f') {
+            auto data = fs::readAll(r, e.inode);
+            REQUIRE(data);
+            CHECK(data->size() == st->size);
+            sha[path] = Hasher::hex(Hasher::digest(HashAlgorithm::Sha256, *data));
+        } else {
+            auto target = r.readlink(e.inode);
+            REQUIRE(target);
+            links[path] = *target;
+        }
+    }
+}
+} // namespace
+
+TEST_CASE("ext reader: every file, directory and symlink matches the kernel mount (ext4 extents+inline, ext2 1K indirect, ext3 2K)") {
+    const char* names[] = {"ext4", "ext2", "ext3"};
+    for (const char* name : names) {
+        const std::string fixture = name;
+        CAPTURE(fixture);
+        auto dev = loadSparseFixture("extfs/" + fixture + ".sparse");
+        auto probed = fs::probe(dev);
+        REQUIRE(probed);
+        REQUIRE(*probed);
+        REQUIRE(fs::has((*probed)->capabilities(), fs::Capability::Read));
+        auto reader = (*probed)->openReader();
+        REQUIRE_MESSAGE(reader, (reader ? std::string() : reader.error().toString()));
+        auto root = (*reader)->root();
+        REQUIRE(root);
+        std::map<std::string, std::pair<char, std::uint64_t>> seen;
+        std::map<std::string, std::string> sha, links;
+        walk(**reader, *root, "", seen, sha, links);
+        const auto o = loadExtOracle(fixture);
+        CHECK(seen.size() == o.entries.size());
+        for (const auto& [path, ts] : o.entries) {
+            CAPTURE(path);
+            REQUIRE(seen.count(path));
+            CHECK(seen[path].first == ts.first);
+            if (ts.first != 'd') CHECK(seen[path].second == ts.second);
+        }
+        for (const auto& [path, h] : o.sha) {
+            CAPTURE(path);
+            CHECK(sha[path] == h);
+        }
+        for (const auto& [path, t] : o.links) {
+            CAPTURE(path);
+            CHECK(links[path] == t);
+        }
+        CHECK(seen.count("many/file_299.txt"));
+        // Path resolution, symlink following, partial reads and holes.
+        auto leaf = fs::resolvePath(**reader, "/dir/nested/deep/leaf.txt");
+        REQUIRE(leaf);
+        auto data = fs::readAll(**reader, *leaf);
+        REQUIRE(data);
+        CHECK(std::string(reinterpret_cast<const char*>(data->data()), data->size()) == "leaf\n");
+        auto viaLink = fs::resolvePath(**reader, "link_short");
+        REQUIRE(viaLink);
+        CHECK(*viaLink == *fs::resolvePath(**reader, "hello.txt"));
+        CHECK(*fs::resolvePath(**reader, "hardlink.txt") == *fs::resolvePath(**reader, "hello.txt"));
+        CHECK((*reader)->stat(*viaLink)->nlink == 2);
+        auto sparse = fs::resolvePath(**reader, "sparse.bin");
+        REQUIRE(sparse);
+        std::vector<std::byte> buf(13);
+        auto n = (*reader)->read(*sparse, 1024 * 1024, buf);
+        REQUIRE(n);
+        CHECK(std::string(reinterpret_cast<const char*>(buf.data()), *n) == "after a hole\n");
+        std::vector<std::byte> hole(4096);
+        REQUIRE((*reader)->read(*sparse, 4096, hole));
+        CHECK(std::all_of(hole.begin(), hole.end(), [](std::byte b) { return b == std::byte{0}; }));
+        CHECK(fs::resolvePath(**reader, "no/such/file").error().category() == ErrorCategory::NotFound);
+        CHECK(*fs::resolvePath(**reader, "dir/nested/../nested/deep/../deep/leaf.txt") == *leaf);
+    }
+}

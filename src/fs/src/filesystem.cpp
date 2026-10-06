@@ -105,10 +105,20 @@ Expected<AllocationMap> FileSystem::allocationMap() const {
     return fail(ErrorCategory::Unsupported, std::string(displayName(type())) + ": allocation map not supported");
 }
 
+Expected<std::unique_ptr<Reader>> FileSystem::openReader() const {
+    return fail(ErrorCategory::Unsupported, std::string(displayName(type())) + ": reading files is not supported yet");
+}
+
 std::uint32_t detail::SimpleFileSystem::capabilities() const {
     std::uint32_t c = FileSystem::capabilities();
     if (m_alloc) c |= static_cast<std::uint32_t>(Capability::UsedBlocks);
+    if (m_reader) c |= static_cast<std::uint32_t>(Capability::Read);
     return c;
+}
+
+Expected<std::unique_ptr<Reader>> detail::SimpleFileSystem::openReader() const {
+    if (!m_reader) return FileSystem::openReader();
+    return m_reader->open(m_device);
 }
 
 Expected<AllocationMap> detail::SimpleFileSystem::allocationMap() const {
