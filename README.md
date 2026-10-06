@@ -54,6 +54,11 @@ ctest --preset debug
 
 ## Support matrix
 
+Every row below is backed by tests against fixtures made with the reference
+tools; `doc/testing/test-log.md` records when those tests last ran on each
+platform (CI runs Linux, macOS and Windows on every push; real-hardware runs
+are recorded there by hand).
+
 Everything below runs in-process with no kernel drivers and the same code
 on Linux, macOS and Windows; only the last table differs per OS. Legend:
 **✓** done and covered by tests against the reference tools, **◐** partial

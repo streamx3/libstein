@@ -60,9 +60,10 @@ and SMART self-tests; VeraCrypt open.
 
 ## M4 — The native GUIs + NTFS/HFS+ write + BitLocker
 
-Deliverable: polished platform-native GUIs (GTK4 on Linux, AppKit/SwiftUI on
-macOS, WinUI 3 on Windows — each only a view over `stein_ops` and
-`stein_probe`), `stein_c` bindings, NTFS L4 (clean volumes), HFS+ L3/L4,
+Deliverable: the desktop GUI, one Qt 6 / QML codebase for Linux, macOS and
+Windows (decision D17, `design/20-gui-toolkit.md`; the earlier plan of three
+native UIs was dropped), only a view over `stein_ops` and `stein_probe`,
+ported from the Claude Design prototype; `stein_c` bindings, NTFS L4 (clean volumes), HFS+ L3/L4,
 BitLocker unlock, md RAID read, APFS read, remaining exotic labels (Sun,
 SGI, Amiga, PC98, AIX, Atari).
 
