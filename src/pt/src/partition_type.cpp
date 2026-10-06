@@ -310,6 +310,45 @@ const MbrRow kMbrRows[] = {
 };
 // clang-format on
 
+struct ApmRow {
+    const char* type;
+    Role role;
+    const char* name;
+};
+
+const ApmRow kApmRows[] = {
+    {"Apple_partition_map", Role::Other,          "Apple partition map"},
+    {"Apple_Driver",        Role::Other,          "Apple device driver"},
+    {"Apple_Driver43",      Role::Other,          "Apple SCSI Manager 4.3 driver"},
+    {"Apple_Driver43_CD",   Role::Other,          "Apple SCSI CD-ROM driver"},
+    {"Apple_Driver_ATA",    Role::Other,          "Apple ATA driver"},
+    {"Apple_Driver_ATAPI",  Role::Other,          "Apple ATAPI driver"},
+    {"Apple_Driver_IOKit",  Role::Other,          "Apple IOKit driver"},
+    {"Apple_Patches",       Role::Other,          "Apple patch partition"},
+    {"Apple_HFS",           Role::AppleHfsPlus,   "Apple HFS / HFS+"},
+    {"Apple_HFSX",          Role::AppleHfsPlus,   "Apple HFSX"},
+    {"Apple_APFS",          Role::AppleApfs,      "Apple APFS"},
+    {"Apple_UFS",           Role::AppleUfs,       "Apple UFS"},
+    {"Apple_Rhapsody_UFS",  Role::AppleUfs,       "Apple Rhapsody UFS"},
+    {"Apple_UNIX_SVR2",     Role::LinuxFilesystem,"Unix / Linux (Apple_UNIX_SVR2)"},
+    {"Apple_Boot",          Role::AppleBoot,      "Apple boot"},
+    {"Apple_Bootstrap",     Role::PrepBoot,       "Apple bootstrap (yaboot/PReP)"},
+    {"Apple_Loader",        Role::AppleBoot,      "Apple loader"},
+    {"Apple_Boot_RAID",     Role::AppleRaid,      "Apple RAID boot"},
+    {"Apple_RAID",          Role::AppleRaid,      "Apple RAID"},
+    {"Apple_Scratch",       Role::NonFsData,      "Apple scratch"},
+    {"Apple_MFS",           Role::Other,          "Apple MFS"},
+    {"Apple_PRODOS",        Role::Other,          "Apple ProDOS"},
+    {"Apple_Free",          Role::Empty,          "Free space"},
+    {"Apple_Void",          Role::Empty,          "Unused map entry"},
+    {"Apple_Extra",         Role::Empty,          "Unused space"},
+    {"DOS_FAT_32",          Role::Fat32,          "FAT32"},
+    {"Windows_FAT_32",      Role::Fat32,          "FAT32"},
+    {"Linux",               Role::LinuxFilesystem,"Linux"},
+    {"Linux_Swap",          Role::LinuxSwap,      "Linux swap"},
+    {"Be_BFS",              Role::Haiku,          "BeOS BFS"},
+};
+
 const std::vector<PartitionTypeInfo>& registry() {
     static const std::vector<PartitionTypeInfo> table = [] {
         std::vector<PartitionTypeInfo> v;
@@ -318,6 +357,7 @@ const std::vector<PartitionTypeInfo>& registry() {
             v.push_back({PartitionType::gpt(*g), r.role, r.name, r.group, r.code});
         }
         for (const auto& r : kMbrRows) v.push_back({PartitionType::mbr(r.id), r.role, r.name, r.group, ""});
+        for (const auto& r : kApmRows) v.push_back({PartitionType::apm(r.type), r.role, r.name, "Apple", ""});
         return v;
     }();
     return table;

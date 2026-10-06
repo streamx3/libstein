@@ -49,6 +49,9 @@ TEST_CASE("type registry") {
     CHECK(types::role(PartitionType::mbr(0x00)) == Role::Empty);
     CHECK(PartitionType::mbr(0x0C).code() == "0x0C");
     CHECK(types::all().size() > 100);
+    CHECK(types::name(PartitionType::apm("Apple_HFS")) == "Apple HFS / HFS+");
+    CHECK(types::role(PartitionType::apm("Apple_Free")) == Role::Empty);
+    CHECK(PartitionType::apm("Apple_Free").isEmpty());
     // Every GPT GUID in the registry must be unique and parse back.
     for (const auto& a : types::all())
         if (a.type.scheme == TableType::Gpt) CHECK(Uuid::parse(a.type.gptGuid.toString()) == a.type.gptGuid);
