@@ -1,10 +1,15 @@
 name: Fixtures (macOS)
 
-# Manual: builds the HFS+ family of reader fixtures with hdiutil and the native
+# Builds, on dispatch or when its inputs change, the HFS+ family of reader fixtures with hdiutil and the native
 # driver, which only macOS has. Download the artifact and commit it under
 # tests/fixtures/hfsfs.
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - tools/fixtures/make_hfsplus_fixtures_macos.sh
+      - tools/fixtures/oracle.py
+      - .github/workflows/fixtures-macos.yml
 
 jobs:
   hfsplus:
