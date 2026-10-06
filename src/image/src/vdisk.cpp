@@ -4,6 +4,7 @@
 #include "stein/block/concat_device.hpp"
 #include "stein/block/file_device.hpp"
 #include "stein/block/slice_device.hpp"
+#include "stein/core/bzip2.hpp"
 #include "stein/core/crc32.hpp"
 #include "stein/core/endian.hpp"
 #include "stein/core/hash.hpp"
@@ -817,7 +818,7 @@ Expected<std::shared_ptr<BlockDevice>> openDmg(std::shared_ptr<BlockDevice> file
     info.virtualSize = sectorCount * 512;
     info.clusterSize = static_cast<std::uint32_t>(std::min<std::uint64_t>(maxChunkBytes, 0xFFFFFFFFu));
     info.compressed = compressed;
-    info.variant = compressed ? "compressed (UDZO/UDCO/...)" : "read-only raw (UDRO)";
+    info.variant = compressed ? "compressed (UDZO/UDBZ/UDCO)" : "read-only raw (UDRO)";
     auto table = std::make_shared<std::vector<Chunk>>(std::move(chunks));
     auto mapper = [=](ByteCount guest) -> Expected<MappedDevice::Map> {
         MappedDevice::Map m;
@@ -843,11 +844,10 @@ Expected<std::shared_ptr<BlockDevice>> openDmg(std::shared_ptr<BlockDevice> file
             m.kind = MappedDevice::Kind::File;
             m.fileOffset = c.offset + in;
             return m;
-        case 0x80000004: case 0x80000005:
+        case 0x80000004: case 0x80000005: case 0x80000006:
             m.kind = MappedDevice::Kind::Compressed;
             m.unit = lo;
             return m;
-        case 0x80000006: return fail(ErrorCategory::Unsupported, "bzip2-compressed DMG block (UDBZ) is not supported yet");
         case 0x80000007: return fail(ErrorCategory::Unsupported, "lzfse-compressed DMG block (ULFO) is not supported yet");
         case 0x80000008: return fail(ErrorCategory::Unsupported, "lzma-compressed DMG block (ULMO) is not supported yet");
         default: return fail(ErrorCategory::Unsupported, "unknown DMG block type");
@@ -858,7 +858,7 @@ Expected<std::shared_ptr<BlockDevice>> openDmg(std::shared_ptr<BlockDevice> file
         auto comp = readExact(*file, c.offset, c.length);
         if (!comp) return fail(comp.error());
         auto window = out.subspan(0, static_cast<std::size_t>(c.sectors * 512));
-        auto n = c.type == 0x80000005 ? compress::inflateZlib(*comp, window) : compress::adcDecompress(*comp, window);
+        auto n = c.type == 0x80000005 ? compress::inflateZlib(*comp, window) : c.type == 0x80000006 ? compress::bunzip2(*comp, window) : compress::adcDecompress(*comp, window);
         if (!n) return fail(n.error());
         return {};
     };

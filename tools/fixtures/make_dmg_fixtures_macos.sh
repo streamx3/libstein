@@ -3,8 +3,9 @@
 # Apple DMG (UDIF) fixtures, converted by hdiutil on macOS from the same raw
 # GPT disk the virtual-disk fixtures use (recovered from the fixed-VHD fixture,
 # which is that raw disk plus a footer). Variants: UDRO (raw blocks), UDZO
-# (zlib), UDCO (ADC). bzip2/lzfse/lzma variants are left out until decoders
-# exist. Oracle: the raw disk's SHA-256 and size.
+# (zlib), UDBZ (bzip2), UDCO (ADC); lzfse/lzma wait for decoders. Existing
+# outputs are kept (hdiutil output is not reproducible). Oracle: the raw
+# disk's SHA-256 and size.
 set -eu
 OUT=${1:-tests/fixtures/dmg}
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -20,6 +21,7 @@ echo "raw $RAWSIZE bytes sha256 $SHA"
 
 make_one() { # name format
   local name=$1 fmt=$2
+  if [ -f "$OUT/$name.sparse" ]; then echo "$name: exists, kept (hdiutil output is not reproducible)"; return; fi
   hdiutil convert "$WORK/disk.img" -format "$fmt" -o "$WORK/$name" -ov >/dev/null
   python3 "$HERE/sparsify.py" pack "$WORK/$name.dmg" "$OUT/$name.sparse"
   printf 'format=%s\nraw_size=%s\nsha256=%s\n' "$fmt" "$RAWSIZE" "$SHA" > "$OUT/$name.oracle.txt"
@@ -28,4 +30,5 @@ make_one() { # name format
 
 make_one dmg_udro UDRO
 make_one dmg_udzo UDZO
+make_one dmg_udbz UDBZ
 make_one dmg_udco UDCO

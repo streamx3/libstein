@@ -3,7 +3,7 @@
 // compressed clusters), VHD (fixed/dynamic), VHDX, VMDK (sparse extents,
 // stream-optimized compressed grains, multi-extent descriptors), VDI and
 // EWF/E01 (EnCase 5/6 segments, deflate chunks, stored MD5/SHA-1) and Apple
-// DMG/UDIF (raw, zlib and ADC blocks; bzip2/lzfse/lzma reported).
+// DMG/UDIF (raw, zlib, bzip2 and ADC blocks; lzfse/lzma reported).
 // Differencing/backing chains, encryption and zstd are reported, not opened.
 #pragma once
 

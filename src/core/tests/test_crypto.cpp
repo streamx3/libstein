@@ -298,3 +298,24 @@ TEST_CASE("inflate: stored, fixed and dynamic blocks, raw/zlib/gzip wrappers, tr
     const std::string w = "Wikipedia";
     CHECK(compress::adler32(std::span<const std::byte>(reinterpret_cast<const std::byte*>(w.data()), w.size())) == 0x11E60398u);
 }
+
+#include "bzip2_vectors.hpp"
+#include "stein/core/bzip2.hpp"
+
+TEST_CASE("bunzip2: single and multi-block streams, long runs, truncation and small buffers") {
+    for (const auto& v : test::vectors::kBzip2) {
+        CAPTURE(v.name);
+        auto comp = hexBytes(v.compressedHex);
+        std::vector<std::byte> out(v.plainLength);
+        auto n = compress::bunzip2(comp, out);
+        REQUIRE_MESSAGE(n, (n ? std::string() : n.error().toString()));
+        CHECK(*n == v.plainLength);
+        CHECK(Hasher::hex(Hasher::digest(HashAlgorithm::Sha256, out)) == v.plainSha256);
+        std::vector<std::byte> small(v.plainLength / 2);
+        auto s = compress::bunzip2(comp, small);
+        REQUIRE_FALSE(s);
+        CHECK(s.error().category() == ErrorCategory::OutOfRange);
+        auto t = compress::bunzip2(std::span<const std::byte>(comp).subspan(0, comp.size() / 2), out);
+        CHECK_FALSE(t);
+    }
+}
