@@ -9,6 +9,7 @@
 //   stein repair  <image> [--dry-run]     fix repairable problems (GPT: rebuild/relocate copies)
 //   stein pt dump <image> <piece.sparse>  save the partition-table metadata alone
 //   stein pt restore <piece.sparse> <image>
+//   stein pt create|add|rm|set|wipe ...   edit the table (simulated on an overlay, applied in one pass)
 //   stein types [gpt|mbr]                 list known partition types
 //
 // <image> is a regular file or (on Linux) a raw block device such as /dev/sdb.
@@ -18,11 +19,13 @@
 #include "stein/core/units.hpp"
 #include "stein/fs/filesystem.hpp"
 #include "stein/image/operations.hpp"
+#include "stein/ops/stack.hpp"
 #include "stein/pt/gpt_table.hpp"
 #include "stein/pt/partition_table.hpp"
 #include "stein/platform/platform.hpp"
 #include "stein/probe/topology.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -43,6 +46,13 @@ int usage() {
                "  stein repair  <image> [--dry-run]\n"
                "  stein pt dump <image> <piece.sparse>\n"
                "  stein pt restore <piece.sparse> <image>\n"
+               "  stein pt create  <image> gpt|mbr|apm [--dry-run] [--force]\n"
+               "  stein pt add     <image> [--start LBA|SIZE] [--size SIZE|--end LBA] [--type CODE] [--name NAME] [--index N] [--no-wipe]\n"
+               "  stein pt rm      <image> <index>\n"
+               "  stein pt set     <image> <index> [--type CODE] [--name NAME] [--start ..] [--size ..|--end ..]\n"
+               "  stein pt wipe    <image> [<index>]       zero filesystem/table signatures (whole device or one partition)\n"
+               "      every edit prints the pending operations and the resulting layout; --dry-run stops there;\n"
+               "      --force is required for destructive edits on a real block device\n"
                "  stein image create  <device|file> <out.stein> [--compress lz4|none] [--chunk 4M] [--split 2G]\n"
                "  stein image restore <in.stein> <device|file> [--no-verify] [--force]\n"
                "  stein image verify  <in.stein> [--level 1|2|3]\n"
@@ -60,9 +70,10 @@ int die(const Error& e) {
 
 struct Args {
     std::vector<std::string> positional;
-    bool doc = false, dryRun = false, noVerify = false, force = false;
+    bool doc = false, dryRun = false, noVerify = false, force = false, noWipe = false;
     int level = 0;
     std::string compress, split, chunk;
+    std::string start, size, end, type, name, index;
     std::uint32_t sectorSize = 512;
 };
 
@@ -79,6 +90,13 @@ Args parse(int argc, char** argv) {
         else if (s == "--compress" && i + 1 < argc) a.compress = argv[++i];
         else if (s == "--split" && i + 1 < argc) a.split = argv[++i];
         else if (s == "--chunk" && i + 1 < argc) a.chunk = argv[++i];
+        else if (s == "--start" && i + 1 < argc) a.start = argv[++i];
+        else if (s == "--size" && i + 1 < argc) a.size = argv[++i];
+        else if (s == "--end" && i + 1 < argc) a.end = argv[++i];
+        else if (s == "--type" && i + 1 < argc) a.type = argv[++i];
+        else if (s == "--name" && i + 1 < argc) a.name = argv[++i];
+        else if (s == "--index" && i + 1 < argc) a.index = argv[++i];
+        else if (s == "--no-wipe") a.noWipe = true;
         else a.positional.push_back(s);
     }
     return a;
@@ -311,9 +329,13 @@ int cmdRepair(const Args& a) {
     return 0;
 }
 
+int cmdPtEdit(const Args& a);
+
 int cmdPt(const Args& a) {
-    if (a.positional.size() < 4) return usage();
+    if (a.positional.size() < 3) return usage();
     const std::string& sub = a.positional[1];
+    if (sub == "create" || sub == "add" || sub == "rm" || sub == "set" || sub == "wipe") return cmdPtEdit(a);
+    if (a.positional.size() < 4) return usage();
     if (sub == "dump") {
         auto dev = openImage(a.positional[2], false, a.sectorSize);
         if (!dev) return die(dev.error());
@@ -341,6 +363,182 @@ int cmdPt(const Args& a) {
         std::printf("restored %zu regions; table now reads as:\n", piece->runs.size());
         printTable(**t);
         return 0;
+    }
+    return usage();
+}
+
+// ---- partition table editing (stein_ops) -----------------------------------
+
+// "2048s" = sectors; otherwise a byte size with units, converted to sectors.
+Expected<Lba> parseLba(const std::string& text, std::uint32_t sectorSize) {
+    if (text.empty()) return fail(ErrorCategory::InvalidArgument, "empty value");
+    if (text.back() == 's' || text.back() == 'S') {
+        char* end = nullptr;
+        const auto v = std::strtoull(text.c_str(), &end, 10);
+        if (end != text.c_str() + text.size() - 1) return fail(ErrorCategory::InvalidArgument, "bad sector value: " + text);
+        return Lba{v};
+    }
+    const ByteCount bytes = parseSize(text);
+    if (bytes % sectorSize) return fail(ErrorCategory::InvalidArgument, text + " is not a multiple of the sector size");
+    return Lba{bytes / sectorSize};
+}
+
+Expected<pt::PartitionType> parseType(pt::TableType scheme, const std::string& text) {
+    if (text.empty()) {
+        if (auto t = pt::types::forRole(pt::Role::LinuxFilesystem, scheme)) return *t;
+        return fail(ErrorCategory::InvalidArgument, "--type is required for this table scheme");
+    }
+    switch (scheme) {
+    case pt::TableType::Gpt:
+        if (auto t = pt::types::fromSgdiskCode(text)) return *t;
+        if (auto g = Uuid::parse(text)) return pt::PartitionType::gpt(*g);
+        return fail(ErrorCategory::InvalidArgument, "unknown GPT type (use an sgdisk code like 8300 or a GUID): " + text);
+    case pt::TableType::Mbr: {
+        char* end = nullptr;
+        const auto v = std::strtoul(text.c_str(), &end, 16);
+        if (*end || v > 0xFF) return fail(ErrorCategory::InvalidArgument, "MBR type must be a hex id like 83 or 0x07: " + text);
+        return pt::PartitionType::mbr(static_cast<std::uint8_t>(v));
+    }
+    case pt::TableType::Apm:
+        return pt::PartitionType::apm(text);
+    default:
+        return fail(ErrorCategory::Unsupported, "no editable table");
+    }
+}
+
+bool isRealDevice(const std::string& path) {
+    std::error_code ec;
+    return std::filesystem::exists(path, ec) && !std::filesystem::is_regular_file(path, ec);
+}
+
+// Show the stack, then apply unless --dry-run. Shared by every edit command.
+int finishEdit(ops::OperationStack& stack, const Args& a, const std::string& path) {
+    std::fputs(ops::describe(stack).c_str(), stdout);
+    if (a.dryRun) {
+        std::puts("(dry run: nothing written)");
+        return 0;
+    }
+    if (stack.destructive() && isRealDevice(path) && !a.force)
+        return die(Error(ErrorCategory::Permission, "destructive edit on a block device; re-run with --force"));
+    std::fflush(stdout);
+    TtyProgress tty;
+    Progress progress(tty);
+    auto r = stack.apply(progress);
+    if (!r) return die(r.error());
+    std::printf("%s\n", r->postconditionOk ? "applied; device matches the preview" : "applied, but the device does not match the preview (re-probe!)");
+    return r->postconditionOk ? 0 : 1;
+}
+
+int cmdPtEdit(const Args& a) {
+    const std::string& sub = a.positional[1];
+    const std::string& path = a.positional[2];
+    auto dev = openImage(path, !a.dryRun, a.sectorSize);
+    if (!dev) return die(dev.error());
+    ops::OperationStack stack(*dev);
+    const auto& base = stack.base();
+    const std::uint32_t ss = (*dev)->sectorSize();
+
+    if (sub == "create") {
+        if (a.positional.size() < 4) return usage();
+        pt::TableType type = pt::TableType::Unknown;
+        const std::string want = toLower(a.positional[3]);
+        if (want == "gpt") type = pt::TableType::Gpt;
+        else if (want == "mbr" || want == "dos" || want == "msdos") type = pt::TableType::Mbr;
+        else if (want == "apm" || want == "mac") type = pt::TableType::Apm;
+        else return die(Error(ErrorCategory::InvalidArgument, "unknown table scheme: " + a.positional[3]));
+        if (auto r = stack.push(std::make_unique<ops::CreateTable>(type)); !r) return die(r.error());
+        return finishEdit(stack, a, path);
+    }
+    if (!base.table) return die(Error(ErrorCategory::NotFound, "no partition table on " + path + " (use `stein pt create`)"));
+    const auto& table = *base.table;
+
+    if (sub == "add") {
+        pt::Partition p;
+        p.index = a.index.empty() ? 0 : static_cast<std::uint32_t>(std::stoul(a.index));
+        p.name = a.name;
+        auto type = parseType(table.type(), a.type);
+        if (!type) return die(type.error());
+        p.type = *type;
+        // Default placement: the largest free region, start aligned to 1 MiB.
+        const SectorCount align = std::max<SectorCount>(1, (1 * MiB) / ss);
+        auto free = table.freeRegions(align);
+        if (free.empty() && a.start.empty()) return die(Error(ErrorCategory::OutOfRange, "no free space in the table"));
+        pt::FreeRegion target;
+        for (const auto& f : free)
+            if (f.sectors() > target.sectors()) target = f;
+        if (!a.start.empty()) {
+            auto s = parseLba(a.start, ss);
+            if (!s) return die(s.error());
+            p.firstLba = *s;
+            // Pick the free region containing the start, if any.
+            for (const auto& f : free)
+                if (*s >= f.firstLba && *s <= f.lastLba) target = f;
+        } else {
+            p.firstLba = ((target.firstLba + align - 1) / align) * align;
+        }
+        if (!a.end.empty()) {
+            auto e = parseLba(a.end, ss);
+            if (!e) return die(e.error());
+            p.lastLba = *e;
+        } else if (!a.size.empty()) {
+            auto n = parseLba(a.size, ss);
+            if (!n) return die(n.error());
+            if (*n == 0) return die(Error(ErrorCategory::InvalidArgument, "size must be positive"));
+            p.lastLba = p.firstLba + *n - 1;
+        } else {
+            p.lastLba = target.lastLba >= p.firstLba ? target.lastLba : p.firstLba;
+            // Leave the end aligned too, unless that would make the partition empty.
+            const Lba alignedEnd = ((p.lastLba + 1) / align) * align - 1;
+            if (alignedEnd > p.firstLba) p.lastLba = alignedEnd;
+        }
+        if (auto r = stack.push(std::make_unique<ops::AddPartition>(p, !a.noWipe)); !r) return die(r.error());
+        return finishEdit(stack, a, path);
+    }
+    if (sub == "rm") {
+        if (a.positional.size() < 4) return usage();
+        const auto index = static_cast<std::uint32_t>(std::stoul(a.positional[3]));
+        if (auto r = stack.push(std::make_unique<ops::DeletePartition>(index)); !r) return die(r.error());
+        return finishEdit(stack, a, path);
+    }
+    if (sub == "set") {
+        if (a.positional.size() < 4) return usage();
+        const auto index = static_cast<std::uint32_t>(std::stoul(a.positional[3]));
+        const auto* existing = table.find(index);
+        if (!existing) return die(Error(ErrorCategory::NotFound, "no partition " + a.positional[3]));
+        pt::Partition p = *existing;
+        if (!a.type.empty()) {
+            auto type = parseType(table.type(), a.type);
+            if (!type) return die(type.error());
+            p.type = *type;
+        }
+        if (!a.name.empty()) p.name = a.name;
+        if (!a.start.empty()) {
+            auto s = parseLba(a.start, ss);
+            if (!s) return die(s.error());
+            p.firstLba = *s;
+        }
+        if (!a.end.empty()) {
+            auto e = parseLba(a.end, ss);
+            if (!e) return die(e.error());
+            p.lastLba = *e;
+        } else if (!a.size.empty()) {
+            auto n = parseLba(a.size, ss);
+            if (!n) return die(n.error());
+            p.lastLba = p.firstLba + *n - 1;
+        }
+        if (auto r = stack.push(std::make_unique<ops::UpdatePartition>(p)); !r) return die(r.error());
+        return finishEdit(stack, a, path);
+    }
+    if (sub == "wipe") {
+        Region region{0, (*dev)->size()};
+        if (a.positional.size() >= 4) {
+            const auto index = static_cast<std::uint32_t>(std::stoul(a.positional[3]));
+            const auto* existing = table.find(index);
+            if (!existing) return die(Error(ErrorCategory::NotFound, "no partition " + a.positional[3]));
+            region = existing->region(ss);
+        }
+        if (auto r = stack.push(std::make_unique<ops::WipeSignatures>(region)); !r) return die(r.error());
+        return finishEdit(stack, a, path);
     }
     return usage();
 }

@@ -3,6 +3,7 @@
 
 #include "stein/block/file_device.hpp"
 #include "stein/block/memory_device.hpp"
+#include "stein/block/overlay_device.hpp"
 #include "stein/block/slice_device.hpp"
 #include "stein/block/sparse_file.hpp"
 
@@ -102,4 +103,39 @@ TEST_CASE("SparseFile capture/write/read/apply") {
     CHECK(SparseFile::apply(*captured, small).error().category() == ErrorCategory::OutOfRange);
     CHECK(SparseFile::read(dir / "nope.sparse").error().category() == ErrorCategory::NotFound);
     std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("OverlayDevice: copy-on-write, dirty regions, commit") {
+    auto base = std::make_shared<MemoryDevice>(64 * KiB, 512);
+    std::fill(base->bytes().begin(), base->bytes().end(), std::byte{0x11});
+    auto ov = OverlayDevice::create(base, 4096);
+    CHECK(!ov->hasChanges());
+    CHECK(ov->size() == 64 * KiB);
+    // Read-through.
+    auto r = ov->read(10000, 16);
+    REQUIRE(r);
+    CHECK(r->at(0) == std::byte{0x11});
+    // Write straddling two overlay blocks; base must stay untouched.
+    CHECK(ov->writeAt(4096 - 3, bytesOf("abcdef")));
+    CHECK(base->bytes()[4095] == std::byte{0x11});
+    auto back = ov->read(4096 - 3, 6);
+    CHECK(std::string(reinterpret_cast<const char*>(back->data()), 6) == "abcdef");
+    // Untouched bytes inside the dirty blocks still read from the base copy.
+    CHECK(ov->read(100, 1)->at(0) == std::byte{0x11});
+    auto dirty = ov->dirtyRegions();
+    REQUIRE(dirty.size() == 1);
+    CHECK(dirty[0] == Region{0, 8192});
+    CHECK(ov->dirtyBytes() == 8192);
+    CHECK(ov->discard(60 * KiB, 4096));
+    CHECK(ov->dirtyRegions().size() == 2);
+    CHECK(ov->read(60 * KiB, 1)->at(0) == std::byte{0});
+    ov->discardChanges();
+    CHECK(!ov->hasChanges());
+    CHECK(ov->read(4096 - 3, 1)->at(0) == std::byte{0x11});
+    // Commit applies to the base.
+    CHECK(ov->writeAt(500, bytesOf("Z")));
+    REQUIRE(ov->commit());
+    CHECK(base->bytes()[500] == std::byte{'Z'});
+    CHECK(!ov->hasChanges());
+    CHECK(ov->read(70 * KiB, 1).error().category() == ErrorCategory::OutOfRange);
 }
