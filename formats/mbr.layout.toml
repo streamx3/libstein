@@ -1,0 +1,28 @@
+# Master Boot Record (DOS/PC partition table) and Extended Boot Records.
+# The "classic generic MBR" layout; the 4 partition entries at 0x1BE are
+# described by mbr_entry and decoded by stein_pt as children.
+
+[mbr_sector]
+doc = "MBR / EBR sector"
+size = 512
+endian = "le"
+fields = [
+  { name = "bootstrap",      offset = 0x000, type = "bytes", size = 440, doc = "Boot code (or zeros)" },
+  { name = "disk_signature", offset = 0x1B8, type = "u32", doc = "Windows NT disk signature (0 on EBRs and many non-Windows disks)" },
+  { name = "copy_protected", offset = 0x1BC, type = "u16", enum = { "0" = "not protected", "0x5A5A" = "copy-protected" }, doc = "Usually 0" },
+  { name = "entries",        offset = 0x1BE, type = "bytes", size = 64, doc = "Four 16-byte partition entries" },
+  { name = "boot_signature", offset = 0x1FE, type = "u16", expect = 0xAA55, doc = "Must be 0x55 0xAA" },
+]
+
+[mbr_entry]
+doc = "MBR partition entry (16 bytes)"
+size = 16
+endian = "le"
+fields = [
+  { name = "status",       offset = 0x0, type = "u8", enum = { "0x00" = "inactive", "0x80" = "active (bootable)" }, doc = "0x80 = bootable; other bits invalid" },
+  { name = "first_chs",    offset = 0x1, type = "chs", doc = "CHS address of the first sector (legacy)" },
+  { name = "type",         offset = 0x4, type = "u8", doc = "Partition type id (0x83 Linux, 0x07 NTFS/exFAT, 0x0C FAT32 LBA, 0x05/0x0F extended, 0xEE GPT protective...)" },
+  { name = "last_chs",     offset = 0x5, type = "chs", doc = "CHS address of the last sector (legacy)" },
+  { name = "first_lba",    offset = 0x8, type = "u32", doc = "LBA of the first sector (relative to the disk for primaries, to the EBR for logicals)" },
+  { name = "sector_count", offset = 0xC, type = "u32", doc = "Number of sectors" },
+]

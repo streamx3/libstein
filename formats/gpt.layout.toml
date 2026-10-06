@@ -1,0 +1,36 @@
+# GUID Partition Table — UEFI Specification 2.10, section 5.3.
+# Offsets are relative to the start of each structure. Everything little-endian.
+
+[gpt_header]
+doc = "UEFI 2.10 §5.3.2 GPT Header (LBA 1 primary, last LBA backup)"
+size = 92
+endian = "le"
+fields = [
+  { name = "signature",                   offset = 0x00, type = "ascii", size = 8, expect = "EFI PART", doc = "Identifies EFI-compatible partition table header" },
+  { name = "revision",                    offset = 0x08, type = "u32", enum = { "0x00010000" = "1.0" }, doc = "Revision number of the EFI specification this header complies with" },
+  { name = "header_size",                 offset = 0x0C, type = "u32", min = 92, max = 512, doc = "Size in bytes of the GPT header; >= 92 and <= logical block size" },
+  { name = "header_crc32",                offset = 0x10, type = "crc32", doc = "CRC32 of the header with this field zeroed, over header_size bytes" },
+  { name = "reserved",                    offset = 0x14, type = "u32", expect = 0, doc = "Must be zero" },
+  { name = "my_lba",                      offset = 0x18, type = "lba", doc = "LBA that contains this header copy" },
+  { name = "alternate_lba",               offset = 0x20, type = "lba", doc = "LBA of the other header copy" },
+  { name = "first_usable_lba",            offset = 0x28, type = "lba", doc = "First LBA that may be used by a partition" },
+  { name = "last_usable_lba",             offset = 0x30, type = "lba", doc = "Last LBA that may be used by a partition" },
+  { name = "disk_guid",                   offset = 0x38, type = "guid", doc = "GUID that uniquely identifies the disk" },
+  { name = "partition_entries_lba",       offset = 0x48, type = "lba", doc = "Starting LBA of the partition entry array" },
+  { name = "number_of_partition_entries", offset = 0x50, type = "u32", nonzero = true, doc = "Number of entries in the array (usually 128)" },
+  { name = "size_of_partition_entry",     offset = 0x54, type = "u32", min = 128, doc = "Size in bytes of each entry; 128 × 2^n" },
+  { name = "partition_entries_crc32",     offset = 0x58, type = "crc32", doc = "CRC32 of the partition entry array" },
+]
+
+[gpt_entry]
+doc = "UEFI 2.10 §5.3.3 GPT Partition Entry"
+size = 128
+endian = "le"
+fields = [
+  { name = "partition_type_guid",   offset = 0x00, type = "guid", doc = "Partition type; all zero = unused entry" },
+  { name = "unique_partition_guid", offset = 0x10, type = "guid", doc = "GUID unique to this partition" },
+  { name = "starting_lba",          offset = 0x20, type = "lba", doc = "First LBA of the partition" },
+  { name = "ending_lba",            offset = 0x28, type = "lba", doc = "Last LBA of the partition, inclusive" },
+  { name = "attributes",            offset = 0x30, type = "bits64", doc = "Attribute bits; 48-63 are type-specific", bits = { "0" = "platform_required", "1" = "no_block_io_protocol", "2" = "legacy_bios_bootable", "56" = "chromeos_successful", "60" = "ms_read_only", "61" = "ms_shadow_copy", "62" = "ms_hidden", "63" = "ms_no_automount" } },
+  { name = "partition_name",        offset = 0x38, type = "utf16le", size = 72, doc = "Human-readable name, up to 36 UTF-16 code units" },
+]
