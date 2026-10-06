@@ -409,10 +409,17 @@ TEST_CASE("lzo1x: liblzo2 vectors (lzo1x_999 and lzo1x_1), truncation and small 
 #include "stein/core/zstd.hpp"
 #include "zstd_vectors.hpp"
 
+template <typename V>
+static std::vector<std::byte> joinedHex(const V& v) {
+    std::string hex;
+    for (auto part : v.compressedHex) hex += part;
+    return hexBytes(hex.c_str());
+}
+
 TEST_CASE("zstd: reference CLI vectors at several levels, checksums, concatenated frames, truncation and small buffers") {
     for (const auto& v : test::vectors::kZstd) {
         CAPTURE(v.name);
-        auto comp = hexBytes(std::string(v.compressedHex).c_str());
+        auto comp = joinedHex(v);
         std::vector<std::byte> out(v.size + 16);
         auto n = compress::zstdDecompress(comp, out);
         REQUIRE_MESSAGE(n, (n ? std::string() : n.error().toString()));
@@ -439,7 +446,7 @@ TEST_CASE("zstd: reference CLI vectors at several levels, checksums, concatenate
     // Single-frame decoding stops at the first frame: the concatenated vector's first frame is "short".
     for (const auto& v : test::vectors::kZstd)
         if (std::string_view(v.name) == "concat") {
-            auto comp = hexBytes(std::string(v.compressedHex).c_str());
+            auto comp = joinedHex(v);
             std::vector<std::byte> out(v.size);
             auto n = compress::zstdDecompressFrame(comp, out);
             REQUIRE(n);
@@ -450,4 +457,45 @@ TEST_CASE("zstd: reference CLI vectors at several levels, checksums, concatenate
     CHECK(compress::xxh64({}) == 0xEF46DB3751D8E999ull);
     const char* msg = "Nobody inspects the spammish repetition";
     CHECK(compress::xxh64(std::span<const std::byte>(reinterpret_cast<const std::byte*>(msg), std::strlen(msg))) == 0xFBCEA83C8A378BF1ull);
+}
+
+#include "lzma_vectors.hpp"
+#include "stein/core/lzma.hpp"
+
+TEST_CASE("lzma/lzma2/xz: XZ Utils vectors (checks crc32/crc64/sha256/none, multi-block, .lzma, raw LZMA1, concatenated streams), BCJ refused") {
+    for (const auto& v : test::vectors::kLzma) {
+        CAPTURE(v.name);
+        auto comp = joinedHex(v);
+        std::vector<std::byte> out(v.size + 16);
+        const std::string_view kind = v.kind, name = v.name;
+        auto run = [&](std::span<const std::byte> c, std::span<std::byte> o) {
+            return kind == "xz" ? compress::xzDecompress(c, o) : kind == "lzma" ? compress::lzmaDecompress(c, o) : compress::lzmaDecompressRaw(c, o, 0x5D);
+        };
+        auto n = run(comp, out);
+        if (name.find("bcj") != std::string_view::npos) {
+            REQUIRE_FALSE(n);
+            CHECK_MESSAGE(n.error().category() == ErrorCategory::Unsupported, n.error().toString());
+            continue;
+        }
+        REQUIRE_MESSAGE(n, (n ? std::string() : n.error().toString()));
+        CHECK(*n == v.size);
+        CHECK(Hasher::hex(Hasher::digest(HashAlgorithm::Sha256, std::span<const std::byte>(out).subspan(0, *n))) == v.sha256);
+        if (v.size > 1) {
+            std::vector<std::byte> small(v.size - 1);
+            auto s = run(comp, small);
+            REQUIRE_FALSE(s);
+            CHECK(s.error().category() == ErrorCategory::OutOfRange);
+        }
+        if (comp.size() > 20) {
+            auto t = run(std::span<const std::byte>(comp).subspan(0, comp.size() - 8), out);
+            CHECK_FALSE(t);
+        }
+        if (kind == "xz" && name.find("nocheck") == std::string_view::npos && v.size > 64) {
+            auto bad = comp;
+            bad[bad.size() / 2] ^= std::byte{0x55};
+            CHECK_FALSE(compress::xzDecompress(bad, out));
+        }
+    }
+    const char* msg = "123456789";
+    CHECK(compress::crc64(std::span<const std::byte>(reinterpret_cast<const std::byte*>(msg), 9)) == 0x995DC9BBDF1939FAull);
 }

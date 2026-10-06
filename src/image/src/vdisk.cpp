@@ -9,6 +9,7 @@
 #include "stein/core/endian.hpp"
 #include "stein/core/hash.hpp"
 #include "stein/core/inflate.hpp"
+#include "stein/core/lzma.hpp"
 #include "stein/core/zstd.hpp"
 #include "stein/core/strings.hpp"
 #include "stein/image/stein_format.hpp"
@@ -844,12 +845,11 @@ Expected<std::shared_ptr<BlockDevice>> openDmg(std::shared_ptr<BlockDevice> file
             m.kind = MappedDevice::Kind::File;
             m.fileOffset = c.offset + in;
             return m;
-        case 0x80000004: case 0x80000005: case 0x80000006:
+        case 0x80000004: case 0x80000005: case 0x80000006: case 0x80000008:
             m.kind = MappedDevice::Kind::Compressed;
             m.unit = lo;
             return m;
         case 0x80000007: return fail(ErrorCategory::Unsupported, "lzfse-compressed DMG block (ULFO) is not supported yet");
-        case 0x80000008: return fail(ErrorCategory::Unsupported, "lzma-compressed DMG block (ULMO) is not supported yet");
         default: return fail(ErrorCategory::Unsupported, "unknown DMG block type");
         }
     };
@@ -858,7 +858,16 @@ Expected<std::shared_ptr<BlockDevice>> openDmg(std::shared_ptr<BlockDevice> file
         auto comp = readExact(*file, c.offset, c.length);
         if (!comp) return fail(comp.error());
         auto window = out.subspan(0, static_cast<std::size_t>(c.sectors * 512));
-        auto n = c.type == 0x80000005 ? compress::inflateZlib(*comp, window) : c.type == 0x80000006 ? compress::bunzip2(*comp, window) : compress::adcDecompress(*comp, window);
+        Expected<std::size_t> n;
+        switch (c.type) {
+        case 0x80000005: n = compress::inflateZlib(*comp, window); break;
+        case 0x80000006: n = compress::bunzip2(*comp, window); break;
+        case 0x80000008:
+            // ULMO blocks are xz streams from liblzma; accept a bare .lzma stream too.
+            n = comp->size() >= 6 && std::memcmp(comp->data(), "\xFD" "7zXZ", 5) == 0 ? compress::xzDecompress(*comp, window) : compress::lzmaDecompress(*comp, window);
+            break;
+        default: n = compress::adcDecompress(*comp, window); break;
+        }
         if (!n) return fail(n.error());
         return {};
     };

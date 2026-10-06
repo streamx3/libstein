@@ -19,6 +19,7 @@ stein_add_module(core
     src/bzip2.cpp
     src/lzo.cpp
     src/zstd.cpp
+    src/lzma.cpp
     src/aes.cpp
     src/aes_hw.cpp
     src/keys.cpp)

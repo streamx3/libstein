@@ -3,7 +3,7 @@
 # Apple DMG (UDIF) fixtures, converted by hdiutil on macOS from the same raw
 # GPT disk the virtual-disk fixtures use (recovered from the fixed-VHD fixture,
 # which is that raw disk plus a footer). Variants: UDRO (raw blocks), UDZO
-# (zlib), UDBZ (bzip2), UDCO (ADC); lzfse/lzma wait for decoders. Existing
+# (zlib), UDBZ (bzip2), UDCO (ADC), ULMO (lzma); lzfse waits for a decoder. Existing
 # outputs are kept (hdiutil output is not reproducible). Oracle: the raw
 # disk's SHA-256 and size.
 set -eu
@@ -32,3 +32,4 @@ make_one dmg_udro UDRO
 make_one dmg_udzo UDZO
 make_one dmg_udbz UDBZ
 make_one dmg_udco UDCO
+make_one dmg_ulmo ULMO
