@@ -3,6 +3,7 @@
 #include "stein/core/endian.hpp"
 #include "stein/core/hash.hpp"
 #include "stein/core/strings.hpp"
+#include "stein/fs/hfsplus_reader.hpp"
 #include "stein/layout/gen/hfs.hpp"
 
 namespace stein::fs::detail {
@@ -132,6 +133,7 @@ Result parseHfsPlus(Dev dev, ByteCount base, bool wrapped, Result&& wrapperTree)
             alloc->extents[i][1] = loadBe32(raw->data() + 0x70 + 16 + i * 8 + 4);
         }
         fs->setAllocationSource(std::move(alloc));
+        fs->setReaderSource(makeHfsPlusReaderSource(base));
     }
     if (wrapped) info.extra = "embedded in an HFS wrapper at offset " + std::to_string(base);
     fs->setTreeName(std::string(displayName(info.type)) + " filesystem");

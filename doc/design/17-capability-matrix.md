@@ -14,7 +14,7 @@ L0 detect/geometry/label/uuid · L1 used-block map · L2 offline metadata edit
 | FAT12/16/32 | **done** | **done** (allocation map; used-only imaging) | v1 | v2 (FAT32 only, cluster-count rules) | v1 (FreeBSD fsck_msdosfs port) | v1 | **done** (reader: LFN, chains) | v1 |
 | exFAT | **done** | **done** (allocation map; used-only imaging) | v1 | v2 | v2 | v1 | **done** (reader: NoFatChain, up-case table) | v1 |
 | NTFS | **done** | **done** (allocation map; used-only imaging) | v1 | v3 (x in v1) | – (x) | v2 (x in v1) | **done** (reader: MFT, INDX, reparse links) | v3 |
-| HFS+ / HFSX | **done** | **done** (allocation map; used-only imaging) | v1 | v3 | – | v2 | v2 | v3 |
+| HFS+ / HFSX | **done** | **done** (allocation map; used-only imaging) | v1 | v3 | – | v2 | **done** (reader: B-trees, overflow extents, hard links, HFSX case) | v3 |
 | HFS (classic) | **done** (incl. wrapper) | – | v1 | – | – | – | – | – |
 | APFS (container + volumes) | **done** (container) | v2 | v1 (name) | – | – | – | v2 | – |
 | XFS | **done** | v2 | v1 | x (grow) | x | x | v2 | – |

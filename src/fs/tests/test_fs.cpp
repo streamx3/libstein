@@ -500,3 +500,70 @@ TEST_CASE("exfat reader: exfat-fuse fixtures read back exactly (NoFatChain and f
         CHECK(st->size == 20);
     }
 }
+
+TEST_CASE("hfsplus reader: hdiutil fixtures (HFS+, HFSX, journaled) read back exactly (hard links, symlinks, overflow extents, case rules)") {
+    struct Case { const char* name; bool caseSensitive; };
+    const Case cases[] = {{"hfsplus", false}, {"hfsx", true}, {"hfsplus_j", false}};
+    for (const auto& c : cases) {
+        const std::string fixture = c.name;
+        CAPTURE(fixture);
+        if (!std::filesystem::exists(std::string(STEIN_FIXTURE_DIR) + "/hfsfs/" + fixture + ".sparse")) {
+            MESSAGE("fixture hfsfs/", fixture, " missing (built by the macOS fixture workflow); skipping");
+            continue;
+        }
+        auto dev = loadSparseFixture("hfsfs/" + fixture + ".sparse");
+        auto probed = fs::probe(dev);
+        REQUIRE(probed);
+        REQUIRE(*probed);
+        CHECK((*probed)->info().type == (c.caseSensitive ? fs::FsType::HfsX : fs::FsType::HfsPlus));
+        REQUIRE(fs::has((*probed)->capabilities(), fs::Capability::Read));
+        auto reader = (*probed)->openReader();
+        REQUIRE_MESSAGE(reader, (reader ? std::string() : reader.error().toString()));
+        CHECK((*reader)->caseSensitive() == c.caseSensitive);
+        auto root = (*reader)->root();
+        REQUIRE(root);
+        std::map<std::string, std::pair<char, std::uint64_t>> seen;
+        std::map<std::string, std::string> sha, links;
+        walk(**reader, *root, "", seen, sha, links);
+        const auto o = loadExtOracle(fixture, "hfsfs");
+        CHECK(seen.size() == o.entries.size());
+        for (const auto& [path, ts] : o.entries) {
+            CAPTURE(path);
+            REQUIRE(seen.count(path));
+            CHECK(seen[path].first == ts.first);
+            if (ts.first != 'd') CHECK(seen[path].second == ts.second);
+        }
+        for (const auto& [path, h] : o.sha) {
+            CAPTURE(path);
+            CHECK(sha[path] == h);
+        }
+        for (const auto& [path, t] : o.links) {
+            CAPTURE(path);
+            CHECK(links[path] == t);
+        }
+        // Hard links: separate names, the same bytes, a link count of three.
+        auto hl = fs::resolvePath(**reader, "hardlink.txt");
+        REQUIRE(hl);
+        CHECK((*reader)->stat(*hl)->nlink == 3);
+        CHECK((*reader)->stat(*hl)->size == 20);
+        auto hello = fs::resolvePath(**reader, "hello.txt");
+        REQUIRE(hello);
+        CHECK((*reader)->stat(*hello)->mtime == 1704164645);
+        CHECK(*fs::resolvePath(**reader, "link_short") == *hello);
+        CHECK(*fs::resolvePath(**reader, "dir/nested/deep/../deep/leaf.txt") == *fs::resolvePath(**reader, "dir/nested/deep/leaf.txt"));
+        if (c.caseSensitive) {
+            CHECK_FALSE(fs::resolvePath(**reader, "DIR/UPPER.TXT"));
+            CHECK(*fs::resolvePath(**reader, "Case.txt") != *fs::resolvePath(**reader, "case.txt"));
+        } else {
+            CHECK(*fs::resolvePath(**reader, "dir/upper.txt") == *fs::resolvePath(**reader, "DIR/UPPER.TXT"));
+        }
+        // A stat without a prior listing goes through the thread record.
+        auto fresh = (*probed)->openReader();
+        REQUIRE(fresh);
+        auto leaf = fs::resolvePath(**reader, "dir/nested/deep/leaf.txt");
+        REQUIRE(leaf);
+        auto st = (*fresh)->stat(*leaf);
+        REQUIRE(st);
+        CHECK(st->size == 5);
+    }
+}
