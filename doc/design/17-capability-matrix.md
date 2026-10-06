@@ -58,7 +58,7 @@ L0 detect/geometry/label/uuid · L1 used-block map · L2 offline metadata edit
 |---|---|---|---|---|
 | raw / split raw | **done** (raw) | **done** (raw) | **done** (raw) | split raw: v1 |
 | `.stein` | **done** | **done** | **done** | spec in `doc/spec/stein-image-v1.md`; encryption/zstd later |
-| E01/EWF | v2 | v2 | v2 | |
+| E01/EWF | **done** (EnCase 5/6 v1 format, segments, deflate chunks, stored MD5/SHA-1) | v2 | **done** | EWF2 (EnCase 7), smart, logical evidence v2 |
 | VHD (fixed/dynamic) | **done** | v2 | **done** | differencing v2; fixed VHD = raw + footer → native Windows attach |
 | VHDX | **done** (dynamic; log must be clean) | v3 | **done** | differencing v2 |
 | qcow2 | **done** (v2/v3, deflate-compressed clusters) | v3 | **done** | backing files, zstd, subclusters v2 |

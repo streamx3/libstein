@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Virtual-disk containers as read-only block devices: qcow2 (v2/v3, deflate
 // compressed clusters), VHD (fixed/dynamic), VHDX, VMDK (sparse extents,
-// stream-optimized compressed grains, multi-extent descriptors) and VDI.
+// stream-optimized compressed grains, multi-extent descriptors), VDI and
+// EWF/E01 (EnCase 5/6 segments, deflate chunks, stored MD5/SHA-1).
 // Differencing/backing chains, encryption and zstd are reported, not opened.
 #pragma once
 
@@ -16,7 +17,7 @@
 
 namespace stein::image {
 
-enum class VdiskFormat : std::uint8_t { Raw, Stein, Qcow2, Vhd, Vhdx, Vmdk, Vdi };
+enum class VdiskFormat : std::uint8_t { Raw, Stein, Qcow2, Vhd, Vhdx, Vmdk, Vdi, Ewf };
 std::string_view toString(VdiskFormat f);
 
 struct VdiskInfo {
@@ -26,7 +27,8 @@ struct VdiskInfo {
     bool compressed = false;
     std::string variant;                // "v3", "dynamic", "monolithicSparse", ...
     std::vector<std::string> notes;
-    std::vector<std::filesystem::path> files;
+    std::vector<std::filesystem::path> files;   // every file the container spans (segments, extents)
+    std::string storedMd5, storedSha1;          // digests recorded by the acquisition tool (EWF), hex
 };
 
 // Sniff the container format from its header (and, for VHD, its footer).

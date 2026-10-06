@@ -552,3 +552,70 @@ TEST_CASE("vdisk: qcow2 (v2/v3/compressed/4K clusters), VHD (dynamic/fixed), VHD
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
 }
+
+TEST_CASE("ewf: EnCase 6 compressed, EnCase 6 split into 13 uncompressed segments and EnCase 5 images reproduce the raw disk and carry its digests") {
+    const char* names[] = {"ewf6_best", "ewf6_split", "ewf5"};
+    const auto dir = std::filesystem::temp_directory_path() / ("stein_ewf_" + std::to_string(std::random_device{}()));
+    std::filesystem::create_directories(dir);
+    for (const char* name : names) {
+        const std::string fixture = name;
+        CAPTURE(fixture);
+        std::map<std::string, std::string> o;
+        {
+            std::ifstream in(std::string(STEIN_FIXTURE_DIR) + "/ewf/" + fixture + ".oracle.txt");
+            std::string line;
+            while (std::getline(in, line))
+                if (auto eq = line.find('='); eq != std::string::npos) o[line.substr(0, eq)] = line.substr(eq + 1);
+        }
+        // Materialise every segment of this image.
+        int segments = 0;
+        for (const auto& entry : std::filesystem::directory_iterator(std::string(STEIN_FIXTURE_DIR) + "/ewf")) {
+            const std::string fn = entry.path().filename().string();
+            if (fn.rfind(fixture + ".E", 0) != 0 || fn.find(".sparse") == std::string::npos) continue;
+            auto mem = SparseFile::loadIntoMemory(entry.path());
+            REQUIRE(mem);
+            const auto target = dir / fn.substr(0, fn.size() - 7);
+            auto out = FileDevice::create(target, (*mem)->size());
+            REQUIRE(out);
+            std::vector<std::byte> buf(static_cast<std::size_t>((*mem)->size()));
+            REQUIRE((*mem)->readAt(0, buf));
+            REQUIRE((*out)->writeAt(0, buf));
+            REQUIRE((*out)->flush());
+            ++segments;
+        }
+        CHECK(segments == std::stoi(o["segments"]));
+        const auto first = dir / (fixture + ".E01");
+        auto fmt = image::detectVdiskFormat(first);
+        REQUIRE(fmt);
+        CHECK(*fmt == image::VdiskFormat::Ewf);
+        image::VdiskInfo info;
+        auto dev = image::openVdisk(first, &info);
+        REQUIRE_MESSAGE(dev, (dev ? std::string() : dev.error().toString()));
+        CHECK(info.files.size() == static_cast<std::size_t>(segments));
+        CHECK(info.storedMd5 == o["md5"]);
+        if (!info.storedSha1.empty()) CHECK(info.storedSha1 == o["sha1"]);
+        const ByteCount rawSize = std::stoull(o["raw_size"]);
+        CHECK((*dev)->size() == rawSize);
+        std::vector<std::byte> all(static_cast<std::size_t>(rawSize));
+        REQUIRE((*dev)->readAt(0, all));
+        CHECK(Hasher::hex(Hasher::digest(HashAlgorithm::Sha256, all)) == o["sha256"]);
+        CHECK(Hasher::hex(Hasher::digest(HashAlgorithm::Md5, all)) == o["md5"]);   // our read matches what the acquirer hashed
+        std::mt19937_64 rng(7);
+        for (int i = 0; i < 30; ++i) {
+            const ByteCount off = rng() % (rawSize - 200000);
+            const std::size_t n = 1 + static_cast<std::size_t>(rng() % 199999);
+            std::vector<std::byte> win(n);
+            REQUIRE((*dev)->readAt(off, win));
+            CHECK(std::memcmp(win.data(), all.data() + off, n) == 0);
+        }
+        auto tree = probe::probe(*dev);
+        REQUIRE(tree);
+        REQUIRE(tree->table);
+        CHECK(tree->table->partitions().size() == 2);
+        REQUIRE(tree->children.size() >= 2);
+        REQUIRE(tree->children[1].content);
+        CHECK(tree->children[1].content->info().label == "inside_ewf");
+    }
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}

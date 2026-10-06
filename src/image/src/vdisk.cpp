@@ -6,12 +6,14 @@
 #include "stein/block/slice_device.hpp"
 #include "stein/core/crc32.hpp"
 #include "stein/core/endian.hpp"
+#include "stein/core/hash.hpp"
 #include "stein/core/inflate.hpp"
 #include "stein/core/strings.hpp"
 #include "stein/image/stein_format.hpp"
 #include "stein/image/operations.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <fstream>
 #include <functional>
@@ -27,6 +29,7 @@ std::string_view toString(VdiskFormat f) {
     case VdiskFormat::Vhdx: return "vhdx";
     case VdiskFormat::Vmdk: return "vmdk";
     case VdiskFormat::Vdi: return "vdi";
+    case VdiskFormat::Ewf: return "ewf";
     }
     return "?";
 }
@@ -45,12 +48,14 @@ public:
         ByteCount length = 0;          // how many guest bytes this answer covers (from the asked offset)
         std::uint64_t unit = 0;        // Compressed: identifier of the unit (cache key)
         ByteCount unitStart = 0;       // Compressed: guest offset where the unit begins
+        std::size_t fileIndex = 0;     // File: which of the container's files (segments)
     };
     using Mapper = std::function<Expected<Map>(ByteCount guestOffset)>;
     using Decompressor = std::function<Expected<void>(std::uint64_t unit, std::span<std::byte> out)>;   // fills one whole unit
 
     MappedDevice(std::shared_ptr<BlockDevice> file, std::string name, ByteCount size, std::uint32_t unitSize, Mapper map, Decompressor decompress)
         : m_file(std::move(file)), m_name(std::move(name)), m_unitSize(unitSize), m_map(std::move(map)), m_decompress(std::move(decompress)) {
+        m_files.push_back(m_file);
         m_geometry.sizeBytes = size;
         m_geometry.logicalSectorSize = 512;
         m_geometry.physicalSectorSize = 512;
@@ -61,6 +66,7 @@ public:
     std::shared_ptr<BlockDevice> parent() const override { return m_file; }
     Expected<void> flush() override { return {}; }
     Expected<void> writeAt(ByteCount, std::span<const std::byte>) override { return fail(ErrorCategory::Permission, m_name + " is a read-only container"); }
+    void setFiles(std::vector<std::shared_ptr<BlockDevice>> files) { m_files = std::move(files); }
 
     Expected<void> readAt(ByteCount offset, std::span<std::byte> dst) override {
         if (auto r = checkRange(offset, dst.size()); !r) return r;
@@ -75,7 +81,8 @@ public:
             switch (m->kind) {
             case MappedDevice::Kind::Zero: std::memset(window.data(), 0, n); break;
             case MappedDevice::Kind::File:
-                if (auto r = m_file->readAt(m->fileOffset, window); !r) return r;
+                if (m->fileIndex >= m_files.size()) return fail(ErrorCategory::Internal, "container mapping names a missing file");
+                if (auto r = m_files[m->fileIndex]->readAt(m->fileOffset, window); !r) return r;
                 break;
             case MappedDevice::Kind::Compressed: {
                 if (m_cachedUnit != m->unit || m_cache.size() != m_unitSize) {
@@ -96,6 +103,7 @@ public:
 
 private:
     std::shared_ptr<BlockDevice> m_file;
+    std::vector<std::shared_ptr<BlockDevice>> m_files;
     std::string m_name;
     std::uint32_t m_unitSize;
     Mapper m_map;
@@ -587,6 +595,170 @@ Expected<std::shared_ptr<BlockDevice>> openVdi(std::shared_ptr<BlockDevice> file
     return std::shared_ptr<BlockDevice>(dev);
 }
 
+
+// ----------------------------------------------------------------------------- EWF / E01
+
+// Segment file names: .E01 .. .E99, then .EAA .. .EZZ, .FAA ... (libewf's scheme).
+std::string nextEwfExtension(const std::string& ext) {
+    if (ext.size() != 3) return {};
+    std::string n = ext;
+    if (std::isdigit(static_cast<unsigned char>(n[1])) && std::isdigit(static_cast<unsigned char>(n[2]))) {
+        const int v = (n[1] - '0') * 10 + (n[2] - '0');
+        if (v < 99) {
+            n[1] = static_cast<char>('0' + (v + 1) / 10);
+            n[2] = static_cast<char>('0' + (v + 1) % 10);
+            return n;
+        }
+        n[1] = n[2] = 'A';
+        return n;
+    }
+    for (int i = 2; i >= 0; --i) {
+        if (n[i] < 'Z') {
+            ++n[i];
+            return n;
+        }
+        n[i] = 'A';
+    }
+    return {};
+}
+
+Expected<std::shared_ptr<BlockDevice>> openEwf(const std::filesystem::path& path, VdiskInfo& info) {
+    struct Chunk {
+        std::size_t file;
+        ByteCount offset;
+        std::uint32_t size;
+        bool compressed;
+    };
+    std::vector<std::shared_ptr<BlockDevice>> files;
+    std::vector<Chunk> chunks;
+    std::uint32_t sectorsPerChunk = 0, bytesPerSector = 0;
+    std::uint64_t sectorCount = 0, declaredChunks = 0;
+    std::string md5, sha1;
+    bool done = false;
+    std::filesystem::path current = path;
+    std::string ext = path.extension().string();
+    if (ext.size() == 4 && ext[0] == '.') ext = ext.substr(1);
+    if (ext.size() != 3) return fail(ErrorCategory::InvalidFormat, "EWF segment needs a .E01-style extension");
+    for (int segment = 1; !done && segment < 100000; ++segment) {
+        auto f = FileDevice::open(current, FileDevice::Mode::ReadOnly);
+        if (!f) return fail(ErrorCategory::NotFound, "EWF segment " + current.string() + " is missing: " + f.error().message());
+        files.push_back(*f);
+        info.files.push_back(current);
+        const std::size_t fileIndex = files.size() - 1;
+        auto head = readExact(**f, 0, 13);
+        if (!head || std::memcmp(head->data(), "EVF\x09\x0d\x0a\xff\x00", 8) != 0) return fail(ErrorCategory::InvalidFormat, current.string() + ": not an EWF segment");
+        if (loadLe16(head->data() + 9) != static_cast<std::uint16_t>(segment)) return fail(ErrorCategory::InvalidFormat, current.string() + ": unexpected segment number");
+        ByteCount off = 13;
+        ByteCount sectorsStart = 0, sectorsEnd = 0;
+        std::vector<Chunk> pending;   // entries of the last table, sized once the section bounds are known
+        for (int guard = 0; guard < 100000; ++guard) {
+            auto sh = readExact(**f, off, 76);
+            if (!sh) return fail(sh.error());
+            if (compress::adler32(std::span<const std::byte>(sh->data(), 72)) != loadLe32(sh->data() + 72)) return fail(ErrorCategory::Integrity, current.string() + ": section header checksum mismatch");
+            std::string type(reinterpret_cast<const char*>(sh->data()), 16);
+            type.erase(std::find(type.begin(), type.end(), '\0'), type.end());
+            const std::uint64_t next = loadLe64(sh->data() + 16), size = loadLe64(sh->data() + 24);
+            if (type == "volume" || type == "disk") {
+                auto body = readExact(**f, off + 76, std::min<ByteCount>(size - 76, 1052));
+                if (!body || body->size() < 24) return fail(ErrorCategory::InvalidFormat, "EWF volume section too small");
+                declaredChunks = loadLe32(body->data() + 4);
+                sectorsPerChunk = loadLe32(body->data() + 8);
+                bytesPerSector = loadLe32(body->data() + 12);
+                sectorCount = loadLe64(body->data() + 16);
+                if (body->size() >= 1052) {
+                    const auto level = std::to_integer<std::uint8_t>((*body)[52]);
+                    if (level) info.compressed = true;
+                }
+            } else if (type == "sectors") {
+                sectorsStart = off + 76;
+                sectorsEnd = off + size;
+            } else if (type == "table") {
+                auto body = readExact(**f, off + 76, size - 76);
+                if (!body || body->size() < 24) return fail(ErrorCategory::InvalidFormat, "EWF table section too small");
+                const std::uint32_t entries = loadLe32(body->data());
+                const std::uint64_t base = loadLe64(body->data() + 8);
+                if (compress::adler32(std::span<const std::byte>(body->data(), 20)) != loadLe32(body->data() + 20)) return fail(ErrorCategory::Integrity, "EWF table header checksum mismatch");
+                if (24 + std::size_t{entries} * 4 > body->size()) return fail(ErrorCategory::InvalidFormat, "EWF table entries overrun the section");
+                std::vector<Chunk> these;
+                these.reserve(entries);
+                for (std::uint32_t i = 0; i < entries; ++i) {
+                    const std::uint32_t e = loadLe32(body->data() + 24 + i * 4);
+                    these.push_back(Chunk{fileIndex, base + (e & 0x7FFFFFFFu), 0, (e & 0x80000000u) != 0});
+                }
+                for (std::size_t i = 0; i < these.size(); ++i) {
+                    const ByteCount end = i + 1 < these.size() ? these[i + 1].offset : sectorsEnd;
+                    if (end < these[i].offset || these[i].offset < sectorsStart) return fail(ErrorCategory::InvalidFormat, "EWF chunk offsets are not monotonic within their sectors section");
+                    these[i].size = static_cast<std::uint32_t>(end - these[i].offset);
+                }
+                chunks.insert(chunks.end(), these.begin(), these.end());
+            } else if (type == "hash") {
+                auto body = readExact(**f, off + 76, 16);
+                if (body) md5 = Hasher::hex(std::vector<std::uint8_t>(reinterpret_cast<const std::uint8_t*>(body->data()), reinterpret_cast<const std::uint8_t*>(body->data()) + 16));
+            } else if (type == "digest") {
+                auto body = readExact(**f, off + 76, 36);
+                if (body) {
+                    md5 = Hasher::hex(std::vector<std::uint8_t>(reinterpret_cast<const std::uint8_t*>(body->data()), reinterpret_cast<const std::uint8_t*>(body->data()) + 16));
+                    sha1 = Hasher::hex(std::vector<std::uint8_t>(reinterpret_cast<const std::uint8_t*>(body->data()) + 16, reinterpret_cast<const std::uint8_t*>(body->data()) + 36));
+                }
+            } else if (type == "done") {
+                done = true;
+                break;
+            } else if (type == "next") {
+                break;
+            }
+            // "table2" mirrors "table"; header/header2/data/error2/session carry nothing we map.
+            if (next <= off || next > (*f)->size()) return fail(ErrorCategory::InvalidFormat, current.string() + ": broken section chain");
+            off = next;
+        }
+        if (!done) {
+            ext = nextEwfExtension(ext);
+            if (ext.empty()) return fail(ErrorCategory::InvalidFormat, "ran out of EWF segment names");
+            current = current.parent_path() / (current.stem().string() + "." + ext);
+        }
+    }
+    if (sectorsPerChunk == 0 || bytesPerSector == 0 || sectorCount == 0) return fail(ErrorCategory::InvalidFormat, "EWF image has no volume section");
+    if (chunks.size() < declaredChunks) return fail(ErrorCategory::InvalidFormat, "EWF image is missing chunks (" + std::to_string(chunks.size()) + " of " + std::to_string(declaredChunks) + ")");
+    const std::uint32_t chunkBytes = sectorsPerChunk * bytesPerSector;
+    const ByteCount mediaSize = sectorCount * bytesPerSector;
+    info.format = VdiskFormat::Ewf;
+    info.virtualSize = mediaSize;
+    info.clusterSize = chunkBytes;
+    info.variant = "EnCase/EWF v1, " + std::to_string(files.size()) + " segment(s)";
+    info.storedMd5 = md5;
+    info.storedSha1 = sha1;
+    auto table = std::make_shared<std::vector<Chunk>>(std::move(chunks));
+    auto mapper = [=](ByteCount guest) -> Expected<MappedDevice::Map> {
+        MappedDevice::Map m;
+        const std::uint64_t index = guest / chunkBytes, in = guest % chunkBytes;
+        m.length = chunkBytes - in;
+        m.unitStart = index * chunkBytes;
+        if (index >= table->size()) return m;
+        m.kind = MappedDevice::Kind::Compressed;   // uncompressed chunks go through the same path for their checksum
+        m.unit = index;
+        return m;
+    };
+    auto filesCopy = files;
+    auto decompress = [=](std::uint64_t index, std::span<std::byte> out) -> Expected<void> {
+        const Chunk& c = (*table)[index];
+        auto raw = readExact(*filesCopy[c.file], c.offset, c.size);
+        if (!raw) return fail(raw.error());
+        if (c.compressed) {
+            auto n = compress::inflateZlib(*raw, out);
+            if (!n) return fail(n.error());
+            return {};
+        }
+        if (raw->size() < 4) return fail(ErrorCategory::InvalidFormat, "EWF chunk too small");
+        const std::size_t data = raw->size() - 4;
+        if (data > out.size()) return fail(ErrorCategory::InvalidFormat, "EWF chunk larger than the chunk size");
+        if (compress::adler32(std::span<const std::byte>(raw->data(), data)) != loadLe32(raw->data() + data)) return fail(ErrorCategory::Integrity, "EWF chunk checksum mismatch");
+        std::memcpy(out.data(), raw->data(), data);
+        return {};
+    };
+    auto dev = std::make_shared<MappedDevice>(files[0], path.filename().string() + " (ewf)", mediaSize, chunkBytes, mapper, decompress);
+    dev->setFiles(files);
+    return std::shared_ptr<BlockDevice>(dev);
+}
+
 } // namespace
 
 Expected<VdiskFormat> detectVdiskFormat(const std::filesystem::path& path) {
@@ -599,6 +771,7 @@ Expected<VdiskFormat> detectVdiskFormat(const std::filesystem::path& path) {
     in.read(head.data(), static_cast<std::streamsize>(std::min<std::uintmax_t>(512, size)));
     if (SteinReader::looksLikeStein(path)) return VdiskFormat::Stein;
     if (std::memcmp(head.data(), "QFI\xfb", 4) == 0) return VdiskFormat::Qcow2;
+    if (std::memcmp(head.data(), "EVF\x09\x0d\x0a\xff\x00", 8) == 0) return VdiskFormat::Ewf;
     if (std::memcmp(head.data(), "vhdxfile", 8) == 0) return VdiskFormat::Vhdx;
     if (std::memcmp(head.data(), "KDMV", 4) == 0 || std::string_view(head.data(), head.size()).find("# Disk DescriptorFile") != std::string_view::npos) return VdiskFormat::Vmdk;
     if (size >= 512 && loadLe32(reinterpret_cast<const std::byte*>(head.data()) + 64) == 0xBEDA107Fu) return VdiskFormat::Vdi;
@@ -628,6 +801,13 @@ Expected<std::shared_ptr<BlockDevice>> openVdisk(const std::filesystem::path& pa
         dev = openImage(path, {});
         if (dev) info.virtualSize = (*dev)->size();
     } else {
+        if (*format == VdiskFormat::Ewf) {
+            info.files.clear();
+            dev = openEwf(path, info);
+            if (!dev) return dev;
+            if (infoOut) *infoOut = info;
+            return dev;
+        }
         auto file = FileDevice::open(path, FileDevice::Mode::ReadOnly);
         if (!file) return fail(file.error());
         switch (*format) {

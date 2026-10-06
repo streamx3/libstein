@@ -37,7 +37,7 @@ ctest --preset debug
 ./build/debug/tools/stein/stein pt create disk.img gpt     # edits are simulated, shown, then applied
 ./build/debug/tools/stein/stein pt add disk.img --size 512M --type EF00 --name EFI --dry-run
 ./build/debug/tools/stein/stein image create /dev/sdb backup.stein --compress lz4 --used-only --passphrase ...   # encrypted, free space skipped
-./build/debug/tools/stein/stein probe backup.stein        # an image is a disk; so is vm.qcow2 / .vhdx / .vmdk / .vdi / .vhd
+./build/debug/tools/stein/stein probe backup.stein        # an image is a disk; so is vm.qcow2 / .vhdx / .vmdk / .vdi / .vhd / evidence.E01
 ./build/debug/tools/stein/stein image restore backup.stein /dev/sdc
 ./build/debug/tools/stein/stein app init office.json /dev/sdb /backups/office.stein   # dr_stein-style profile
 ./build/debug/tools/stein/stein app status office.json && ./build/debug/tools/stein/stein app restore office.json
@@ -53,7 +53,7 @@ What works today (all in-process, no kernel drivers, Linux/macOS/Windows):
 GPT/MBR/APM read, write and repair; 35 filesystems identified; allocation
 maps for ext/FAT/exFAT/NTFS/HFS+ (used-block imaging); `.stein` images with
 LZ4, split segments and ChaCha20-Poly1305 encryption (Argon2id key slots);
-qcow2/VHD/VHDX/VMDK/VDI containers opened read-only;
+qcow2/VHD/VHDX/VMDK/VDI and E01 containers opened read-only;
 LUKS1/2 unlock; VeraCrypt/TrueCrypt volumes (AES-XTS, SHA-512/SHA-256, hidden volumes); LVM2 linear/striped volumes; file readers for ext2/3/4,
 NTFS, FAT, exFAT, HFS+, ISO 9660, XFS and btrfs, mountable through FUSE on Linux; profile-driven one-button
 backup/restore; fake-flash and surface tests. See `doc/reports/` for the detailed status.
