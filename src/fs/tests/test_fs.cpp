@@ -410,3 +410,42 @@ TEST_CASE("ntfs reader: every file, directory and link matches the ntfs-3g mount
     CHECK(std::string(reinterpret_cast<const char*>(buf.data()), *n) == "after a hole\n");
     CHECK(seen.count("many/file_299.txt"));
 }
+
+TEST_CASE("fat reader: FAT12/16/32 fixtures written by pyfatfs read back exactly (LFN, Unicode, fragmentation, big directories)") {
+    const char* names[] = {"fat12", "fat16", "fat32"};
+    for (const char* name : names) {
+        const std::string fixture = name;
+        CAPTURE(fixture);
+        auto dev = loadSparseFixture("fatfs/" + fixture + ".sparse");
+        auto probed = fs::probe(dev);
+        REQUIRE(probed);
+        REQUIRE(*probed);
+        REQUIRE(fs::has((*probed)->capabilities(), fs::Capability::Read));
+        auto reader = (*probed)->openReader();
+        REQUIRE_MESSAGE(reader, (reader ? std::string() : reader.error().toString()));
+        auto root = (*reader)->root();
+        REQUIRE(root);
+        std::map<std::string, std::pair<char, std::uint64_t>> seen;
+        std::map<std::string, std::string> sha, links;
+        walk(**reader, *root, "", seen, sha, links);
+        const auto o = loadExtOracle(fixture, "fatfs");
+        CHECK(seen.size() == o.entries.size());
+        for (const auto& [path, ts] : o.entries) {
+            CAPTURE(path);
+            REQUIRE(seen.count(path));
+            CHECK(seen[path].first == ts.first);
+            if (ts.first == 'f') CHECK(seen[path].second == ts.second);
+        }
+        for (const auto& [path, h] : o.sha) {
+            CAPTURE(path);
+            CHECK(sha[path] == h);
+        }
+        CHECK(*fs::resolvePath(**reader, "dir/upper.txt") == *fs::resolvePath(**reader, "dir/UPPER.TXT"));
+        CHECK(*fs::resolvePath(**reader, "dir/nested/deep/../deep/leaf.txt") == *fs::resolvePath(**reader, "dir/nested/deep/leaf.txt"));
+        CHECK(*fs::resolvePath(**reader, "dir/..") == *root);
+        CHECK((*reader)->readlink(*root).error().category() == ErrorCategory::InvalidArgument);
+        auto big = fs::resolvePath(**reader, "big.bin");
+        REQUIRE(big);
+        CHECK((*reader)->stat(*big)->allocatedBytes >= 150 * 1024);
+    }
+}

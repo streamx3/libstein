@@ -3,6 +3,7 @@
 #include "stein/core/endian.hpp"
 #include "stein/core/strings.hpp"
 #include "stein/layout/gen/exfat.hpp"
+#include "stein/fs/fat_reader.hpp"
 #include "stein/layout/gen/fat.hpp"
 
 namespace stein::fs::detail {
@@ -223,6 +224,7 @@ Result detectFat(Dev dev) {
         alloc->dataOffset = dataStart * bps;
         alloc->clusters = clusters;
         fs->setAllocationSource(std::move(alloc));
+        fs->setReaderSource(makeFatReaderSource());
     }
     // FATs and (FAT12/16) root directory are metadata too.
     fs->addRegion(Region{ByteCount{reserved} * bps, ByteCount{fats} * fatSectors * bps});
