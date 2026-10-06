@@ -6,6 +6,7 @@
 #pragma once
 
 #include "stein/core/error.hpp"
+#include "stein/core/hash.hpp"
 
 #include <array>
 #include <cstdint>
@@ -31,6 +32,9 @@ Expected<void> aeadDecrypt(const Key256& key, const Nonce96& nonce, std::span<co
 
 std::array<std::uint8_t, 32> hmacSha256(std::span<const std::byte> key, std::span<const std::byte> message);
 void pbkdf2Sha256(std::span<const std::byte> password, std::span<const std::byte> salt, std::uint32_t iterations, std::span<std::uint8_t> out);
+// Generic HMAC / PBKDF2 over any Hasher (SHA-1, SHA-512, ...); SHA-256 takes the fast path above.
+std::vector<std::uint8_t> hmac(HashAlgorithm hash, std::span<const std::byte> key, std::span<const std::byte> message);
+void pbkdf2(HashAlgorithm hash, std::span<const std::byte> password, std::span<const std::byte> salt, std::uint32_t iterations, std::span<std::uint8_t> out);
 
 // BLAKE2b (RFC 7693): 1..64 byte digest, optional key up to 64 bytes.
 void blake2b(std::span<std::uint8_t> out, std::span<const std::byte> message, std::span<const std::byte> key = {});

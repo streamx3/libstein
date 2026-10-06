@@ -14,7 +14,7 @@
 
 namespace stein {
 
-enum class HashAlgorithm : std::uint8_t { Md5, Sha1, Sha256 };
+enum class HashAlgorithm : std::uint8_t { Md5, Sha1, Sha256, Sha512 };
 
 std::string_view toString(HashAlgorithm a);
 
@@ -23,6 +23,7 @@ public:
     virtual ~Hasher() = default;
     virtual HashAlgorithm algorithm() const = 0;
     virtual std::size_t digestSize() const = 0;
+    virtual std::size_t blockSize() const { return 64; }   // HMAC block size
     virtual void update(std::span<const std::byte> data) = 0;
     // Finalises and returns the digest; the hasher must be reset() before reuse.
     virtual std::vector<std::uint8_t> finish() = 0;
@@ -83,6 +84,24 @@ private:
     std::array<std::uint32_t, 8> m_state{};
     std::uint64_t m_bits = 0;
     std::array<std::uint8_t, 64> m_buffer{};
+    std::size_t m_bufferLen = 0;
+};
+
+class Sha512 final : public Hasher {
+public:
+    Sha512() { reset(); }
+    HashAlgorithm algorithm() const override { return HashAlgorithm::Sha512; }
+    std::size_t digestSize() const override { return 64; }
+    std::size_t blockSize() const override { return 128; }
+    void update(std::span<const std::byte> data) override;
+    std::vector<std::uint8_t> finish() override;
+    void reset() override;
+
+private:
+    void transform(const std::uint8_t block[128]);
+    std::array<std::uint64_t, 8> m_state{};
+    std::uint64_t m_bits = 0;
+    std::array<std::uint8_t, 128> m_buffer{};
     std::size_t m_bufferLen = 0;
 };
 

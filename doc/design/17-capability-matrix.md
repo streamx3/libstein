@@ -44,7 +44,7 @@ L0 detect/geometry/label/uuid · L1 used-block map · L2 offline metadata edit
 |---|---|---|---|---|
 | LUKS1 | **done** | v1 | v2 (format, keyslots) | PBKDF2, AF-splitter, aes-xts-plain64 first; other cipher specs v2 |
 | LUKS2 | **done** | v1 (argon2id/pbkdf2, xts; integrity → refuse) | v2 | JSON metadata, two header copies |
-| TrueCrypt/VeraCrypt | v1 (by trial decrypt) | v2 (basis: tc-play, BSD-2; cascades, hidden, PIM) | v3 | system-encryption volumes v3 |
+| TrueCrypt/VeraCrypt | **done** (by trial decrypt with a passphrase) | **done** (AES-XTS; PBKDF2 SHA-512/SHA-256 with PIM; normal, hidden, backup headers) — cascades, Whirlpool/Streebog/RIPEMD-160/BLAKE2s v2 | v3 | system-encryption volumes v3 |
 | BitLocker | v1 | v2 (password / recovery key / BEK; AES-CBC+Elephant, AES-XTS) | – | libbde docs as spec |
 | FileVault2 / CoreStorage | v1 | v3 | – | |
 | plain dm-crypt | v1 (parameters supplied) | v1 | v1 | |

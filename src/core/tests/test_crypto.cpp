@@ -239,3 +239,35 @@ TEST_CASE("sha1 vectors and base64 round trips") {
     CHECK(fromBase64("TWE").value() == std::vector<std::byte>{std::byte{'M'}, std::byte{'a'}});
     CHECK_FALSE(fromBase64("T*E="));
 }
+
+TEST_CASE("sha512, hmac-sha512 and pbkdf2-hmac-sha512 vectors") {
+    auto bytes = [](std::string_view s) { return std::span<const std::byte>(reinterpret_cast<const std::byte*>(s.data()), s.size()); };
+    CHECK(Hasher::hex(Hasher::digest(HashAlgorithm::Sha512, bytes(""))) ==
+          "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e");
+    CHECK(Hasher::hex(Hasher::digest(HashAlgorithm::Sha512, bytes("abc"))) ==
+          "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f");
+    CHECK(Hasher::hex(Hasher::digest(HashAlgorithm::Sha512, bytes("abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu"))) ==
+          "8e959b75dae313da8cf4f72814fc143f8f7779c6eb9f7fa17299aeadb6889018501d289e4900f7e4331b99dec4b5433ac7d329eeb6dd26545e96e55b874be909");
+    // Incremental update across the 128-byte block boundary.
+    {
+        Sha512 h;
+        std::string a(100, 'a'), b(100, 'a');
+        h.update(bytes(a));
+        h.update(bytes(b));
+        CHECK(Hasher::hex(h.finish()) == Hasher::hex(Hasher::digest(HashAlgorithm::Sha512, bytes(std::string(200, 'a')))));
+    }
+    // RFC 4231 test case 2.
+    CHECK(Hasher::hex(crypto::hmac(HashAlgorithm::Sha512, bytes("Jefe"), bytes("what do ya want for nothing?"))) ==
+          "164b7a7bfcf819e2e395fbe73b56e0a387bd64222e831fd610270cd7ea2505549758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737");
+    // PBKDF2-HMAC-SHA512("password", "salt", 1, 64) and c = 4096 (well-known vectors).
+    std::vector<std::uint8_t> dk(64);
+    crypto::pbkdf2(HashAlgorithm::Sha512, bytes("password"), bytes("salt"), 1, dk);
+    CHECK(Hasher::hex(dk) == "867f70cf1ade02cff3752599a3a53dc4af34c7a669815ae5d513554e1c8cf252c02d470a285a0501bad999bfe943c08f050235d7d68b1da55e63f73b60a57fce");
+    crypto::pbkdf2(HashAlgorithm::Sha512, bytes("password"), bytes("salt"), 4096, dk);
+    CHECK(Hasher::hex(dk) == "d197b1b33db0143e018b12f3d1d1479e6cdebdcc97c5c0f87f6902e072f457b5143f30602641b3d55cd335988cb36b84376060ecd532e039b742a239434af2d5");
+    // Generic SHA-256 path agrees with the native one.
+    std::vector<std::uint8_t> a(32), b(32);
+    crypto::pbkdf2(HashAlgorithm::Sha256, bytes("pw"), bytes("salt"), 100, a);
+    crypto::pbkdf2Sha256(bytes("pw"), bytes("salt"), 100, b);
+    CHECK(a == b);
+}

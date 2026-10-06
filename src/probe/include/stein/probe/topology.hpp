@@ -58,6 +58,11 @@ struct Options {
     // Decrypted child holding whatever the plaintext carries. Argon2 slots make
     // each attempt cost real time, so pass only what the user typed.
     std::vector<std::string> passphrases;
+    // VeraCrypt/TrueCrypt volumes have no signature: with passphrases given, a region
+    // nothing else claims is tried by header decryption (costly: up to 500k PBKDF2
+    // iterations per passphrase and header location). pim: VeraCrypt iterations multiplier.
+    bool tcrypt = true;
+    std::uint32_t pim = 0;
     bool volumes = true;         // assemble LVM logical volumes whose extents all lie on this device
 };
 

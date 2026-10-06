@@ -3,11 +3,14 @@
 #include "stein_test.hpp"
 
 #include "stein/container/luks.hpp"
+#include "stein/container/tcrypt.hpp"
 #include "stein/core/hash.hpp"
 #include "stein/core/strings.hpp"
 #include "stein/fs/filesystem.hpp"
+#include "stein/fs/reader.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <fstream>
 #include <map>
 
@@ -118,4 +121,82 @@ TEST_CASE("luks: anti-forensic merge of a known split") {
     REQUIRE(merged);
     CHECK(*merged == key);
     CHECK_FALSE(container::afMerge(split, 32, stripes, "md4"));
+}
+
+TEST_CASE("tcrypt: VeraCrypt (sha512 default, sha256 with PIM, hidden volume) and TrueCrypt volumes open by trial decryption") {
+    struct Case { const char* name; const char* passphrase; std::uint32_t pim; const char* variant; const char* prf; const char* label; bool hidden; ByteCount payloadOffset, payloadSize; };
+    const Case cases[] = {
+        {"veracrypt_sha512", "stein-vera", 0, "VeraCrypt", "sha512", "inside_vc", false, 131072, 262144},
+        {"veracrypt_sha256_pim", "stein-pim", 3, "VeraCrypt", "sha256", "inside_vc", false, 131072, 262144},
+        {"truecrypt_sha512", "stein-true", 0, "TrueCrypt", "sha512", "inside_vc", false, 131072, 262144},
+        {"veracrypt_hidden", "stein-outer", 1, "VeraCrypt", "sha512", "outer_vc", false, 131072, 524288},
+        {"veracrypt_hidden", "stein-hidden", 1, "VeraCrypt", "sha256", "hidden_vc", true, 393216, 262144},
+    };
+    for (const auto& c : cases) {
+        const std::string fixture = c.name;
+        CAPTURE(fixture);
+        CAPTURE(c.passphrase);
+#if !defined(NDEBUG)
+        if (c.pim == 0 && std::string(c.variant) == "VeraCrypt" && !std::getenv("STEIN_SLOW_TESTS")) {
+            MESSAGE("skipping the 500000-iteration default-PIM volume in a debug build (set STEIN_SLOW_TESTS=1 to run it)");
+            continue;
+        }
+#endif
+        auto dev = loadSparseFixture("tcrypt/" + fixture + ".sparse");
+        container::TcryptOptions opt;
+        opt.pim = c.pim;
+        auto t = container::Tcrypt::unlock(dev, c.passphrase, opt);
+        REQUIRE_MESSAGE(t, (t ? std::string() : t.error().toString()));
+        CHECK(t->info().variant == c.variant);
+        CHECK(t->info().prf == c.prf);
+        CHECK(t->info().hidden == c.hidden);
+        CHECK_FALSE(t->info().backupHeader);
+        CHECK(t->info().payloadOffset == c.payloadOffset);
+        CHECK(t->info().payloadSize == c.payloadSize);
+        CHECK(t->info().headerVersion == 5);
+        auto payload = t->openPayload(true);
+        REQUIRE(payload);
+        auto probed = fs::probe(*payload);
+        REQUIRE(probed);
+        REQUIRE(*probed);
+        CHECK((*probed)->type() == fs::FsType::Ext2);
+        CHECK((*probed)->info().label == c.label);
+        auto reader = (*probed)->openReader();
+        REQUIRE(reader);
+        auto hello = fs::resolvePath(**reader, "hello.txt");
+        REQUIRE(hello);
+        auto data = fs::readAll(**reader, *hello);
+        REQUIRE(data);
+        const std::string text(reinterpret_cast<const char*>(data->data()), data->size());
+        CHECK(text.find("secret inside " + fixture) != std::string::npos);
+        if (c.hidden) CHECK(text.rfind("hidden secret", 0) == 0);
+        // Wrong passphrase: no header decrypts (skipped where the default 500k iterations would make it slow).
+        if (c.pim != 0 || std::string(c.variant) == "TrueCrypt") {
+            container::TcryptOptions wrongOpt = opt;
+            wrongOpt.veracrypt = c.pim != 0;   // a pim of 0 would mean two 500000-iteration VeraCrypt trials per header
+            auto wrong = container::Tcrypt::unlock(dev, std::string(c.passphrase) + "x", wrongOpt);
+            REQUIRE_FALSE(wrong);
+            CHECK(wrong.error().category() == ErrorCategory::Integrity);
+        }
+    }
+    // Backup header: damage the primary (and hidden) header areas, the copies at the end still open the volume.
+    {
+        auto dev = loadSparseFixture("tcrypt/veracrypt_sha256_pim.sparse");
+        std::vector<std::byte> junk(131072, std::byte{0x5A});
+        REQUIRE(dev->writeAt(0, junk));
+        container::TcryptOptions opt;
+        opt.pim = 3;
+        auto t = container::Tcrypt::unlock(dev, "stein-pim", opt);
+        REQUIRE_MESSAGE(t, (t ? std::string() : t.error().toString()));
+        CHECK(t->info().backupHeader);
+        CHECK(t->info().headerOffset == dev->size() - 131072);
+        auto payload = t->openPayload(true);
+        REQUIRE(payload);
+        auto probed = fs::probe(*payload);
+        REQUIRE(probed);
+        REQUIRE(*probed);
+        CHECK((*probed)->info().label == "inside_vc");
+        opt.backupHeaders = false;
+        CHECK_FALSE(container::Tcrypt::unlock(dev, "stein-pim", opt));
+    }
 }

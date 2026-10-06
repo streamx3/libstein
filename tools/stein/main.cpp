@@ -16,6 +16,7 @@
 #include "stein/block/file_device.hpp"
 #include "stein/block/sparse_file.hpp"
 #include "stein/container/luks.hpp"
+#include "stein/container/tcrypt.hpp"
 #include "stein/volume/lvm.hpp"
 #include "stein/core/strings.hpp"
 #include "stein/core/units.hpp"
@@ -78,6 +79,8 @@ int usage() {
                "  stein luks info    <image|device> [--part N]        header, cipher, key slots\n"
                "  stein luks unlock  <image|device> [--part N]        check a passphrase and probe the plaintext\n"
                "  stein luks extract <image|device> <out> [--part N]  decrypt the payload into a plain image\n"
+               "  stein tcrypt unlock  <image|device> [--part N] [--pim N]   VeraCrypt/TrueCrypt: find the header by trial decryption, probe the plaintext\n"
+               "  stein tcrypt extract <image|device> <out> [--part N] [--pim N]\n"
                "      stein probe --passphrase P also descends into LUKS containers it can open\n"
                "  stein lvm list    <image|device> [--part N] [--doc]   volume group, PVs, LVs and how they map\n"
                "  stein lvm extract <image|device> <lv> <out> [--part N] copy a logical volume into a plain image\n"
@@ -108,6 +111,7 @@ struct Args {
     std::string compress, split, chunk;
     std::string start, size, end, type, name, index;
     std::string passphrase, passphraseFile, newPassphrase, kdf, lv;
+    std::uint32_t pim = 0;
     std::uint32_t kdfCost = 0, kdfMemoryKiB = 0;
     std::uint32_t quick = 0;
     bool keep = false;
@@ -135,6 +139,7 @@ Args parse(int argc, char** argv) {
         else if ((s == "--index" || s == "--part") && i + 1 < argc) a.index = argv[++i];
         else if (s == "--lv" && i + 1 < argc) a.lv = argv[++i];
         else if (s == "--allow-other") a.allowOther = true;
+        else if (s == "--pim" && i + 1 < argc) a.pim = static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 10));
         else if (s == "--no-wipe") a.noWipe = true;
         else if (s == "--unlock") a.unlock = true;
         else if (s == "--used-only") a.usedOnly = true;
@@ -447,6 +452,7 @@ int cmdProbe(const Args& a) {
     if (!dev) return die(dev.error());
     probe::Options o;
     if (!g_passphrase.empty()) o.passphrases.push_back(g_passphrase);
+    o.pim = a.pim;
     auto tree = probe::probe(*dev, o);
     if (!tree) return die(tree.error());
     std::fputs(probe::toText(*tree).c_str(), stdout);
@@ -1031,7 +1037,21 @@ Expected<std::unique_ptr<fs::Reader>> openReaderFor(const Args& a, const std::st
     for (int hops = 0; hops < 4; ++hops) {
         auto probed = fs::probe(target);
         if (!probed) return fail(probed.error());
-        if (!*probed) return fail(ErrorCategory::NotFound, where + ": no recognised filesystem");
+        if (!*probed) {
+            // Nothing recognisable: with a passphrase, it may be a VeraCrypt/TrueCrypt volume.
+            if (!g_passphrase.empty() && target->size() >= 256 * KiB) {
+                container::TcryptOptions to;
+                to.pim = a.pim;
+                if (auto t = container::Tcrypt::unlock(target, g_passphrase, to)) {
+                    auto payload = t->openPayload(true);
+                    if (!payload) return fail(payload.error());
+                    target = *payload;
+                    where += " (" + t->info().variant + ")";
+                    continue;
+                }
+            }
+            return fail(ErrorCategory::NotFound, where + ": no recognised filesystem");
+        }
         const auto t = (*probed)->type();
         if (t == fs::FsType::Luks1 || t == fs::FsType::Luks2) {
             if (g_passphrase.empty()) return fail(ErrorCategory::Permission, where + " is LUKS-encrypted; pass --passphrase");
@@ -1147,6 +1167,52 @@ int cmdMount(const Args& a) {
     return 0;
 }
 
+int cmdTcrypt(const Args& a) {
+    if (a.positional.size() < 3) return usage();
+    const std::string& sub = a.positional[1];
+    auto dev = deviceOrPartition(a, a.positional[2]);
+    if (!dev) return die(dev.error());
+    const std::string pass = g_passphrase.empty() ? readPassphrase(a, "Volume passphrase: ") : g_passphrase;
+    container::TcryptOptions to;
+    to.pim = a.pim;
+    auto t = container::Tcrypt::unlock(*dev, pass, to);
+    if (!t) return die(t.error());
+    const auto& info = t->info();
+    std::printf("%s%s  %s  PBKDF2-HMAC-%s (%u iterations)  header v%u (min program %u.%u)%s  payload at %s (%s)\n", info.variant.c_str(), info.hidden ? " hidden volume" : "",
+                info.cipher.c_str(), info.prf.c_str(), info.iterations, info.headerVersion, info.minProgramVersion >> 8, info.minProgramVersion & 0xFF,
+                info.backupHeader ? "  [primary header unusable; opened from the backup header]" : "", formatSizeExact(info.payloadOffset).c_str(), formatSize(info.payloadSize).c_str());
+    auto payload = t->openPayload(true);
+    if (!payload) return die(payload.error());
+    if (sub == "unlock") {
+        auto tree = probe::probe(*payload);
+        if (!tree) return die(tree.error());
+        std::puts("plaintext payload:");
+        std::fputs(probe::toText(*tree).c_str(), stdout);
+        return 0;
+    }
+    if (sub == "extract") {
+        if (a.positional.size() < 4) return usage();
+        const std::string& outPath = a.positional[3];
+        std::error_code ec;
+        if (!platform::isDevicePath(outPath) && !std::filesystem::exists(outPath, ec)) {
+            auto created = FileDevice::create(outPath, (*payload)->size());
+            if (!created) return die(created.error());
+        }
+        auto target = openImage(outPath, true, a.sectorSize);
+        if (!target) return die(target.error());
+        if ((*target)->size() < (*payload)->size() && !a.force) return die(Error(ErrorCategory::OutOfRange, "target smaller than the payload (use --force to write what fits)"));
+        TtyProgress tty;
+        Progress progress(tty);
+        image::CopyOptions co;
+        co.limit = std::min((*payload)->size(), (*target)->size());
+        auto stats = image::copyDevice(**payload, **target, co, progress);
+        if (!stats) return die(stats.error());
+        std::printf("extracted %s to %s\n", formatSize(stats->bytesRead).c_str(), outPath.c_str());
+        return 0;
+    }
+    return usage();
+}
+
 int cmdTypes(const Args& a) {
     const std::string filter = a.positional.size() > 1 ? a.positional[1] : "";
     for (const auto& info : pt::types::all()) {
@@ -1178,6 +1244,7 @@ int main(int argc, char** argv) {
     if (cmd == "app") return cmdApp(a);
     if (cmd == "media") return cmdMedia(a);
     if (cmd == "luks") return cmdLuks(a);
+    if (cmd == "tcrypt") return cmdTcrypt(a);
     if (cmd == "lvm") return cmdLvm(a);
     if (cmd == "ls") return cmdLs(a);
     if (cmd == "mount") return cmdMount(a);

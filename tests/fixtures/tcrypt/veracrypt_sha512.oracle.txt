@@ -1,0 +1,2 @@
+password stein-vera
+VERA sha512 pim=0 iterations=500000 payload=262144

@@ -2,6 +2,7 @@
 #include "stein/probe/topology.hpp"
 
 #include "stein/container/luks.hpp"
+#include "stein/container/tcrypt.hpp"
 #include "stein/volume/lvm.hpp"
 
 #include "stein/block/slice_device.hpp"
@@ -127,6 +128,42 @@ void probeLuks(Node& node, const Options& options, int depth) {
     node.notes.push_back(Note{Validity::Info, "luks.locked", "no supplied passphrase opens this container"});
 }
 
+// Unclaimed bytes plus a passphrase: try VeraCrypt/TrueCrypt headers.
+void probeTcrypt(Node& node, const Options& options, int depth) {
+    if (!options.tcrypt || options.passphrases.empty() || node.content || node.table || !node.children.empty()) return;
+    if (node.device->size() < 256 * KiB) return;
+    container::TcryptOptions to;
+    to.pim = options.pim;
+    for (const auto& pass : options.passphrases) {
+        auto t = container::Tcrypt::unlock(node.device, pass, to);
+        if (!t) {
+            if (t.error().category() != ErrorCategory::Integrity) node.notes.push_back(Note{Validity::Info, "tcrypt.unlock", t.error().message()});
+            continue;
+        }
+        auto payload = t->openPayload(true);
+        if (!payload) {
+            node.notes.push_back(Note{Validity::Warning, "tcrypt.payload", payload.error().message()});
+            return;
+        }
+        Node child;
+        child.kind = NodeKind::Decrypted;
+        child.name = t->info().variant + (t->info().hidden ? " hidden volume" : " volume") + " (" + t->info().prf + (t->info().backupHeader ? ", backup header)" : ")");
+        child.device = *payload;
+        child.region = Region{node.region.offset + t->info().payloadOffset, (*payload)->size()};
+        Node tmp;
+        tmp.kind = NodeKind::Device;
+        tmp.device = child.device;
+        tmp.region = child.region;
+        probeInto(tmp, options, depth + 1);
+        child.table = std::move(tmp.table);
+        child.content = std::move(tmp.content);
+        child.children = std::move(tmp.children);
+        child.notes = std::move(tmp.notes);
+        node.children.push_back(std::move(child));
+        return;
+    }
+}
+
 // An LVM2 physical volume: list the group's logical volumes; map those this device alone can serve.
 void probeLvm(Node& node, const Options& options, int depth) {
     if (!options.volumes || !node.content || node.content->type() != fs::FsType::Lvm2Pv) return;
@@ -175,6 +212,7 @@ void probeInto(Node& node, const Options& options, int depth) {
             probeContent(node);
             probeLuks(node, options, depth);
             probeLvm(node, options, depth);
+            probeTcrypt(node, options, depth);
         }
         return;
     }
@@ -182,7 +220,8 @@ void probeInto(Node& node, const Options& options, int depth) {
     probeContent(node);
     probeLuks(node, options, depth);
     probeLvm(node, options, depth);
-    if (!node.content && options.nestedTables && node.device->size() >= 1 * MiB) {
+    probeTcrypt(node, options, depth);
+    if (!node.content && node.children.empty() && options.nestedTables && node.device->size() >= 1 * MiB) {
         auto t = pt::PartitionTable::read(node.device);
         if (t && (*t)->type() != pt::TableType::None) {
             node.table = std::move(*t);

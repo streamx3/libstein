@@ -659,3 +659,93 @@ bool equalConstantTime(std::span<const std::uint8_t> a, std::span<const std::uin
 }
 
 } // namespace stein::crypto
+
+// ----------------------------------------------------------------------------- generic HMAC / PBKDF2
+
+namespace stein::crypto {
+
+namespace {
+// Keyed HMAC state over a concrete hasher type: the inner and outer pads are absorbed
+// once, then each MAC copies the two small hasher objects instead of allocating.
+template <class H>
+struct HmacState {
+    H inner, outer;
+    explicit HmacState(std::span<const std::byte> key) {
+        const std::size_t blockSize = H().blockSize();
+        std::vector<std::uint8_t> k(blockSize, 0);
+        if (key.size() > blockSize) {
+            H h;
+            h.update(key);
+            auto d = h.finish();
+            std::copy(d.begin(), d.end(), k.begin());
+        } else if (!key.empty()) {
+            std::memcpy(k.data(), key.data(), key.size());
+        }
+        std::vector<std::byte> ipad(blockSize), opad(blockSize);
+        for (std::size_t i = 0; i < blockSize; ++i) {
+            ipad[i] = std::byte(k[i] ^ 0x36);
+            opad[i] = std::byte(k[i] ^ 0x5c);
+        }
+        inner.update(ipad);
+        outer.update(opad);
+    }
+    std::vector<std::uint8_t> mac(std::span<const std::byte> msg) const {
+        H in = inner;
+        in.update(msg);
+        const auto ih = in.finish();
+        H out = outer;
+        out.update(std::span<const std::byte>(reinterpret_cast<const std::byte*>(ih.data()), ih.size()));
+        return out.finish();
+    }
+};
+
+template <class H>
+void pbkdf2With(std::span<const std::byte> password, std::span<const std::byte> salt, std::uint32_t iterations, std::span<std::uint8_t> out) {
+    const HmacState<H> prf(password);
+    const std::size_t hLen = H().digestSize();
+    std::uint32_t block = 1;
+    std::size_t done = 0;
+    while (done < out.size()) {
+        std::vector<std::byte> first(salt.begin(), salt.end());
+        first.resize(salt.size() + 4);
+        first[salt.size()] = std::byte(block >> 24);
+        first[salt.size() + 1] = std::byte(block >> 16);
+        first[salt.size() + 2] = std::byte(block >> 8);
+        first[salt.size() + 3] = std::byte(block);
+        auto u = prf.mac(first);
+        auto t = u;
+        for (std::uint32_t i = 1; i < iterations; ++i) {
+            u = prf.mac(std::span<const std::byte>(reinterpret_cast<const std::byte*>(u.data()), u.size()));
+            for (std::size_t j = 0; j < hLen; ++j) t[j] ^= u[j];
+        }
+        const std::size_t take = std::min(hLen, out.size() - done);
+        std::memcpy(out.data() + done, t.data(), take);
+        done += take;
+        ++block;
+    }
+}
+} // namespace
+
+std::vector<std::uint8_t> hmac(HashAlgorithm hash, std::span<const std::byte> key, std::span<const std::byte> message) {
+    switch (hash) {
+    case HashAlgorithm::Sha256: {
+        auto d = hmacSha256(key, message);
+        return std::vector<std::uint8_t>(d.begin(), d.end());
+    }
+    case HashAlgorithm::Sha512: return HmacState<Sha512>(key).mac(message);
+    case HashAlgorithm::Sha1: return HmacState<Sha1>(key).mac(message);
+    case HashAlgorithm::Md5: return HmacState<Md5>(key).mac(message);
+    }
+    return {};
+}
+
+void pbkdf2(HashAlgorithm hash, std::span<const std::byte> password, std::span<const std::byte> salt, std::uint32_t iterations, std::span<std::uint8_t> out) {
+    switch (hash) {
+    case HashAlgorithm::Sha256: pbkdf2Sha256(password, salt, iterations, out); return;
+    case HashAlgorithm::Sha512: pbkdf2With<Sha512>(password, salt, iterations, out); return;
+    case HashAlgorithm::Sha1: pbkdf2With<Sha1>(password, salt, iterations, out); return;
+    case HashAlgorithm::Md5: pbkdf2With<Md5>(password, salt, iterations, out); return;
+    }
+}
+
+} // namespace stein::crypto

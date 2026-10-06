@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "stein/container/luks.hpp"
+#include "xts_device.hpp"
 
 #include "stein/block/slice_device.hpp"
 #include "stein/core/aes.hpp"
@@ -29,117 +30,16 @@ std::span<const std::byte> bytesOf(const std::string& s) { return {reinterpret_c
 std::optional<HashAlgorithm> hashByName(const std::string& name) {
     if (name == "sha256") return HashAlgorithm::Sha256;
     if (name == "sha1") return HashAlgorithm::Sha1;
+    if (name == "sha512") return HashAlgorithm::Sha512;
     return std::nullopt;
 }
 
-// PBKDF2 with the given hash (we have HMAC-SHA256 natively; SHA-1 via the generic Hasher).
 Expected<void> pbkdf2(const std::string& hash, std::span<const std::byte> password, std::span<const std::byte> salt, std::uint32_t iterations, std::span<std::uint8_t> out) {
-    if (hash == "sha256") {
-        crypto::pbkdf2Sha256(password, salt, iterations, out);
-        return {};
-    }
     auto alg = hashByName(hash);
     if (!alg) return fail(ErrorCategory::Unsupported, "unsupported hash " + hash);
-    // Generic HMAC over Hasher for other digests (SHA-1).
-    const std::size_t blockSize = 64;
-    std::vector<std::uint8_t> k(blockSize, 0);
-    if (password.size() > blockSize) {
-        auto d = Hasher::digest(*alg, password);
-        std::copy(d.begin(), d.end(), k.begin());
-    } else {
-        std::memcpy(k.data(), password.data(), password.size());
-    }
-    std::vector<std::byte> ipad(blockSize), opad(blockSize);
-    for (std::size_t i = 0; i < blockSize; ++i) {
-        ipad[i] = std::byte(k[i] ^ 0x36);
-        opad[i] = std::byte(k[i] ^ 0x5c);
-    }
-    auto hmac = [&](std::span<const std::byte> msg) {
-        auto in = Hasher::create(*alg);
-        in->update(ipad);
-        in->update(msg);
-        const auto ih = in->finish();
-        auto o = Hasher::create(*alg);
-        o->update(opad);
-        o->update(bytesOf(ih));
-        return o->finish();
-    };
-    const std::size_t hLen = Hasher::create(*alg)->digestSize();
-    std::uint32_t block = 1;
-    std::size_t done = 0;
-    while (done < out.size()) {
-        std::vector<std::byte> first(salt.begin(), salt.end());
-        first.resize(salt.size() + 4);
-        storeBe32(first.data() + salt.size(), block);
-        auto u = hmac(first);
-        auto t = u;
-        for (std::uint32_t i = 1; i < iterations; ++i) {
-            u = hmac(bytesOf(u));
-            for (std::size_t j = 0; j < hLen; ++j) t[j] ^= u[j];
-        }
-        const std::size_t take = std::min(hLen, out.size() - done);
-        std::memcpy(out.data() + done, t.data(), take);
-        done += take;
-        ++block;
-    }
+    crypto::pbkdf2(*alg, password, salt, iterations, out);
     return {};
 }
-
-// Decrypting view over the payload: one XTS tweak per sector.
-class LuksPayloadDevice final : public BlockDevice {
-public:
-    LuksPayloadDevice(std::shared_ptr<BlockDevice> parent, Region region, std::uint32_t sectorSize, std::uint64_t ivTweak, crypto::AesXts xts, bool readOnly)
-        : m_parent(std::move(parent)), m_region(region), m_sectorSize(sectorSize), m_ivTweak(ivTweak), m_xts(std::move(xts)), m_readOnly(readOnly) {
-        m_geometry = m_parent->geometry();
-        m_geometry.sizeBytes = region.length;
-        m_geometry.logicalSectorSize = sectorSize;
-        if (m_geometry.physicalSectorSize < sectorSize) m_geometry.physicalSectorSize = sectorSize;
-    }
-    std::string name() const override { return m_parent->name() + " (luks)"; }
-    Geometry geometry() const override { return m_geometry; }
-    bool isReadOnly() const override { return m_readOnly || m_parent->isReadOnly(); }
-    std::shared_ptr<BlockDevice> parent() const override { return m_parent; }
-    std::vector<Region> extentsOnParent() const override { return {m_region}; }
-    Expected<void> flush() override { return m_parent->flush(); }
-
-    Expected<void> readAt(ByteCount offset, std::span<std::byte> dst) override {
-        if (auto r = checkRange(offset, dst.size()); !r) return r;
-        if (dst.empty()) return {};
-        // Whole sectors covering the request, then copy the window out.
-        const ByteCount first = offset / m_sectorSize;
-        const ByteCount last = (offset + dst.size() - 1) / m_sectorSize;
-        const ByteCount span = (last - first + 1) * m_sectorSize;
-        std::vector<std::byte> cipher(span), plain(span);
-        if (auto r = m_parent->readAt(m_region.offset + first * m_sectorSize, cipher); !r) return r;
-        if (auto d = m_xts.decryptSectors(first + m_ivTweak, m_sectorSize, cipher, plain); !d) return d;
-        std::memcpy(dst.data(), plain.data() + (offset - first * m_sectorSize), dst.size());
-        return {};
-    }
-    Expected<void> writeAt(ByteCount offset, std::span<const std::byte> src) override {
-        if (isReadOnly()) return fail(ErrorCategory::Permission, "LUKS payload opened read-only");
-        if (auto r = checkRange(offset, src.size()); !r) return r;
-        if (src.empty()) return {};
-        const ByteCount first = offset / m_sectorSize;
-        const ByteCount last = (offset + src.size() - 1) / m_sectorSize;
-        const ByteCount span = (last - first + 1) * m_sectorSize;
-        std::vector<std::byte> plain(span), cipher(span);
-        // Read-modify-write for partial sectors.
-        if (offset % m_sectorSize || src.size() % m_sectorSize)
-            if (auto r = readAt(first * m_sectorSize, plain); !r) return r;
-        std::memcpy(plain.data() + (offset - first * m_sectorSize), src.data(), src.size());
-        if (auto e = m_xts.encryptSectors(first + m_ivTweak, m_sectorSize, plain, cipher); !e) return e;
-        return m_parent->writeAt(m_region.offset + first * m_sectorSize, cipher);
-    }
-
-private:
-    std::shared_ptr<BlockDevice> m_parent;
-    Region m_region;
-    std::uint32_t m_sectorSize;
-    std::uint64_t m_ivTweak;
-    crypto::AesXts m_xts;
-    bool m_readOnly;
-    Geometry m_geometry;
-};
 
 } // namespace
 
@@ -390,7 +290,7 @@ Expected<std::shared_ptr<BlockDevice>> Luks::openPayload(std::span<const std::ui
     auto xts = crypto::AesXts::create(masterKey);
     if (!xts) return fail(xts.error());
     if (m_info.payloadSize == 0 || m_info.payloadOffset + m_info.payloadSize > m_device->size()) return fail(ErrorCategory::OutOfRange, "payload outside the device");
-    return std::shared_ptr<BlockDevice>(std::make_shared<LuksPayloadDevice>(m_device, Region{m_info.payloadOffset, m_info.payloadSize}, m_info.sectorSize, m_info.ivTweak, std::move(*xts), readOnly));
+    return std::shared_ptr<BlockDevice>(std::make_shared<detail::XtsDevice>(m_device, Region{m_info.payloadOffset, m_info.payloadSize}, m_info.sectorSize, m_info.ivTweak, std::move(*xts), readOnly, "luks"));
 }
 
 Expected<std::shared_ptr<BlockDevice>> Luks::openPayload(const std::string& passphrase, bool readOnly) const {
