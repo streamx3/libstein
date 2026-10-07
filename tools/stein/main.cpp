@@ -71,7 +71,8 @@ int usage() {
                "  stein image create  <device|file> <out.stein|out.img> [--format stein|raw] [--compress lz4|none] [--chunk 4M] [--split 2G] [--used-only]\n"
                "      a .img/.raw/.dd name (or --format raw) writes a plain dd-style image; restore accepts both\n"
                "  stein image restore <in.stein> <device|file> [--no-verify] [--force] [--zeros write|gaps|skip]\n"
-               "      --zeros gaps writes the image's zero ranges only where the partition table has free space\n"
+               "      --zeros gaps writes the image's zero ranges only where the partition table has free space;\n"
+               "      it is the default when the target is a removable drive, write is the default otherwise\n"
                "  stein image verify  <in.stein> [--level 1|2|3]\n"
                "  stein image info    <in.stein|vm.qcow2|.vhd|.vhdx|.vmdk|.vdi|.E01|.dmg>\n"
                "  stein image keys    <in.stein> list | add [--new-passphrase P] [--name LABEL] | remove <id>\n"
@@ -384,14 +385,24 @@ int cmdImage(const Args& a) {
         image::RestoreOptions ro;
         ro.verifyPayloadFirst = !a.noVerify;
         ro.allowSmallerTarget = a.force;
+        bool zerosDefaulted = false;
         if (a.zeros == "skip") ro.zeroPolicy = image::ZeroPolicy::Skip;
         else if (a.zeros == "gaps") ro.zeroPolicy = image::ZeroPolicy::SkipInside;
-        else if (!a.zeros.empty() && a.zeros != "write") return die(Error(ErrorCategory::InvalidArgument, "--zeros takes write, gaps or skip"));
+        else if (a.zeros == "write") ro.zeroPolicy = image::ZeroPolicy::Write;
+        else if (!a.zeros.empty()) return die(Error(ErrorCategory::InvalidArgument, "--zeros takes write, gaps or skip"));
+        else if (platform::isDevicePath(a.positional[3])) {
+            // Removable drives default to zeroing only the table's free space; fixed disks and files stay byte-identical.
+            if (auto info = platform::current().describe(a.positional[3]); info && info->removable) {
+                ro.zeroPolicy = image::ZeroPolicy::SkipInside;
+                zerosDefaulted = true;
+            }
+        }
         if (ro.zeroPolicy != image::ZeroPolicy::Write) {
             auto plan = image::planZeroWrites(a.positional[2], ro, g_passphrase);
             if (!plan) return die(plan.error());
-            std::printf("zero ranges: %s of %s will be written, %s left untouched%s\n", formatSize(plan->toWrite).c_str(), formatSize(plan->zeroBytes).c_str(),
-                        formatSize(plan->toSkip).c_str(), plan->keep.reason.empty() ? "" : (" (" + plan->keep.reason + ")").c_str());
+            std::printf("zero ranges: %s of %s will be written, %s left untouched%s%s\n", formatSize(plan->toWrite).c_str(), formatSize(plan->zeroBytes).c_str(),
+                        formatSize(plan->toSkip).c_str(), plan->keep.reason.empty() ? "" : (" (" + plan->keep.reason + ")").c_str(),
+                        zerosDefaulted ? "; default for a removable drive, --zeros write for byte-identical" : "");
         }
         auto r = image::restoreImage(a.positional[2], **dev, ro, progress, g_passphrase);
         if (!r) return die(r.error());
