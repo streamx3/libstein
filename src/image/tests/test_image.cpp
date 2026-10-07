@@ -8,6 +8,8 @@
 
 #include <array>
 #include "stein/image/stein_format.hpp"
+#include "stein/pt/partition_table.hpp"
+#include "stein/pt/partition_type.hpp"
 #include "stein/probe/topology.hpp"
 
 #include <algorithm>
@@ -264,6 +266,112 @@ TEST_CASE("stein image: split segments, uncompressed, corruption detection, reco
     if (badDev) badDev->reset();
     if (recDev) recDev->reset();
     stein::test::removeTree(dir);
+}
+
+TEST_CASE("zero policy: gaps are zeroed, partitions are kept, straddling chunks split at the boundary, unknown tables keep everything") {
+    // 16 MiB disk, GPT with one partition from 1 MiB to 2 MiB + 100 KiB (its end is not chunk-aligned).
+    auto disk = std::make_shared<MemoryDevice>(16 * MiB, 512);
+    auto table = pt::PartitionTable::createEmpty(pt::TableType::Gpt, disk->geometry());
+    REQUIRE(table);
+    const ByteCount pStart = 1 * MiB, pEnd = 2 * MiB + 100 * KiB;
+    pt::Partition part;
+    part.firstLba = pStart / 512;
+    part.lastLba = pEnd / 512 - 1;
+    part.type = *pt::types::fromSgdiskCode("8300");
+    part.name = "odd";
+    REQUIRE((*table)->addPartition(part));
+    REQUIRE((*table)->write(*disk));
+    const std::byte marker[4] = {std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE}, std::byte{0xEF}};
+    REQUIRE(disk->writeAt(pStart, marker));   // the partition's first chunk is stored; the rest of it is zero
+
+    const auto dir = std::filesystem::temp_directory_path() / "stein-zero-policy";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    Sink sink;
+    Progress progress(sink);
+    CreateOptions co;
+    co.chunkSize = 64 * KiB;
+    co.recordTopology = false;
+    co.computeImageHash = false;
+    REQUIRE(createImage(disk, dir / "odd.stein", co, progress));
+
+    // keepRegionsOf: exactly the partition, nothing more.
+    auto reader = SteinReader::open(dir / "odd.stein");
+    REQUIRE(reader);
+    auto keep = keepRegionsOf((*reader)->asDevice());
+    REQUIRE(keep);
+    CHECK(keep->tableUnderstood);
+    REQUIRE(keep->regions.size() == 1);
+    CHECK(keep->regions[0].offset == pStart);
+    CHECK(keep->regions[0].end() == pEnd);
+
+    // The plan, before anything is written.
+    RestoreOptions ro;
+    ro.zeroPolicy = ZeroPolicy::SkipInside;
+    auto plan = planZeroWrites(dir / "odd.stein", ro);
+    REQUIRE(plan);
+    CHECK(plan->totalChunks == 256);
+    CHECK(plan->zeroBytes + 64 * KiB * (plan->totalChunks - plan->zeroChunks) == 16 * MiB);
+    // Zero chunks inside the partition: 1 MiB + 64 KiB .. 2 MiB + 64 KiB entirely (16 chunks), plus the
+    // straddling chunk [2 MiB + 64 KiB, 2 MiB + 128 KiB) of which 36 KiB are inside, 28 KiB outside.
+    CHECK(plan->toSkip == 16 * 64 * KiB + 36 * KiB);
+    CHECK(plan->toWrite + plan->toSkip == plan->zeroBytes);
+    CHECK(plan->toWrite > 12 * MiB);   // the gap before the partition (minus the GPT chunk) and everything after it
+
+    // Restore onto a target full of 0xAA.
+    MemoryDevice target(16 * MiB, 512);
+    std::fill(target.bytes().begin(), target.bytes().end(), std::byte{0xAA});
+    auto r = restoreImage(dir / "odd.stein", target, ro, progress);
+    REQUIRE(r);
+    CHECK(r->stats.zeroBytesWritten == plan->toWrite);
+    CHECK(r->stats.zeroBytesSkipped == plan->toSkip);
+    auto at = [&](ByteCount off) { return target.bytes()[static_cast<std::size_t>(off)]; };
+    CHECK(at(512 * KiB) == std::byte{0});                   // gap before the partition: zeroed
+    CHECK(at(pStart) == std::byte{0xDE});                   // stored chunk: restored
+    CHECK(at(pStart + 512 * KiB) == std::byte{0xAA});       // zero chunk inside the partition: kept
+    CHECK(at(pEnd - 1) == std::byte{0xAA});                 // last byte inside the partition: kept
+    CHECK(at(pEnd) == std::byte{0});                        // first byte past it: zeroed (same chunk, split at the boundary)
+    CHECK(at(pEnd + 27 * KiB) == std::byte{0});
+    CHECK(at(8 * MiB) == std::byte{0});                     // free space after the partition: zeroed
+    CHECK(at(16 * MiB - 512) != std::byte{0xAA});           // backup GPT: restored from a stored chunk
+
+    // Skip everything / write everything, for the record.
+    RestoreOptions skip;
+    skip.zeroPolicy = ZeroPolicy::Skip;
+    auto skipPlan = planZeroWrites(dir / "odd.stein", skip);
+    REQUIRE(skipPlan);
+    CHECK(skipPlan->toWrite == 0);
+    CHECK(skipPlan->toSkip == skipPlan->zeroBytes);
+    RestoreOptions write;
+    auto writePlan = planZeroWrites(dir / "odd.stein", write);
+    REQUIRE(writePlan);
+    CHECK(writePlan->toSkip == 0);
+
+    // No table at all: an unformatted disk with a marker. The whole device is kept.
+    auto blank = std::make_shared<MemoryDevice>(4 * MiB, 512);
+    REQUIRE(blank->writeAt(3 * MiB, marker));
+    REQUIRE(createImage(blank, dir / "blank.stein", co, progress));
+    auto keepBlank = keepRegionsOf(SteinReader::open(dir / "blank.stein").value()->asDevice());
+    REQUIRE(keepBlank);
+    CHECK(!keepBlank->tableUnderstood);
+    REQUIRE(keepBlank->regions.size() == 1);
+    CHECK(keepBlank->regions[0].offset == 0);
+    CHECK(keepBlank->regions[0].length == 4 * MiB);
+    auto blankPlan = planZeroWrites(dir / "blank.stein", ro);
+    REQUIRE(blankPlan);
+    CHECK(blankPlan->toWrite == 0);
+    CHECK(blankPlan->toSkip == blankPlan->zeroBytes);
+
+    // regionsOutside on its own: keep ranges unsorted and overlapping.
+    auto outside = regionsOutside(Region{0, 100}, {Region{50, 20}, Region{10, 10}, Region{15, 10}});
+    REQUIRE(outside.size() == 3);
+    CHECK(outside[0].offset == 0);  CHECK(outside[0].length == 10);
+    CHECK(outside[1].offset == 25); CHECK(outside[1].length == 25);
+    CHECK(outside[2].offset == 70); CHECK(outside[2].length == 30);
+    CHECK(regionsOutside(Region{0, 100}, {Region{0, 100}}).empty());
+    CHECK(regionsOutside(Region{0, 100}, {}).size() == 1);
+
+    std::filesystem::remove_all(dir);
 }
 
 TEST_CASE("copy engine: bad sector policy") {

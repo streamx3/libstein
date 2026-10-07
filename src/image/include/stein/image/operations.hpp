@@ -45,10 +45,33 @@ struct CreateResult {
 
 struct RestoreOptions {
     bool verifyPayloadFirst = false;   // CRC pass over the image before writing anything
-    bool writeZeroChunks = true;       // false only when the target is known to be zeroed
+    bool writeZeroChunks = true;       // deprecated alias: false means zeroPolicy = Skip
+    ZeroPolicy zeroPolicy = ZeroPolicy::Write;   // SkipInside: zero only the partition table's free space, see keepRegionsOf()
     bool discardZeroChunks = false;
     bool allowSmallerTarget = false;   // write only what fits
 };
+
+// The ranges a partition-aware restore must not zero: every entry of the image's
+// partition table (any type, extended containers included), clipped to the device.
+// Without a table, or with one the library does not understand, the whole device
+// is kept: what cannot be read as a table is not treated as free space.
+struct KeepRegions {
+    std::vector<Region> regions;
+    std::string reason;                // "GPT, 3 partitions", "no partition table: whole device kept", ...
+    bool tableUnderstood = false;
+};
+Expected<KeepRegions> keepRegionsOf(const std::shared_ptr<BlockDevice>& source);
+
+// What a restore will do with the image's zero chunks under `options.zeroPolicy`,
+// computed from the chunk map before anything is written.
+struct ZeroPlan {
+    ByteCount zeroBytes = 0;           // bytes of the image that are implicit (all-zero) chunks
+    ByteCount toWrite = 0;             // of those, bytes that will be written as zeros
+    ByteCount toSkip = 0;              // of those, bytes left untouched on the target
+    std::uint64_t zeroChunks = 0, totalChunks = 0;
+    KeepRegions keep;                  // filled for SkipInside
+};
+Expected<ZeroPlan> planZeroWrites(const std::filesystem::path& image, const RestoreOptions& options, const std::string& passphrase = {});
 
 struct RestoreResult {
     CopyStats stats;

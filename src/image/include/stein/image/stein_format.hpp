@@ -194,6 +194,7 @@ public:
     const std::vector<SegmentInfo>& segments() const { return m_segments; }
     std::uint64_t totalChunks() const;
     std::uint64_t storedChunks() const { return m_map.size(); }
+    bool isStored(std::uint64_t index) const { return m_map.find(index) != m_map.end(); }   // false: implicit zero (or missing)
     bool complete() const { return m_complete; }
     bool zerosOmitted() const { return m_zerosOmitted; }
     std::optional<std::array<std::uint8_t, 32>> imageHash() const { return m_imageHash; }

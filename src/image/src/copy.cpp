@@ -77,6 +77,22 @@ Expected<CopyStats> copyToSink(BlockDevice& source, ChunkSink& sink, const CopyO
     return stats;
 }
 
+std::vector<Region> regionsOutside(const Region& range, std::vector<Region> keep) {
+    std::vector<Region> out;
+    if (range.empty()) return out;
+    std::sort(keep.begin(), keep.end(), [](const Region& a, const Region& b) { return a.offset < b.offset; });
+    ByteCount cursor = range.offset;
+    for (const auto& k : keep) {
+        if (k.empty() || k.end() <= cursor) continue;
+        if (k.offset >= range.end()) break;
+        if (k.offset > cursor) out.push_back({cursor, k.offset - cursor});
+        cursor = std::max(cursor, k.end());
+        if (cursor >= range.end()) break;
+    }
+    if (cursor < range.end()) out.push_back({cursor, range.end() - cursor});
+    return out;
+}
+
 Expected<CopyStats> copyDevice(BlockDevice& source, BlockDevice& target, const CopyOptions& options, Progress& progress) {
     CopyStats stats;
     ByteCount total = std::min(source.size(), target.size());
@@ -96,14 +112,37 @@ Expected<CopyStats> copyDevice(BlockDevice& source, BlockDevice& target, const C
         stats.freeBytesSkipped += applyAllocations(options, off, chunk);
         if (isAllZero(chunk)) {
             ++stats.zeroChunks;
-            if (options.skipZeroChunksOnWrite) {
+            const ZeroPolicy policy = options.skipZeroChunksOnWrite ? ZeroPolicy::Skip : options.zeroPolicy;
+            if (policy == ZeroPolicy::Skip) {
+                stats.zeroBytesSkipped += len;
+                progress.advance(len);
+                continue;
+            }
+            if (policy == ZeroPolicy::SkipInside) {
+                // Only the parts the partition table calls free are zeroed; a chunk that straddles
+                // a partition boundary is split at that boundary, never one byte past it.
+                ByteCount written = 0;
+                for (const auto& part : regionsOutside(Region{off, len}, options.keepRegions)) {
+                    const auto zeros = std::span<const std::byte>(chunk).subspan(static_cast<std::size_t>(part.offset - off), static_cast<std::size_t>(part.length));
+                    if (options.discardZeroChunks && target.discard(part.offset, part.length)) {
+                        written += part.length;
+                        continue;
+                    }
+                    if (auto w = target.writeAt(part.offset, zeros); !w) return fail(w.error());
+                    written += part.length;
+                }
+                stats.bytesWritten += written;
+                stats.zeroBytesWritten += written;
+                stats.zeroBytesSkipped += len - written;
                 progress.advance(len);
                 continue;
             }
             if (options.discardZeroChunks && target.discard(off, len)) {
+                stats.zeroBytesWritten += len;
                 progress.advance(len);
                 continue;
             }
+            stats.zeroBytesWritten += len;
         }
         if (auto w = target.writeAt(off, chunk); !w) return fail(w.error());
         stats.bytesWritten += len;

@@ -26,13 +26,22 @@ struct MappedAllocation {
     const fs::AllocationMap* map = nullptr;
 };
 
+// What to do with an all-zero chunk when writing device to device.
+enum class ZeroPolicy : std::uint8_t {
+    Write,        // write the zeros: the target becomes byte-identical (the default)
+    Skip,         // write nothing: the target keeps whatever it held there (blank or disposable target)
+    SkipInside,   // write zeros only outside `keepRegions` (gaps the partition table calls free); inside, keep
+};
+
 struct CopyOptions {
     std::uint32_t chunkSize = 4 * MiB;
     // Used-block-only: free blocks of these filesystems are zeroed before the
     // chunk is handed on, so whole-free chunks become zero chunks.
     std::vector<MappedAllocation> allocations;
     BadSectorPolicy badSectors = BadSectorPolicy::Fail;
-    bool skipZeroChunksOnWrite = false;   // device->device: do not write all-zero chunks (target known to be zero / discarded)
+    bool skipZeroChunksOnWrite = false;   // deprecated alias of zeroPolicy = Skip; kept for callers of the first release
+    ZeroPolicy zeroPolicy = ZeroPolicy::Write;
+    std::vector<Region> keepRegions;      // SkipInside: ranges whose zeros are not written (partitions); any order, may overlap
     bool discardZeroChunks = false;       // device->device: try discard() for zero chunks before writing zeros
     ByteCount limit = 0;                  // copy only the first `limit` bytes (0 = all)
 };
@@ -44,8 +53,13 @@ struct CopyStats {
     std::uint64_t zeroChunks = 0;
     std::uint64_t unreadableSectors = 0;
     ByteCount freeBytesSkipped = 0;       // bytes zeroed because an allocation map said "free"
+    ByteCount zeroBytesWritten = 0;       // bytes of all-zero chunks that were written (or discarded) on the target
+    ByteCount zeroBytesSkipped = 0;       // bytes of all-zero chunks left untouched on the target
     std::vector<Region> badRegions;       // zero-filled ranges (coalesced)
 };
+
+// The parts of `range` not covered by any of `keep`: sorted, disjoint, sector-exact.
+std::vector<Region> regionsOutside(const Region& range, std::vector<Region> keep);
 
 class ChunkSink {
 public:

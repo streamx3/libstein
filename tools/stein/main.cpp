@@ -70,7 +70,8 @@ int usage() {
                "      --force is required for destructive edits on a real block device\n"
                "  stein image create  <device|file> <out.stein|out.img> [--format stein|raw] [--compress lz4|none] [--chunk 4M] [--split 2G] [--used-only]\n"
                "      a .img/.raw/.dd name (or --format raw) writes a plain dd-style image; restore accepts both\n"
-               "  stein image restore <in.stein> <device|file> [--no-verify] [--force]\n"
+               "  stein image restore <in.stein> <device|file> [--no-verify] [--force] [--zeros write|gaps|skip]\n"
+               "      --zeros gaps writes the image's zero ranges only where the partition table has free space\n"
                "  stein image verify  <in.stein> [--level 1|2|3]\n"
                "  stein image info    <in.stein|vm.qcow2|.vhd|.vhdx|.vmdk|.vdi|.E01|.dmg>\n"
                "  stein image keys    <in.stein> list | add [--new-passphrase P] [--name LABEL] | remove <id>\n"
@@ -121,7 +122,7 @@ struct Args {
     std::vector<std::string> positional;
     bool doc = false, dryRun = false, noVerify = false, force = false, noWipe = false, unlock = false, usedOnly = false, allowOther = false;
     int level = 0;
-    std::string compress, split, chunk;
+    std::string compress, split, chunk, zeros;   // zeros: image restore --zeros write|gaps|skip
     std::string start, size, end, type, name, index;
     std::string passphrase, passphraseFile, newPassphrase, kdf, lv;
     std::string volume, snapshot;   // APFS: which volume of the container and which snapshot of it
@@ -143,6 +144,7 @@ Args parse(int argc, char** argv) {
         else if (s == "--dry-run") a.dryRun = true;
         else if (s == "--sector-size" && i + 1 < argc) a.sectorSize = static_cast<std::uint32_t>(std::stoul(argv[++i]));
         else if (s == "--no-verify") a.noVerify = true;
+        else if (s == "--zeros" && i + 1 < argc) a.zeros = argv[++i];
         else if (s == "--force") a.force = true;
         else if (s == "--level" && i + 1 < argc) a.level = std::stoi(argv[++i]);
         else if (s == "--compress" && i + 1 < argc) a.compress = argv[++i];
@@ -382,10 +384,19 @@ int cmdImage(const Args& a) {
         image::RestoreOptions ro;
         ro.verifyPayloadFirst = !a.noVerify;
         ro.allowSmallerTarget = a.force;
+        if (a.zeros == "skip") ro.zeroPolicy = image::ZeroPolicy::Skip;
+        else if (a.zeros == "gaps") ro.zeroPolicy = image::ZeroPolicy::SkipInside;
+        else if (!a.zeros.empty() && a.zeros != "write") return die(Error(ErrorCategory::InvalidArgument, "--zeros takes write, gaps or skip"));
+        if (ro.zeroPolicy != image::ZeroPolicy::Write) {
+            auto plan = image::planZeroWrites(a.positional[2], ro, g_passphrase);
+            if (!plan) return die(plan.error());
+            std::printf("zero ranges: %s of %s will be written, %s left untouched%s\n", formatSize(plan->toWrite).c_str(), formatSize(plan->zeroBytes).c_str(),
+                        formatSize(plan->toSkip).c_str(), plan->keep.reason.empty() ? "" : (" (" + plan->keep.reason + ")").c_str());
+        }
         auto r = image::restoreImage(a.positional[2], **dev, ro, progress, g_passphrase);
         if (!r) return die(r.error());
-        std::printf("restored %s (%llu chunks)%s%s\n", formatSize(r->stats.bytesRead).c_str(), static_cast<unsigned long long>(r->stats.chunks),
-                    r->targetLarger ? "; target is larger than the image" : "", r->targetSmaller ? "; target was SMALLER, image truncated" : "");
+        std::printf("restored %s (%llu chunks, %s written)%s%s\n", formatSize(r->stats.bytesRead).c_str(), static_cast<unsigned long long>(r->stats.chunks),
+                    formatSize(r->stats.bytesWritten).c_str(), r->targetLarger ? "; target is larger than the image" : "", r->targetSmaller ? "; target was SMALLER, image truncated" : "");
         return 0;
     }
     if (sub == "verify") {

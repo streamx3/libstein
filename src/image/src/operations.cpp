@@ -9,6 +9,7 @@
 #include "stein/core/hash.hpp"
 #include "stein/core/strings.hpp"
 #include "stein/probe/topology.hpp"
+#include "stein/pt/partition_table.hpp"
 #include "stein/pt/gpt_table.hpp"
 
 namespace stein::image {
@@ -162,6 +163,68 @@ Expected<std::shared_ptr<SteinReader>> openReader(const std::filesystem::path& i
 }
 } // namespace
 
+Expected<KeepRegions> keepRegionsOf(const std::shared_ptr<BlockDevice>& source) {
+    KeepRegions keep;
+    const Region whole{0, source->size()};
+    auto table = pt::PartitionTable::read(source);
+    if (!table) {
+        keep.regions.push_back(whole);
+        keep.reason = "partition table unreadable (" + table.error().message() + "): whole device kept";
+        return keep;
+    }
+    const pt::TableType type = (*table)->type();
+    if (type == pt::TableType::None || type == pt::TableType::Unknown) {
+        keep.regions.push_back(whole);
+        keep.reason = type == pt::TableType::None ? "no partition table: whole device kept" : "unrecognised partition table: whole device kept";
+        return keep;
+    }
+    keep.tableUnderstood = true;
+    const std::uint32_t ss = source->sectorSize();
+    for (const auto& p : (*table)->partitions()) {
+        Region r = p.region(ss);
+        if (r.offset >= whole.end()) continue;
+        if (r.end() > whole.end()) r.length = whole.end() - r.offset;   // a table that overreaches keeps what exists
+        if (!r.empty()) keep.regions.push_back(r);
+    }
+    std::sort(keep.regions.begin(), keep.regions.end(), [](const Region& a, const Region& b) { return a.offset < b.offset; });
+    keep.reason = toUpper(std::string(pt::toString(type))) + ", " + std::to_string(keep.regions.size()) + (keep.regions.size() == 1 ? " partition" : " partitions");
+    return keep;
+}
+
+Expected<ZeroPlan> planZeroWrites(const std::filesystem::path& image, const RestoreOptions& options, const std::string& passphrase) {
+    auto reader = openReader(image, passphrase, true);
+    if (!reader) return fail(reader.error());
+    ZeroPlan plan;
+    const auto& h = (*reader)->header();
+    const ByteCount cs = h.chunkSize;
+    plan.totalChunks = (*reader)->totalChunks();
+    const ZeroPolicy policy = !options.writeZeroChunks ? ZeroPolicy::Skip : options.zeroPolicy;
+    if (policy == ZeroPolicy::SkipInside) {
+        auto keep = keepRegionsOf((*reader)->asDevice());
+        if (!keep) return fail(keep.error());
+        plan.keep = std::move(*keep);
+    }
+    for (std::uint64_t i = 0; i < plan.totalChunks; ++i) {
+        if ((*reader)->isStored(i)) continue;   // stored chunks are written whatever they hold
+        const ByteCount off = i * cs;
+        const ByteCount len = std::min<ByteCount>(cs, h.totalSize - off);
+        ++plan.zeroChunks;
+        plan.zeroBytes += len;
+        switch (policy) {
+        case ZeroPolicy::Write: plan.toWrite += len; break;
+        case ZeroPolicy::Skip: plan.toSkip += len; break;
+        case ZeroPolicy::SkipInside: {
+            ByteCount w = 0;
+            for (const auto& part : regionsOutside(Region{off, len}, plan.keep.regions)) w += part.length;
+            plan.toWrite += w;
+            plan.toSkip += len - w;
+            break;
+        }
+        }
+    }
+    return plan;
+}
+
 Expected<RestoreResult> restoreImage(const std::filesystem::path& image, BlockDevice& target, const RestoreOptions& options,
                                      Progress& progress, const std::string& passphrase) {
     auto reader = openReader(image, passphrase, true);
@@ -191,7 +254,13 @@ Expected<RestoreResult> restoreImage(const std::filesystem::path& image, BlockDe
     auto dev = (*reader)->asDevice();
     CopyOptions co;
     co.chunkSize = h.chunkSize;
-    co.skipZeroChunksOnWrite = !options.writeZeroChunks;
+    co.zeroPolicy = !options.writeZeroChunks ? ZeroPolicy::Skip : options.zeroPolicy;
+    if (co.zeroPolicy == ZeroPolicy::SkipInside) {
+        auto keep = keepRegionsOf(dev);
+        if (!keep) return fail(keep.error());
+        co.keepRegions = keep->regions;
+        progress.message("zero ranges: " + keep->reason);
+    }
     co.discardZeroChunks = options.discardZeroChunks;
     co.limit = std::min(target.size(), h.totalSize);
     auto stats = copyDevice(*dev, target, co, progress);
