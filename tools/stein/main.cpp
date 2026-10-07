@@ -72,7 +72,8 @@ int usage() {
                "      a .img/.raw/.dd name (or --format raw) writes a plain dd-style image; restore accepts both\n"
                "  stein image restore <in.stein> <device|file> [--no-verify] [--force] [--zeros write|gaps|skip]\n"
                "      --zeros gaps writes the image's zero ranges only where the partition table has free space;\n"
-               "      it is the default when the target is a removable drive, write is the default otherwise\n"
+               "      it is the default when the target is a removable drive, write is the default otherwise;\n"
+               "      chunks the target already holds are not rewritten unless --rewrite-all\n"
                "  stein image verify  <in.stein> [--level 1|2|3]\n"
                "  stein image info    <in.stein|vm.qcow2|.vhd|.vhdx|.vmdk|.vdi|.E01|.dmg>\n"
                "  stein image keys    <in.stein> list | add [--new-passphrase P] [--name LABEL] | remove <id>\n"
@@ -124,6 +125,7 @@ struct Args {
     bool doc = false, dryRun = false, noVerify = false, force = false, noWipe = false, unlock = false, usedOnly = false, allowOther = false;
     int level = 0;
     std::string compress, split, chunk, zeros;   // zeros: image restore --zeros write|gaps|skip
+    bool rewriteAll = false;                     // image restore --rewrite-all: no compare-before-write
     std::string start, size, end, type, name, index;
     std::string passphrase, passphraseFile, newPassphrase, kdf, lv;
     std::string volume, snapshot;   // APFS: which volume of the container and which snapshot of it
@@ -146,6 +148,7 @@ Args parse(int argc, char** argv) {
         else if (s == "--sector-size" && i + 1 < argc) a.sectorSize = static_cast<std::uint32_t>(std::stoul(argv[++i]));
         else if (s == "--no-verify") a.noVerify = true;
         else if (s == "--zeros" && i + 1 < argc) a.zeros = argv[++i];
+        else if (s == "--rewrite-all") a.rewriteAll = true;
         else if (s == "--force") a.force = true;
         else if (s == "--level" && i + 1 < argc) a.level = std::stoi(argv[++i]);
         else if (s == "--compress" && i + 1 < argc) a.compress = argv[++i];
@@ -406,8 +409,10 @@ int cmdImage(const Args& a) {
         }
         auto r = image::restoreImage(a.positional[2], **dev, ro, progress, g_passphrase);
         if (!r) return die(r.error());
-        std::printf("restored %s (%llu chunks, %s written)%s%s\n", formatSize(r->stats.bytesRead).c_str(), static_cast<unsigned long long>(r->stats.chunks),
-                    formatSize(r->stats.bytesWritten).c_str(), r->targetLarger ? "; target is larger than the image" : "", r->targetSmaller ? "; target was SMALLER, image truncated" : "");
+        std::printf("restored %s (%llu chunks, %s written", formatSize(r->stats.bytesRead).c_str(), static_cast<unsigned long long>(r->stats.chunks),
+                    formatSize(r->stats.bytesWritten).c_str());
+        if (r->stats.identicalChunks) std::printf(", %llu chunks already identical", static_cast<unsigned long long>(r->stats.identicalChunks));
+        std::printf(")%s%s\n", r->targetLarger ? "; target is larger than the image" : "", r->targetSmaller ? "; target was SMALLER, image truncated" : "");
         return 0;
     }
     if (sub == "verify") {

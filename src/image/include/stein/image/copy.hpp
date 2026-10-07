@@ -43,6 +43,11 @@ struct CopyOptions {
     ZeroPolicy zeroPolicy = ZeroPolicy::Write;
     std::vector<Region> keepRegions;      // SkipInside: ranges whose zeros are not written (partitions); any order, may overlap
     bool discardZeroChunks = false;       // deprecated, no effect: zero chunks always go through BlockDevice::zeroRange()
+    // Read the target's chunk first and skip the write when it already matches. Adaptive:
+    // after 32 comparisons with fewer than half matching, comparing stops and only one chunk
+    // in 64 is probed; a matching probe turns comparing back on. Never changes the result;
+    // saves writes (and flash wear) on targets that already hold most of the image.
+    bool skipIdentical = false;
     ByteCount limit = 0;                  // copy only the first `limit` bytes (0 = all)
 };
 
@@ -55,6 +60,9 @@ struct CopyStats {
     ByteCount freeBytesSkipped = 0;       // bytes zeroed because an allocation map said "free"
     ByteCount zeroBytesWritten = 0;       // bytes of all-zero chunks that were written (or discarded) on the target
     ByteCount zeroBytesSkipped = 0;       // bytes of all-zero chunks left untouched on the target
+    std::uint64_t identicalChunks = 0;    // chunks the target already held byte for byte (skipIdentical)
+    ByteCount identicalBytes = 0;
+    ByteCount compareBytesRead = 0;       // what skipIdentical cost in target reads
     std::vector<Region> badRegions;       // zero-filled ranges (coalesced)
 };
 

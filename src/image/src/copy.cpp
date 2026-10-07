@@ -93,8 +93,45 @@ std::vector<Region> regionsOutside(const Region& range, std::vector<Region> keep
     return out;
 }
 
+namespace {
+
+// The adaptive compare-before-write policy of CopyOptions::skipIdentical.
+class IdenticalSkipper {
+public:
+    static constexpr int kWarmup = 32;     // comparisons before the hit rate is judged
+    static constexpr int kProbeEvery = 64; // while paused, one chunk in this many is still compared
+    bool wantCompare() {
+        if (!m_paused) return true;
+        return ++m_sinceProbe % kProbeEvery == 0;
+    }
+    void record(bool hit) {
+        if (m_paused) {
+            if (hit) {   // the target matches again: resume comparing with a clean slate
+                m_paused = false;
+                m_hits = m_tries = 0;
+            }
+            return;
+        }
+        ++m_tries;
+        if (hit) ++m_hits;
+        if (m_tries >= kWarmup && m_hits * 2 < m_tries) {
+            m_paused = true;
+            m_sinceProbe = 0;
+        }
+    }
+
+private:
+    bool m_paused = false;
+    int m_hits = 0, m_tries = 0;
+    int m_sinceProbe = 0;
+};
+
+} // namespace
+
 Expected<CopyStats> copyDevice(BlockDevice& source, BlockDevice& target, const CopyOptions& options, Progress& progress) {
     CopyStats stats;
+    IdenticalSkipper skipper;
+    std::vector<std::byte> targetBuf;
     ByteCount total = std::min(source.size(), target.size());
     if (options.limit) total = std::min(total, options.limit);
     const ByteCount cs = options.chunkSize;
@@ -110,14 +147,29 @@ Expected<CopyStats> copyDevice(BlockDevice& source, BlockDevice& target, const C
         stats.bytesRead += len;
         ++stats.chunks;
         stats.freeBytesSkipped += applyAllocations(options, off, chunk);
-        if (isAllZero(chunk)) {
-            ++stats.zeroChunks;
-            const ZeroPolicy policy = options.skipZeroChunksOnWrite ? ZeroPolicy::Skip : options.zeroPolicy;
-            if (policy == ZeroPolicy::Skip) {
-                stats.zeroBytesSkipped += len;
+        const bool zero = isAllZero(chunk);
+        const ZeroPolicy policy = options.skipZeroChunksOnWrite ? ZeroPolicy::Skip : options.zeroPolicy;
+        if (zero) ++stats.zeroChunks;
+        if (zero && policy == ZeroPolicy::Skip) {
+            stats.zeroBytesSkipped += len;
+            progress.advance(len);
+            continue;
+        }
+        // Compare before writing: a chunk the target already holds is not written at all.
+        if (options.skipIdentical && skipper.wantCompare()) {
+            targetBuf.resize(static_cast<std::size_t>(len));
+            const bool same = target.readAt(off, targetBuf) && std::equal(targetBuf.begin(), targetBuf.end(), chunk.begin());
+            stats.compareBytesRead += len;
+            skipper.record(same);
+            if (same) {
+                ++stats.identicalChunks;
+                stats.identicalBytes += len;
+                if (zero) stats.zeroBytesSkipped += len;
                 progress.advance(len);
                 continue;
             }
+        }
+        if (zero) {
             if (policy == ZeroPolicy::SkipInside) {
                 // Only the parts the partition table calls free are zeroed; a chunk that straddles
                 // a partition boundary is split at that boundary, never one byte past it.

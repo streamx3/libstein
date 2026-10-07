@@ -427,6 +427,86 @@ TEST_CASE("copy engine: zero chunks go through zeroRange(), never through writeA
     CHECK(st2->zeroBytesSkipped == 100 * KiB);
 }
 
+TEST_CASE("copy engine: skipIdentical writes only the chunks that differ and stops comparing when the target is mostly different") {
+    class Counting final : public BlockDevice {
+    public:
+        explicit Counting(ByteCount size) : m_inner(size, 512) {}
+        std::string name() const override { return "counting"; }
+        Geometry geometry() const override { return m_inner.geometry(); }
+        bool isReadOnly() const override { return false; }
+        Expected<void> readAt(ByteCount off, std::span<std::byte> dst) override { ++reads; return m_inner.readAt(off, dst); }
+        Expected<void> writeAt(ByteCount off, std::span<const std::byte> src) override { ++writes; return m_inner.writeAt(off, src); }
+        Expected<void> zeroRange(ByteCount off, ByteCount len) override { ++zeroRanges; return m_inner.zeroRange(off, len); }
+        Expected<void> flush() override { return {}; }
+        MemoryDevice m_inner;
+        int reads = 0, writes = 0, zeroRanges = 0;
+    };
+    const ByteCount size = 16 * MiB;   // 256 chunks of 64 KiB
+    auto source = std::make_shared<MemoryDevice>(size, 512);
+    for (std::size_t i = 0; i < size; ++i) source->bytes()[i] = static_cast<std::byte>(i * 7 + i / 4096);
+    Sink sink;
+    Progress progress(sink);
+    CopyOptions co;
+    co.chunkSize = 64 * KiB;
+    co.skipIdentical = true;
+
+    // 1. Target already equals the source except three chunks: three writes, no zeroRange.
+    Counting same(size);
+    std::copy(source->bytes().begin(), source->bytes().end(), same.m_inner.bytes().begin());
+    for (std::size_t c : {5u, 100u, 255u}) same.m_inner.bytes()[c * 64 * KiB + 17] ^= std::byte{0xFF};
+    auto st = copyDevice(*source, same, co, progress);
+    REQUIRE(st);
+    CHECK(st->identicalChunks == 253);
+    CHECK(same.writes == 3);
+    CHECK(st->bytesWritten == 3 * 64 * KiB);
+    CHECK(same.reads == 256);                      // compared everything: the hit rate stayed high
+    CHECK(std::equal(source->bytes().begin(), source->bytes().end(), same.m_inner.bytes().begin()));
+
+    // 2. Target entirely different: after the warm-up, only one chunk in 64 is compared.
+    Counting other(size);
+    std::fill(other.m_inner.bytes().begin(), other.m_inner.bytes().end(), std::byte{0xEE});
+    auto st2 = copyDevice(*source, other, co, progress);
+    REQUIRE(st2);
+    CHECK(st2->identicalChunks == 0);
+    CHECK(other.writes == 256);
+    CHECK(other.reads <= 32 + 256 / 64 + 1);
+    CHECK(other.reads >= 32);
+    CHECK(std::equal(source->bytes().begin(), source->bytes().end(), other.m_inner.bytes().begin()));
+
+    // 3. Different for the first half, identical for the second: a probe notices and comparing resumes.
+    Counting half(size);
+    std::fill(half.m_inner.bytes().begin(), half.m_inner.bytes().end(), std::byte{0xEE});
+    std::copy(source->bytes().begin() + 8 * MiB, source->bytes().end(), half.m_inner.bytes().begin() + 8 * MiB);
+    auto st3 = copyDevice(*source, half, co, progress);
+    REQUIRE(st3);
+    CHECK(st3->identicalChunks >= 96);             // paused at 32, probes at 96 (miss) and 160 (hit): 160..255 skipped
+    CHECK(st3->identicalChunks <= 128);
+    CHECK(half.writes <= 128 + 64);
+    CHECK(std::equal(source->bytes().begin(), source->bytes().end(), half.m_inner.bytes().begin()));
+
+    // 4. Zero chunks that the target already holds as zeros are skipped too (no zeroRange call).
+    auto zsource = std::make_shared<MemoryDevice>(1 * MiB, 512);
+    const std::byte mark[1] = {std::byte{1}};
+    REQUIRE(zsource->writeAt(0, mark));
+    Counting ztarget(1 * MiB);
+    REQUIRE(ztarget.m_inner.writeAt(0, mark));
+    auto st4 = copyDevice(*zsource, ztarget, co, progress);
+    REQUIRE(st4);
+    CHECK(ztarget.zeroRanges == 0);
+    CHECK(ztarget.writes == 0);
+    CHECK(st4->identicalChunks == 16);
+    CHECK(st4->zeroBytesSkipped == 15 * 64 * KiB);
+
+    // 5. Off: everything is written, nothing is read from the target.
+    co.skipIdentical = false;
+    Counting plain(size);
+    std::copy(source->bytes().begin(), source->bytes().end(), plain.m_inner.bytes().begin());
+    auto st5 = copyDevice(*source, plain, co, progress);
+    REQUIRE(st5);
+    CHECK(plain.reads == 0);
+    CHECK(st5->identicalChunks == 0);
+}
+
 TEST_CASE("copy engine: bad sector policy") {
     // A device that fails reads inside one sector.
     class Flaky final : public BlockDevice {

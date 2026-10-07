@@ -48,6 +48,7 @@ struct RestoreOptions {
     bool writeZeroChunks = true;       // deprecated alias: false means zeroPolicy = Skip
     ZeroPolicy zeroPolicy = ZeroPolicy::Write;   // SkipInside: zero only the partition table's free space, see keepRegionsOf()
     bool discardZeroChunks = false;
+    bool skipIdentical = true;         // compare before writing, skip chunks the target already holds (see CopyOptions)
     bool allowSmallerTarget = false;   // write only what fits
 };
 
