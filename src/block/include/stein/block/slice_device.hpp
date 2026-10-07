@@ -20,6 +20,7 @@ public:
     Expected<void> writeAt(ByteCount offset, std::span<const std::byte> src) override;
     Expected<void> flush() override { return m_parent->flush(); }
     Expected<void> discard(ByteCount offset, ByteCount length) override;
+    Expected<void> zeroRange(ByteCount offset, ByteCount length) override;
     std::shared_ptr<BlockDevice> parent() const override { return m_parent; }
     std::vector<Region> extentsOnParent() const override { return {m_region}; }
 

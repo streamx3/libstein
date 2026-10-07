@@ -261,7 +261,7 @@ Expected<RestoreResult> restoreImage(const std::filesystem::path& image, BlockDe
         co.keepRegions = keep->regions;
         progress.message("zero ranges: " + keep->reason);
     }
-    co.discardZeroChunks = options.discardZeroChunks;
+    co.discardZeroChunks = options.discardZeroChunks;   // kept for the ABI; zeroRange() does the work
     co.limit = std::min(target.size(), h.totalSize);
     auto stats = copyDevice(*dev, target, co, progress);
     if (!stats) return fail(stats.error());

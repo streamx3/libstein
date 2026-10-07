@@ -123,12 +123,7 @@ Expected<CopyStats> copyDevice(BlockDevice& source, BlockDevice& target, const C
                 // a partition boundary is split at that boundary, never one byte past it.
                 ByteCount written = 0;
                 for (const auto& part : regionsOutside(Region{off, len}, options.keepRegions)) {
-                    const auto zeros = std::span<const std::byte>(chunk).subspan(static_cast<std::size_t>(part.offset - off), static_cast<std::size_t>(part.length));
-                    if (options.discardZeroChunks && target.discard(part.offset, part.length)) {
-                        written += part.length;
-                        continue;
-                    }
-                    if (auto w = target.writeAt(part.offset, zeros); !w) return fail(w.error());
+                    if (auto w = target.zeroRange(part.offset, part.length); !w) return fail(w.error());
                     written += part.length;
                 }
                 stats.bytesWritten += written;
@@ -137,12 +132,13 @@ Expected<CopyStats> copyDevice(BlockDevice& source, BlockDevice& target, const C
                 progress.advance(len);
                 continue;
             }
-            if (options.discardZeroChunks && target.discard(off, len)) {
-                stats.zeroBytesWritten += len;
-                progress.advance(len);
-                continue;
-            }
+            // Write: the device's cheapest guaranteed way to read back zeros (holes, WRITE ZEROES,
+            // unmap with read-back), zero writes where it has nothing better.
+            if (auto w = target.zeroRange(off, len); !w) return fail(w.error());
+            stats.bytesWritten += len;
             stats.zeroBytesWritten += len;
+            progress.advance(len);
+            continue;
         }
         if (auto w = target.writeAt(off, chunk); !w) return fail(w.error());
         stats.bytesWritten += len;

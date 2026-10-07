@@ -29,11 +29,15 @@ public:
     Expected<void> readAt(ByteCount offset, std::span<std::byte> dst) override;
     Expected<void> writeAt(ByteCount offset, std::span<const std::byte> src) override;
     Expected<void> flush() override;
+    // Punches a hole (fallocate / F_PUNCHHOLE / FSCTL_SET_ZERO_DATA); zeros are written
+    // where the filesystem has no holes.
+    Expected<void> zeroRange(ByteCount offset, ByteCount length) override;
 
     const std::filesystem::path& path() const { return m_path; }
 
 private:
     FileDevice() = default;
+    bool punchHole(ByteCount offset, ByteCount length);   // true when the OS made the hole
     std::filesystem::path m_path;
     std::fstream m_stream;
     Geometry m_geometry;

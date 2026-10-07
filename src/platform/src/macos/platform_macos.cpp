@@ -155,6 +155,20 @@ public:
         if (::ioctl(m_fd, DKIOCUNMAP, &unmap) != 0) return BlockDevice::discard(offset, length);
         return {};
     }
+    // DKIOCUNMAP is a hint: the range is read back afterwards and whatever is not zero is
+    // written. Cheaper than writing on flash that honours unmap; no slower where it does not.
+    Expected<void> zeroRange(ByteCount offset, ByteCount length) override {
+        if (m_readOnly) return fail(ErrorCategory::Permission, "device is opened read-only");
+        if (auto r = checkRange(offset, length); !r) return r;
+        return zeroWithFastPath(offset, length, m_geometry.logicalSectorSize, [this](ByteCount a, ByteCount n) {
+            dk_unmap_t unmap{};
+            dk_extent_t extent{a, n};
+            unmap.extents = &extent;
+            unmap.extentsCount = 1;
+            if (::ioctl(m_fd, DKIOCUNMAP, &unmap) != 0) return false;
+            return static_cast<bool>(zeroWhereNotZero(a, n));
+        });
+    }
 
 protected:
     Expected<void> rawRead(ByteCount offset, std::span<std::byte> dst) override {

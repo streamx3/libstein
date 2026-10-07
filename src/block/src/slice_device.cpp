@@ -33,4 +33,9 @@ Expected<void> SliceDevice::discard(ByteCount offset, ByteCount length) {
     return m_parent->discard(m_region.offset + offset, length);
 }
 
+Expected<void> SliceDevice::zeroRange(ByteCount offset, ByteCount length) {
+    if (auto r = checkRange(offset, length); !r) return r;
+    return m_parent->zeroRange(m_region.offset + offset, length);
+}
+
 } // namespace stein

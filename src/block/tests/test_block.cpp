@@ -8,6 +8,7 @@
 #include "stein/block/slice_device.hpp"
 #include "stein/block/sparse_file.hpp"
 
+#include <algorithm>
 #include <array>
 #include <filesystem>
 #include <fstream>
@@ -81,6 +82,88 @@ TEST_CASE("FileDevice create/open/sparse") {
     }
     CHECK(!FileDevice::open(dir / "missing.img", FileDevice::Mode::ReadOnly));
     std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("zeroRange: guaranteed zeros on memory, file (holes), slice and concat devices, ragged ends included") {
+    // Memory: unaligned range, neighbours untouched.
+    MemoryDevice mem(1 * MiB, 512);
+    std::fill(mem.bytes().begin(), mem.bytes().end(), std::byte{0x5A});
+    REQUIRE(mem.zeroRange(1000, 70000));
+    CHECK(mem.bytes()[999] == std::byte{0x5A});
+    CHECK(mem.bytes()[1000] == std::byte{0});
+    CHECK(mem.bytes()[70999] == std::byte{0});
+    CHECK(mem.bytes()[71000] == std::byte{0x5A});
+    CHECK(mem.zeroRange(1 * MiB - 10, 20).error().category() == ErrorCategory::OutOfRange);
+
+    // File: a hole where the filesystem allows, zeros otherwise; the content is the same either way.
+    auto dir = std::filesystem::temp_directory_path() / "stein_test_zero";
+    std::filesystem::create_directories(dir);
+    auto path = dir / "holes.img";
+    {
+        auto dev = FileDevice::create(path, 16 * MiB, 512);
+        REQUIRE(dev);
+        std::vector<std::byte> fill(4 * MiB, std::byte{0xAA});
+        REQUIRE((*dev)->writeAt(1 * MiB, fill));
+        REQUIRE((*dev)->zeroRange(1 * MiB + 100, 3 * MiB));   // 100 B past a block edge, ends mid-block
+        REQUIRE((*dev)->flush());
+        auto before = (*dev)->read(1 * MiB, 100);
+        REQUIRE(before);
+        CHECK(std::all_of(before->begin(), before->end(), [](std::byte b) { return b == std::byte{0xAA}; }));
+        auto zeroed = (*dev)->read(1 * MiB + 100, 3 * MiB);
+        REQUIRE(zeroed);
+        CHECK(std::all_of(zeroed->begin(), zeroed->end(), [](std::byte b) { return b == std::byte{0}; }));
+        auto after = (*dev)->read(4 * MiB + 100, 1 * MiB - 100);
+        REQUIRE(after);
+        CHECK(std::all_of(after->begin(), after->end(), [](std::byte b) { return b == std::byte{0xAA}; }));
+        // A later write through the stream must not resurrect anything.
+        REQUIRE((*dev)->writeAt(2 * MiB, bytesOf("x")));
+        auto neighbour = (*dev)->read(2 * MiB + 1, 4095);
+        REQUIRE(neighbour);
+        CHECK(std::all_of(neighbour->begin(), neighbour->end(), [](std::byte b) { return b == std::byte{0}; }));
+    }
+    {
+        auto dev = FileDevice::open(path, FileDevice::Mode::ReadOnly);
+        REQUIRE(dev);
+        CHECK((*dev)->zeroRange(0, 4096).error().category() == ErrorCategory::Permission);
+        // Everything in the zeroed range is still zero on disk, except the "x" written afterwards.
+        auto zeroed = (*dev)->read(1 * MiB + 100, 3 * MiB);
+        REQUIRE(zeroed);
+        std::size_t nonZero = 0, xAt = 0;
+        for (std::size_t i = 0; i < zeroed->size(); ++i)
+            if ((*zeroed)[i] != std::byte{0}) {
+                ++nonZero;
+                xAt = i;
+            }
+        CHECK(nonZero == 1);
+        CHECK(xAt == 1 * MiB - 100);
+        CHECK((*zeroed)[xAt] == std::byte{'x'});
+    }
+    std::filesystem::remove_all(dir);
+
+    // Slice: forwards into its window only.
+    auto parent = std::make_shared<MemoryDevice>(1 * MiB, 512);
+    std::fill(parent->bytes().begin(), parent->bytes().end(), std::byte{0x77});
+    auto slice = SliceDevice::create(parent, Region{256 * KiB, 256 * KiB}, "s");
+    REQUIRE(slice);
+    REQUIRE((*slice)->zeroRange(0, 256 * KiB));
+    CHECK(parent->bytes()[256 * KiB - 1] == std::byte{0x77});
+    CHECK(parent->bytes()[256 * KiB] == std::byte{0});
+    CHECK(parent->bytes()[512 * KiB - 1] == std::byte{0});
+    CHECK(parent->bytes()[512 * KiB] == std::byte{0x77});
+    CHECK((*slice)->zeroRange(0, 256 * KiB + 1).error().category() == ErrorCategory::OutOfRange);
+
+    // Concat: a range across two parts reaches both.
+    auto a = std::make_shared<MemoryDevice>(64 * KiB, 512);
+    auto b = std::make_shared<MemoryDevice>(64 * KiB, 512);
+    std::fill(a->bytes().begin(), a->bytes().end(), std::byte{1});
+    std::fill(b->bytes().begin(), b->bytes().end(), std::byte{2});
+    auto cat = ConcatDevice::create({a, b}, "cat");
+    REQUIRE(cat);
+    REQUIRE((*cat)->zeroRange(60 * KiB, 8 * KiB));
+    CHECK(a->bytes()[60 * KiB - 1] == std::byte{1});
+    CHECK(a->bytes()[60 * KiB] == std::byte{0});
+    CHECK(b->bytes()[4 * KiB - 1] == std::byte{0});
+    CHECK(b->bytes()[4 * KiB] == std::byte{2});
 }
 
 TEST_CASE("SparseFile capture/write/read/apply") {

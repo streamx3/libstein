@@ -19,6 +19,7 @@ public:
     Expected<void> writeAt(ByteCount offset, std::span<const std::byte> src) override;
     Expected<void> flush() override;
     Expected<void> discard(ByteCount offset, ByteCount length) override;
+    Expected<void> zeroRange(ByteCount offset, ByteCount length) override;
 
     const std::vector<BlockDevicePtr>& parts() const { return m_parts; }
     // Part index and offset inside that part for a byte offset.

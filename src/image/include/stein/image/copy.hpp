@@ -42,7 +42,7 @@ struct CopyOptions {
     bool skipZeroChunksOnWrite = false;   // deprecated alias of zeroPolicy = Skip; kept for callers of the first release
     ZeroPolicy zeroPolicy = ZeroPolicy::Write;
     std::vector<Region> keepRegions;      // SkipInside: ranges whose zeros are not written (partitions); any order, may overlap
-    bool discardZeroChunks = false;       // device->device: try discard() for zero chunks before writing zeros
+    bool discardZeroChunks = false;       // deprecated, no effect: zero chunks always go through BlockDevice::zeroRange()
     ByteCount limit = 0;                  // copy only the first `limit` bytes (0 = all)
 };
 

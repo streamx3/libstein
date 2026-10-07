@@ -19,6 +19,7 @@ public:
     Expected<void> writeAt(ByteCount offset, std::span<const std::byte> src) override;
     Expected<void> flush() override { return {}; }
     Expected<void> discard(ByteCount offset, ByteCount length) override;
+    Expected<void> zeroRange(ByteCount offset, ByteCount length) override { return discard(offset, length); }
 
     void setReadOnly(bool ro) { m_readOnly = ro; }
     std::span<std::byte> bytes() { return m_bytes; }

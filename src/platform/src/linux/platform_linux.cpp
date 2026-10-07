@@ -158,6 +158,16 @@ public:
             return fail(ErrorCategory::Unsupported, "BLKDISCARD failed on " + m_path + ": " + std::strerror(errno), errno);
         return {};
     }
+    // WRITE ZEROES through the kernel (deallocating where the device can); the kernel
+    // writes zeros itself when the device has no such command, so the result is sure.
+    Expected<void> zeroRange(ByteCount offset, ByteCount length) override {
+        if (m_readOnly) return fail(ErrorCategory::Permission, m_path + " is opened read-only");
+        if (auto r = checkRange(offset, length); !r) return r;
+        return zeroWithFastPath(offset, length, m_geometry.logicalSectorSize, [this](ByteCount a, ByteCount n) {
+            std::uint64_t range[2] = {a, n};
+            return ::ioctl(m_fd, BLKZEROOUT, range) == 0;
+        });
+    }
     int fd() const { return m_fd; }
 
 private:

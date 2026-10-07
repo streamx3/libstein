@@ -374,6 +374,59 @@ TEST_CASE("zero policy: gaps are zeroed, partitions are kept, straddling chunks 
     std::filesystem::remove_all(dir);
 }
 
+TEST_CASE("copy engine: zero chunks go through zeroRange(), never through writeAt()") {
+    // A target that records how zeros arrive.
+    class Recorder final : public BlockDevice {
+    public:
+        explicit Recorder(ByteCount size) : m_inner(size, 512) {}
+        std::string name() const override { return "recorder"; }
+        Geometry geometry() const override { return m_inner.geometry(); }
+        bool isReadOnly() const override { return false; }
+        Expected<void> readAt(ByteCount off, std::span<std::byte> dst) override { return m_inner.readAt(off, dst); }
+        Expected<void> writeAt(ByteCount off, std::span<const std::byte> src) override {
+            if (isAllZero(src)) ++zeroWrites;
+            return m_inner.writeAt(off, src);
+        }
+        Expected<void> zeroRange(ByteCount off, ByteCount len) override {
+            ++zeroRanges;
+            zeroRangeBytes += len;
+            return m_inner.zeroRange(off, len);
+        }
+        Expected<void> flush() override { return {}; }
+        MemoryDevice m_inner;
+        int zeroWrites = 0, zeroRanges = 0;
+        ByteCount zeroRangeBytes = 0;
+    };
+    auto source = std::make_shared<MemoryDevice>(1 * MiB, 512);
+    const std::byte mark[1] = {std::byte{9}};
+    REQUIRE(source->writeAt(0, mark));              // chunk 0 has data, the other 15 are zero
+    Recorder target(1 * MiB);
+    std::fill(target.m_inner.bytes().begin(), target.m_inner.bytes().end(), std::byte{0xCC});
+    Sink sink;
+    Progress progress(sink);
+    CopyOptions co;
+    co.chunkSize = 64 * KiB;
+    auto st = copyDevice(*source, target, co, progress);
+    REQUIRE(st);
+    CHECK(target.zeroRanges == 15);
+    CHECK(target.zeroRangeBytes == 15 * 64 * KiB);
+    CHECK(target.zeroWrites == 0);
+    CHECK(st->zeroBytesWritten == 15 * 64 * KiB);
+    CHECK(st->bytesWritten == 1 * MiB);
+    CHECK(target.m_inner.bytes()[0] == std::byte{9});
+    CHECK(target.m_inner.bytes()[1 * MiB - 1] == std::byte{0});
+
+    // SkipInside: the outside part of a straddling chunk goes through zeroRange() too.
+    Recorder target2(1 * MiB);
+    co.zeroPolicy = ZeroPolicy::SkipInside;
+    co.keepRegions = {Region{64 * KiB, 100 * KiB}};   // ends inside chunk 2
+    auto st2 = copyDevice(*source, target2, co, progress);
+    REQUIRE(st2);
+    CHECK(target2.zeroWrites == 0);
+    CHECK(target2.zeroRangeBytes == st2->zeroBytesWritten);
+    CHECK(st2->zeroBytesSkipped == 100 * KiB);
+}
+
 TEST_CASE("copy engine: bad sector policy") {
     // A device that fails reads inside one sector.
     class Flaky final : public BlockDevice {

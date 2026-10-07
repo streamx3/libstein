@@ -217,6 +217,29 @@ protected:
         }
         return {};
     }
+    // A TRIM request through DSM attributes is a hint; the range is read back and what is
+    // not zero is written, so the result is sure whatever the device did with the hint.
+    Expected<void> zeroRange(ByteCount offset, ByteCount length) override {
+        if (m_readOnly) return fail(ErrorCategory::Permission, m_path + " is opened read-only");
+        if (auto r = checkRange(offset, length); !r) return r;
+        return zeroWithFastPath(offset, length, m_geometry.logicalSectorSize, [this](ByteCount a, ByteCount n) {
+            std::vector<std::byte> buf(sizeof(DEVICE_MANAGE_DATA_SET_ATTRIBUTES) + sizeof(DEVICE_DATA_SET_RANGE));
+            auto* attrs = reinterpret_cast<DEVICE_MANAGE_DATA_SET_ATTRIBUTES*>(buf.data());
+            attrs->Size = sizeof(DEVICE_MANAGE_DATA_SET_ATTRIBUTES);
+            attrs->Action = DeviceDsmAction_Trim;
+            attrs->Flags = 0;
+            attrs->ParameterBlockOffset = 0;
+            attrs->ParameterBlockLength = 0;
+            attrs->DataSetRangesOffset = sizeof(DEVICE_MANAGE_DATA_SET_ATTRIBUTES);
+            attrs->DataSetRangesLength = sizeof(DEVICE_DATA_SET_RANGE);
+            auto* range = reinterpret_cast<DEVICE_DATA_SET_RANGE*>(buf.data() + sizeof(DEVICE_MANAGE_DATA_SET_ATTRIBUTES));
+            range->StartingOffset = static_cast<LONGLONG>(a);
+            range->LengthInBytes = n;
+            DWORD got = 0;
+            if (!DeviceIoControl(m_h, IOCTL_STORAGE_MANAGE_DATA_SET_ATTRIBUTES, buf.data(), static_cast<DWORD>(buf.size()), nullptr, 0, &got, nullptr)) return false;
+            return static_cast<bool>(zeroWhereNotZero(a, n));
+        });
+    }
     Expected<void> rawWrite(ByteCount offset, std::span<const std::byte> src) override {
         std::size_t done = 0;
         while (done < src.size()) {

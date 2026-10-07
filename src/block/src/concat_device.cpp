@@ -64,6 +64,12 @@ Expected<void> ConcatDevice::discard(ByteCount offset, ByteCount length) {
     return forEachPiece(offset, length, [&](BlockDevice& part, ByteCount inPart, ByteCount, ByteCount n) { return part.discard(inPart, n); });
 }
 
+Expected<void> ConcatDevice::zeroRange(ByteCount offset, ByteCount length) {
+    if (m_readOnly) return fail(ErrorCategory::Permission, "device is opened read-only");
+    if (auto r = checkRange(offset, length); !r) return r;
+    return forEachPiece(offset, length, [&](BlockDevice& part, ByteCount inPart, ByteCount, ByteCount n) { return part.zeroRange(inPart, n); });
+}
+
 Expected<void> ConcatDevice::flush() {
     for (auto& p : m_parts)
         if (auto r = p->flush(); !r) return r;
