@@ -388,6 +388,7 @@ int cmdImage(const Args& a) {
         image::RestoreOptions ro;
         ro.verifyPayloadFirst = !a.noVerify;
         ro.allowSmallerTarget = a.force;
+        ro.skipIdentical = !a.rewriteAll;
         bool zerosDefaulted = false;
         if (a.zeros == "skip") ro.zeroPolicy = image::ZeroPolicy::Skip;
         else if (a.zeros == "gaps") ro.zeroPolicy = image::ZeroPolicy::SkipInside;
