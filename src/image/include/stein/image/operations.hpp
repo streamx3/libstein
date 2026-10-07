@@ -30,6 +30,7 @@ struct CreateOptions {
     KdfParams kdf;                    // Argon2id t=3 m=256MiB p=4 by default
     std::string sourceName;           // defaults to device->name()
     std::string sourceIdentity;       // platform identity when known
+    json::Value sourceExtra;          // object; its members are merged into manifest "source" (e.g. partition provenance)
     std::string notes;
 };
 

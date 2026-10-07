@@ -94,6 +94,8 @@ Expected<CreateResult> createImage(std::shared_ptr<BlockDevice> source, const st
     src.set("size", source->size());
     src.set("sector_size", static_cast<std::uint64_t>(source->geometry().logicalSectorSize));
     src.set("physical_sector_size", static_cast<std::uint64_t>(source->geometry().physicalSectorSize));
+    if (options.sourceExtra.isObject())
+        for (const auto& [key, value] : options.sourceExtra.asObject()) src.set(key, value);
     wo.manifest.set("source", std::move(src));
     if (!options.notes.empty()) wo.manifest.set("notes", options.notes);
     std::vector<std::unique_ptr<fs::AllocationMap>> maps;
