@@ -149,3 +149,29 @@ TEST_CASE("AlignedDevice: unaligned reads and writes become sector-aligned raw I
     CHECK(mem->bytes()[12345] == std::byte{'Q'});
     CHECK(mem->bytes()[12344] == static_cast<std::byte>(12344 * 7 + 3));
 }
+
+#include "stein/platform/device_watcher.hpp"
+
+#include <atomic>
+#include <chrono>
+#include <thread>
+
+TEST_CASE("device watcher: starts, idles and stops without events; create() answers Unsupported only where there is no backend") {
+    std::atomic<int> events{0};
+    auto w = stein::platform::DeviceWatcher::create([&](const stein::platform::DeviceEvent& e) {
+        ++events;
+        CHECK(!stein::platform::toString(e.kind).empty());
+    });
+#if defined(__APPLE__) || defined(__linux__) || defined(_WIN32)
+    REQUIRE(w);
+    std::this_thread::sleep_for(std::chrono::milliseconds(700));   // past the macOS registration replay
+    (*w)->stop();
+    (*w)->stop();   // idempotent
+    w->reset();
+    MESSAGE("device events during the idle window: " << events.load());
+#else
+    CHECK(!w);
+    CHECK(w.error().category() == stein::ErrorCategory::Unsupported);
+#endif
+    CHECK(stein::platform::toString(stein::platform::DeviceEvent::Kind::MountsChanged) == "mounts changed");
+}
