@@ -24,7 +24,9 @@ for the design.
 
 Requirements: CMake ≥ 3.25, a C++23 compiler (GCC 13+, Clang 17+, MSVC 2022
 17.8+), Python ≥ 3.11 at build time (for the layout generator), Ninja
-recommended, `ccache` used automatically when present.
+recommended, `ccache` used automatically when present. On Linux, `pkg-config`
+and `libfuse3-dev` enable the FUSE mount backend (`stein mount`); the library
+builds without them with mounting switched off.
 
 ```sh
 cmake --preset debug      # or: release, ci, mono
