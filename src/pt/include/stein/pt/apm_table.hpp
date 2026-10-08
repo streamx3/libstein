@@ -8,6 +8,17 @@
 
 namespace stein::pt {
 
+// One slot of the map as read, including the Apple_partition_map entry and the
+// Apple_Free slots that partitions() leaves out. The OS exposes every slot as a
+// block device (Linux: sda1 is the map itself, an Apple_Free slot is sdaN too).
+struct ApmSlot {
+    std::uint32_t slot = 0;        // 1-based
+    std::string type;              // pm_par_type
+    std::string name;              // pm_part_name
+    Lba firstLba = 0, lastLba = 0; // in device sectors, inclusive
+    bool isMap = false, isFree = false;
+};
+
 class ApmTable final : public PartitionTable {
 public:
     static Expected<std::unique_ptr<ApmTable>> read(BlockDevicePtr device);
@@ -33,6 +44,8 @@ public:
     std::uint32_t mapEntries() const { return m_mapEntries; }
     // Blocks reserved for the map (the Apple_partition_map entry's size); >= mapEntries.
     std::uint32_t mapBlocks() const { return m_mapBlocks; }
+    // Every slot with a PM signature, in map order, as read (not maintained by edits).
+    std::span<const ApmSlot> slots() const { return m_slots; }
     // Apple_Free entries are kept out of partitions(); they are reported as free regions.
     static constexpr std::uint32_t kDefaultStatus = 0x3F;   // valid|allocated|in_use|boot_info|readable|writable
 
@@ -49,6 +62,7 @@ private:
     std::vector<std::byte> m_block0;        // as read
     std::vector<std::vector<std::byte>> m_entriesRaw;   // all map entries as read, for describe()
     std::vector<std::uint32_t> m_entryStatus;           // per real partition, parallel to m_partitions
+    std::vector<ApmSlot> m_slots;                       // all slots as read, see slots()
 };
 
 } // namespace stein::pt

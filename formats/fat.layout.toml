@@ -67,3 +67,22 @@ fields = [
   { name = "reserved2",        offset = 0x1F0, type = "bytes", size = 12 },
   { name = "trail_signature",  offset = 0x1FC, type = "u32", expect = 0xAA550000 },
 ]
+
+[fat_dir_entry]
+doc = "Directory entry (32 bytes). The root directory's entry with the volume_id attribute carries the label the OS shows; the boot sector's volume_label is only a copy"
+size = 32
+endian = "le"
+fields = [
+  { name = "name",              offset = 0x00, type = "ascii", size = 11, pad = " ", doc = "8.3 name, or the volume label when attr has volume_id" },
+  { name = "attr",              offset = 0x0B, type = "bits8", bits = { "0" = "read_only", "1" = "hidden", "2" = "system", "3" = "volume_id", "4" = "directory", "5" = "archive" } },
+  { name = "nt_reserved",       offset = 0x0C, type = "u8" },
+  { name = "create_time_tenth", offset = 0x0D, type = "u8" },
+  { name = "create_time",       offset = 0x0E, type = "u16" },
+  { name = "create_date",       offset = 0x10, type = "u16" },
+  { name = "access_date",       offset = 0x12, type = "u16" },
+  { name = "first_cluster_hi",  offset = 0x14, type = "u16" },
+  { name = "write_time",        offset = 0x16, type = "u16" },
+  { name = "write_date",        offset = 0x18, type = "u16" },
+  { name = "first_cluster_lo",  offset = 0x1A, type = "u16" },
+  { name = "file_size",         offset = 0x1C, type = "u32" },
+]

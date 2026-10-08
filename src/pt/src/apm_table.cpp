@@ -67,6 +67,17 @@ Expected<std::unique_ptr<ApmTable>> ApmTable::read(BlockDevicePtr device) {
         if (e.pmMapBlkCnt() != count)
             t->addDiagnostic(Validity::Warning, "apm.count_mismatch", "map entry " + std::to_string(i) + " says the map has " + std::to_string(e.pmMapBlkCnt()) + " entries, entry 1 says " + std::to_string(count));
         const std::string type = e.pmParType();
+        {
+            ApmSlot slot;
+            slot.slot = i;
+            slot.type = type;
+            slot.name = e.pmPartName();
+            slot.firstLba = static_cast<Lba>(e.pmPyPartStart()) * bs / geo.logicalSectorSize;
+            slot.lastLba = (static_cast<Lba>(e.pmPyPartStart()) + e.pmPartBlkCnt()) * bs / geo.logicalSectorSize - 1;
+            slot.isMap = isMapEntry(type);
+            slot.isFree = isFree(type);
+            t->m_slots.push_back(std::move(slot));
+        }
         if (isMapEntry(type)) {
             sawMapEntry = true;
             if (e.pmPyPartStart() != 1) t->addDiagnostic(Validity::Warning, "apm.map_start", "partition map entry does not start at block 1");

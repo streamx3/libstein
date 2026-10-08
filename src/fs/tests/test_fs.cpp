@@ -109,6 +109,30 @@ TEST_CASE("FAT: boot label vs root directory label, serial, cluster count typing
     CHECK((*fs)->info().clean == true);
     CHECK((*fs)->describe().child("FAT32 extended BPB") != nullptr);
     CHECK((*fs)->describe().child("FSInfo sector") != nullptr);
+    CHECK((*fs)->describe().child("backup boot sector BPB") != nullptr);
+    CHECK((*fs)->describe().child("backup FAT32 extended BPB") != nullptr);
+    const auto* entry = (*fs)->describe().child("root directory volume label entry");
+    REQUIRE(entry != nullptr);
+    CHECK(entry->child("name")->value == "STEIN_FAT32");
+    CHECK((*fs)->info().label == "STEIN_FAT32");
+    // A label edited in the boot sector only: the OS keeps showing the root directory's, and the
+    // backup boot sector now disagrees with the live one. Both are said.
+    {
+        auto edited = loadSparseFixture("fs/fat32.sparse");
+        const std::string label = "TEST_APM   ";
+        REQUIRE(edited->writeAt(36 + 0x23, std::as_bytes(std::span(label.data(), 11))));
+        auto fs2 = probe(edited);
+        REQUIRE((fs2 && *fs2));
+        CHECK((*fs2)->info().label == "STEIN_FAT32");
+        CHECK((*fs2)->info().extra == "boot-sector label: TEST_APM");
+        bool mismatch = false, backup = false;
+        for (const auto& d : (*fs2)->diagnostics()) {
+            if (d.code == "fat.label_mismatch") mismatch = true;
+            if (d.code == "fat.backup_boot_mismatch") backup = true;
+        }
+        CHECK(mismatch);
+        CHECK(backup);
+    }
     auto f12 = probe(loadSparseFixture("fs/fat12.sparse"));
     CHECK((*f12)->info().uuid == "1234-5678");
     CHECK((*f12)->info().version == "FAT12");

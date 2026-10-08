@@ -410,6 +410,20 @@ TEST_CASE("APM: read parted fixture, round trip, create") {
     CHECK(apm->mapEntries() == 5);
     CHECK(apm->mapBlocks() == 63);
     CHECK(apm->firstUsableLba() == 64);
+    // Every slot as read, map and Apple_Free included: the OS makes a device of each (sda1 is the map).
+    REQUIRE(apm->slots().size() == 5);
+    CHECK(apm->slots()[0].slot == 1);
+    CHECK(apm->slots()[0].isMap);
+    CHECK(apm->slots()[0].type == "Apple_partition_map");
+    CHECK(apm->slots()[0].firstLba == 1);
+    CHECK(apm->slots()[0].lastLba == 63);
+    CHECK(apm->slots()[1].slot == 2);
+    CHECK(!apm->slots()[1].isMap);
+    CHECK(!apm->slots()[1].isFree);
+    CHECK(apm->slots()[1].firstLba == 2048);
+    CHECK(apm->slots()[1].name == "Data");
+    CHECK(apm->slots()[3].isFree);
+    CHECK(apm->slots()[4].isFree);
     // mmls oracle: Apple_HFS 2048..10239 "Data" (slot 2), Apple_UNIX_SVR2 10240..18431 "primary" (slot 3)
     REQUIRE(apm->partitions().size() == 2);
     CHECK(apm->partitions()[0].index == 2);

@@ -16,17 +16,18 @@ namespace {
 
 bool isPow2(std::uint32_t v) { return v && (v & (v - 1)) == 0; }
 
-// Scan a directory region for the volume label entry (attribute 0x08, not deleted, not LFN).
-std::string fatDirLabel(std::span<const std::byte> dir) {
+// Scan a directory region for the volume label entry (attribute 0x08, not deleted, not LFN);
+// returns its offset inside the region.
+std::optional<std::size_t> fatDirLabelAt(std::span<const std::byte> dir) {
     for (std::size_t off = 0; off + 32 <= dir.size(); off += 32) {
         const auto first = std::to_integer<std::uint8_t>(dir[off]);
         if (first == 0x00) break;        // end of directory
         if (first == 0xE5) continue;     // deleted
         const auto attr = std::to_integer<std::uint8_t>(dir[off + 11]);
         if (attr == 0x0F) continue;      // long-name fragment
-        if (attr & 0x08) return asciiField(dir.subspan(off, 11));
+        if (attr & 0x08) return off;
     }
-    return {};
+    return std::nullopt;
 }
 
 } // namespace
@@ -171,17 +172,26 @@ Result detectFat(Dev dev) {
     }
     // The root directory's label entry is authoritative (this is what blkid reports as LABEL).
     std::string dirLabel;
+    std::optional<ByteCount> labelEntryOffset;   // where that entry lies, for describe()
+    std::vector<std::byte> labelEntry;
+    auto takeLabel = [&](const std::vector<std::byte>& dir, ByteCount dirOffset) {
+        if (auto at = fatDirLabelAt(dir)) {
+            dirLabel = asciiField(std::span<const std::byte>(dir).subspan(*at, 11));
+            labelEntryOffset = dirOffset + *at;
+            labelEntry.assign(dir.begin() + static_cast<std::ptrdiff_t>(*at), dir.begin() + static_cast<std::ptrdiff_t>(*at + 32));
+        }
+    };
     if (isFat32) {
         const std::uint32_t root = e32.rootCluster();
         if (root >= 2 && root - 2 < clusters) {
             const ByteCount off = (dataStart + ByteCount{root - 2} * spc) * bps;
-            if (auto dir = dev->read(off, ByteCount{spc} * bps)) dirLabel = fatDirLabel(*dir);
+            if (auto dir = dev->read(off, ByteCount{spc} * bps)) takeLabel(*dir, off);
         }
     } else {
         const ByteCount off = (ByteCount{reserved} + ByteCount{fats} * fatSectors) * bps;
         const ByteCount len = std::min<ByteCount>(ByteCount{rootDirSectors} * bps, 64 * KiB);
         if (len && off + len <= dev->size())
-            if (auto dir = dev->read(off, len)) dirLabel = fatDirLabel(*dir);
+            if (auto dir = dev->read(off, len)) takeLabel(*dir, off);
     }
     info.label = !dirLabel.empty() ? dirLabel : (bootLabel == "NO NAME" ? "" : bootLabel);
     if (serial) info.uuid = serialHex(serial);
@@ -209,12 +219,36 @@ Result detectFat(Dev dev) {
                 fs->addNode(std::move(n));
             }
         }
+        // The backup boot sector (usually 6) is what a repair tool restores from; show it and say
+        // when it has drifted from the live one (a label edited in one sector only, for instance).
+        const std::uint32_t backup = e32.backupBootSector();
+        if (backup && backup < reserved) {
+            if (auto bb = dev->read(ByteCount{backup} * bps, 512)) {
+                std::span<const std::byte> b(*bb);
+                auto n = gen::FatBpb(b).describe(ByteCount{backup} * bps);
+                n.name = "backup boot sector BPB";
+                fs->addNode(std::move(n));
+                auto n2 = gen::Fat32Ebpb(b.subspan(36, gen::Fat32Ebpb::kSize)).describe(ByteCount{backup} * bps + 36);
+                n2.name = "backup FAT32 extended BPB";
+                fs->addNode(std::move(n2));
+                if (!std::equal(b.begin(), b.begin() + 90, s.begin()))
+                    fs->diag(Validity::Warning, "fat.backup_boot_mismatch", "backup boot sector (sector " + std::to_string(backup) + ") differs from the boot sector");
+            }
+        }
     } else {
         auto t = e16.describe(36);
         t.name = "FAT12/16 extended BPB";
         fs->addNode(std::move(t));
         fs->addRegion(Region{0, ByteCount{reserved} * bps});
     }
+    // The label the OS shows lives in the root directory, not in the boot sector.
+    if (labelEntryOffset) {
+        auto n = gen::FatDirEntry(labelEntry).describe(*labelEntryOffset);
+        n.name = "root directory volume label entry";
+        fs->addNode(std::move(n));
+    }
+    if (!dirLabel.empty() && !bootLabel.empty() && bootLabel != "NO NAME" && bootLabel != dirLabel)
+        fs->diag(Validity::Info, "fat.label_mismatch", "boot-sector label \"" + bootLabel + "\" differs from the root directory label \"" + dirLabel + "\", which is the one the OS shows");
     {
         auto alloc = std::make_unique<FatAllocation>();
         alloc->bps = bps;
