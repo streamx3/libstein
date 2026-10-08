@@ -7,6 +7,7 @@
 
 #include "stein/block/slice_device.hpp"
 #include "stein/core/strings.hpp"
+#include "stein/pt/apm_table.hpp"
 #include "stein/pt/gpt_table.hpp"
 
 #include <algorithm>
@@ -82,6 +83,24 @@ void probeTable(Node& node, const Options& options, int depth) {
             Region local{f.firstLba * ss, f.sectors() * ss};
             freeNode.region = Region{node.region.offset + local.offset, local.length};
             node.children.push_back(std::move(freeNode));
+        }
+        // APM spells its free space out as Apple_Free slots, and the OS makes a device of each
+        // (Linux: sdaN), so such a slot is a node even below the minimum free size.
+        if (const auto* apm = dynamic_cast<const pt::ApmTable*>(node.table.get())) {
+            for (const auto& slot : apm->slots()) {
+                if (!slot.isFree || slot.lastLba < slot.firstLba) continue;
+                const Region local{slot.firstLba * ss, (slot.lastLba - slot.firstLba + 1) * ss};
+                const Region abs{node.region.offset + local.offset, local.length};
+                const bool covered = std::any_of(node.children.begin(), node.children.end(), [&](const Node& c) {
+                    return c.kind == NodeKind::Free && c.region.offset < abs.end() && abs.offset < c.region.end();
+                });
+                if (covered) continue;
+                Node freeNode;
+                freeNode.kind = NodeKind::Free;
+                freeNode.name = "free";
+                freeNode.region = abs;
+                node.children.push_back(std::move(freeNode));
+            }
         }
         std::sort(node.children.begin(), node.children.end(), [](const Node& a, const Node& b) { return a.region.offset < b.region.offset; });
     }
