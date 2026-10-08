@@ -23,6 +23,7 @@ option(STEIN_MONOLITHIC     "Link all modules into a single libstein"        OFF
 option(STEIN_WERROR         "Treat warnings as errors"                       OFF)
 option(STEIN_SANITIZERS     "Enable ASan/UBSan in Debug builds"              OFF)
 option(STEIN_FIXTURE_TOOLS  "Regenerate test fixtures with system tools when available" OFF)
+option(STEIN_FORCE_TL_EXPECTED "Use the bundled tl::expected even where std::expected exists (tests the fallback)" OFF)
 
 include(SteinCompiler)
 include(SteinModule)

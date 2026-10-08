@@ -22,9 +22,15 @@ for the design.
 
 ## Building
 
-Requirements: CMake ≥ 3.25, a C++23 compiler (GCC 13+, Clang 17+, MSVC 2022
-17.8+), Python ≥ 3.11 at build time (for the layout generator), Ninja
-recommended, `ccache` used automatically when present. On Linux, `pkg-config`
+Requirements: CMake ≥ 3.25, a C++23 compiler (GCC 13+, Clang 19+, Apple clang
+15+, MSVC 2022 17.8+), Python ≥ 3.11 at build time (for the layout generator),
+Ninja recommended, `ccache` used automatically when present. Clang 17 and 18 on
+GCC's libstdc++ (Ubuntu 24.04's default Clang) have no `std::expected`; they
+still build, with the bundled [tl::expected](third_party/expected/) standing in
+for it and a configure-time warning asking for Clang 19. A libstein built that
+way must be consumed with the same kind of compiler; the installed
+`stein/core/expected_config.hpp` records the choice and the header refuses a
+mismatch. On Linux, `pkg-config`
 and `libfuse3-dev` enable the FUSE mount backend (`stein mount`); the library
 builds without them with mounting switched off.
 

@@ -191,7 +191,7 @@ public:
     }
 
 private:
-    std::unexpected<Error> error(const std::string& what) {
+    stein::unexpected<Error> error(const std::string& what) {
         return fail(ErrorCategory::InvalidFormat, "JSON: " + what + " at offset " + std::to_string(m_pos));
     }
     void skipWs() {
