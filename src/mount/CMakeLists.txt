@@ -18,6 +18,22 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
       set(STEIN_HAVE_FUSE ON)
     endif()
   endif()
+  if(NOT STEIN_HAVE_FUSE)
+    # A pkg-config from Homebrew on PATH does not look in the distro's pkgconfig directory,
+    # so libfuse3-dev goes unseen. Find the header and library the plain way before giving up.
+    find_path(STEIN_FUSE3_INCLUDE_DIR fuse3/fuse.h)
+    find_library(STEIN_FUSE3_LIBRARY fuse3)
+    if(STEIN_FUSE3_INCLUDE_DIR AND STEIN_FUSE3_LIBRARY)
+      add_library(stein_fuse3 INTERFACE IMPORTED)
+      target_include_directories(stein_fuse3 INTERFACE "${STEIN_FUSE3_INCLUDE_DIR}")
+      target_link_libraries(stein_fuse3 INTERFACE "${STEIN_FUSE3_LIBRARY}")
+      target_compile_definitions(stein_fuse3 INTERFACE _FILE_OFFSET_BITS=64)
+      set(STEIN_MOUNT_SOURCES src/mount_fuse.cpp src/nfs_server.cpp)
+      set(STEIN_MOUNT_LIBS stein_fuse3)
+      set(STEIN_HAVE_FUSE ON)
+      message(STATUS "stein_mount: fuse3 found without pkg-config at ${STEIN_FUSE3_LIBRARY}")
+    endif()
+  endif()
 elseif(WIN32)
   # WinFsp (GPLv3 with FLOSS exception; MIT consumers qualify) exposes a libfuse3-compatible
   # API. Its DLL is delay-loaded so the binaries run without WinFsp installed.

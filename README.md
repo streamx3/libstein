@@ -30,9 +30,11 @@ still build, with the bundled [tl::expected](third_party/expected/) standing in
 for it and a configure-time warning asking for Clang 19. A libstein built that
 way must be consumed with the same kind of compiler; the installed
 `stein/core/expected_config.hpp` records the choice and the header refuses a
-mismatch. On Linux, `pkg-config`
-and `libfuse3-dev` enable the FUSE mount backend (`stein mount`); the library
-builds without them with mounting switched off.
+mismatch. On Linux, `libfuse3-dev` enables the FUSE mount backend (`stein mount`), found
+through `pkg-config` or, when the `pkg-config` on PATH is Homebrew's and blind
+to the distro's files, by a plain header and library search; the library
+builds without it with mounting switched off. Configure prints which backend
+it got.
 
 ```sh
 cmake --preset debug      # or: release, ci, mono
