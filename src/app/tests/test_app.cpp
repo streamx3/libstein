@@ -256,7 +256,11 @@ TEST_CASE("scenarios: backup, status, restore and verify on a file target") {
     REQUIRE_MESSAGE(r, (r ? std::string() : r.error().toString()));
     CHECK(r->ok);
     REQUIRE(r->restored);
-    CHECK(r->restored->stats.bytesWritten == src->size());
+    // Skip-identical is on by default: only the damaged 2 MiB are rewritten, less the
+    // part that was zero in the image anyway. Every byte is either written or identical.
+    CHECK(r->restored->stats.bytesWritten >= MiB);
+    CHECK(r->restored->stats.bytesWritten <= 2 * MiB);
+    CHECK(r->restored->stats.bytesWritten + r->restored->stats.identicalBytes == src->size());
     CHECK(r->report.toText().find("Read back and compare") != std::string::npos);
     {
         auto fixed = FileDevice::open(diskPath, FileDevice::Mode::ReadOnly);
