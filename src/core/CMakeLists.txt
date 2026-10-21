@@ -85,3 +85,8 @@ target_include_directories(stein_core SYSTEM PUBLIC
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/third_party/expected>)
 install(FILES ${PROJECT_SOURCE_DIR}/third_party/expected/tl/expected.hpp
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/tl)
+
+# The core tests: units, strings, GUIDs, JSON/LZ4 and the crypto vectors (AES, XTS, hashes, KDFs).
+stein_add_test(test_core
+  SOURCES tests/test_main.cpp tests/test_core.cpp tests/test_json_lz4.cpp tests/test_crypto.cpp
+  DEPS stein::core)
