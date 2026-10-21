@@ -3,10 +3,15 @@
 #include "stein_test.hpp"
 
 #include "stein/core/crc32.hpp"
+#include "stein/layout/gen/mbr.hpp"
 #include "stein/pt/apm_table.hpp"
 #include "stein/pt/gpt_table.hpp"
 #include "stein/pt/mbr_table.hpp"
 #include "stein/pt/partition_table.hpp"
+
+#include <algorithm>
+#include <array>
+#include <set>
 
 using namespace stein;
 using namespace stein::pt;
@@ -172,9 +177,12 @@ TEST_CASE("GPT: grown disk -> backup not at end, relocated by repair") {
     CHECK(gpt.primaryState().valid());
     CHECK(gpt.backupState().valid());   // found via alternate_lba even though it is not at the end
     CHECK(hasDiagnostic(gpt, "gpt.backup_not_at_end"));
+    CHECK(hasDiagnostic(gpt, "gpt.pmbr_size_mismatch"));   // the 0xEE entry still spans the old 16 MiB
     CHECK(gpt.lastUsableLba() == 32734);
     REQUIRE(gpt.repair(*dev, RepairOptions{}));
     CHECK(!hasDiagnostic(gpt, "gpt.backup_not_at_end"));
+    CHECK(!hasDiagnostic(gpt, "gpt.pmbr_size_mismatch"));
+    CHECK(gpt.health() == Validity::Ok);
     CHECK(gpt.backupState().lba == 24 * MiB / 512 - 1);
     CHECK(gpt.lastUsableLba() == 24 * MiB / 512 - 34);
     CHECK(gpt.partitions().size() == 3);
@@ -555,3 +563,523 @@ TEST_CASE("GPT: reserved tail of the header block is checked and repaired; attri
     CHECK((*again)->health() == Validity::Ok);
 }
 
+
+// ============================================================================ MBR repair and rules
+
+namespace {
+constexpr ByteCount kEntry1 = 0x1BE, kEntry2 = 0x1CE, kEntry3 = 0x1DE, kEntry4 = 0x1EE;   // entry offsets inside a sector
+constexpr ByteCount kEbr1 = 10240 * 512, kEbr2 = 16384 * 512;                           // mbr_basic's EBRs
+
+void pokeU8(BlockDevice& d, ByteCount off, std::uint8_t v) {
+    const std::byte b{v};
+    REQUIRE(d.writeAt(off, std::span<const std::byte>(&b, 1)));
+}
+void pokeU32(BlockDevice& d, ByteCount off, std::uint32_t v) {
+    const std::array<std::byte, 4> b{std::byte(v & 0xFF), std::byte((v >> 8) & 0xFF), std::byte((v >> 16) & 0xFF), std::byte((v >> 24) & 0xFF)};
+    REQUIRE(d.writeAt(off, b));
+}
+// An MBR entry as a partitioner writes it; CHS left zero (sfdisk fills it, the kernel ignores it).
+void pokeEntry(BlockDevice& d, ByteCount off, std::uint8_t status, std::uint8_t type, std::uint32_t first, std::uint32_t count) {
+    std::array<std::byte, 16> e{};
+    e[0] = std::byte{status};
+    e[4] = std::byte{type};
+    REQUIRE(d.writeAt(off, e));
+    pokeU32(d, off + 8, first);
+    pokeU32(d, off + 12, count);
+}
+std::shared_ptr<MemoryDevice> snapshot(const MemoryDevice& d) {
+    return std::make_shared<MemoryDevice>(std::vector<std::byte>(d.bytes().begin(), d.bytes().end()), d.sectorSize());
+}
+const Diagnostic* findDiagnostic(const PartitionTable& t, std::string_view code) {
+    for (const auto& d : t.diagnostics())
+        if (d.code == code) return &d;
+    return nullptr;
+}
+bool isRepairable(const PartitionTable& t, std::string_view code) {
+    const auto* d = findDiagnostic(t, code);
+    return d && d->repairable;
+}
+std::size_t logicalCount(const PartitionTable& t) {
+    std::size_t n = 0;
+    for (const auto& p : t.partitions()) n += p.isLogical;
+    return n;
+}
+
+// A device whose listed sectors fail to read until something is written over them, the way a
+// disk remaps a bad block on write.
+class FaultyDevice final : public BlockDevice {
+public:
+    FaultyDevice(std::shared_ptr<MemoryDevice> inner, std::set<Lba> bad) : m_inner(std::move(inner)), m_bad(std::move(bad)) {}
+    std::string name() const override { return "faulty"; }
+    Geometry geometry() const override { return m_inner->geometry(); }
+    bool isReadOnly() const override { return false; }
+    Expected<void> readAt(ByteCount offset, std::span<std::byte> dst) override {
+        for (Lba l : m_bad)
+            if (Region{offset, dst.size()}.contains(l * 512)) return fail(ErrorCategory::Io, "bad sector " + std::to_string(l));
+        return m_inner->readAt(offset, dst);
+    }
+    Expected<void> writeAt(ByteCount offset, std::span<const std::byte> src) override {
+        for (auto it = m_bad.begin(); it != m_bad.end();) it = Region{offset, src.size()}.contains(*it * 512) ? m_bad.erase(it) : std::next(it);
+        return m_inner->writeAt(offset, src);
+    }
+    Expected<void> flush() override { return {}; }
+    bool isBad(Lba l) const { return m_bad.count(l) != 0; }
+
+private:
+    std::shared_ptr<MemoryDevice> m_inner;
+    std::set<Lba> m_bad;
+};
+} // namespace
+
+TEST_CASE("MBR: EBR with a lost boot signature is recovered through its link and rewritten byte-identically") {
+    auto dev = loadSparseFixture("pt/mbr_basic.sparse");
+    REQUIRE(dev);
+    auto pristine = snapshot(*dev);
+    REQUIRE(dev->zeroRange(kEbr2 + 0x1FE, 2));
+    auto table = MbrTable::read(dev);
+    REQUIRE(table);
+    auto& mbr = **table;
+    CHECK(mbr.health() == Validity::Error);
+    CHECK(isRepairable(mbr, "mbr.ebr_chain_broken"));
+    CHECK(isRepairable(mbr, "mbr.logical_lost"));
+    CHECK(logicalCount(mbr) == 1);
+    CHECK(mbr.partitions().size() == 4);
+    const auto tree = mbr.describe();
+    REQUIRE(tree.child("EBR @ LBA 16384"));
+    CHECK(tree.child("EBR @ LBA 16384")->validity == Validity::Error);
+    CHECK(tree.child("EBR @ LBA 10240")->validity == Validity::Ok);
+
+    REQUIRE(mbr.repair(*dev, RepairOptions{}));
+    CHECK(mbr.health() <= Validity::Info);
+    CHECK(logicalCount(mbr) == 2);
+    REQUIRE(mbr.partitions().size() == 5);
+    CHECK(mbr.partitions()[4].index == 6);
+    CHECK(mbr.partitions()[4].firstLba == 18432);
+    CHECK(mbr.partitions()[4].type.mbrId == 0x07);
+    CHECK(mbr.partitions()[4].ebrLba == 16384);
+    // Every sector sfdisk wrote is back, the two EBRs included.
+    REQUIRE(mbr.metadataRegions().size() == 3);
+    checkRegionsEqual(*dev, *pristine, mbr.metadataRegions());
+    auto again = MbrTable::read(dev);
+    REQUIRE(again);
+    CHECK((*again)->diagnostics().empty());
+}
+
+TEST_CASE("MBR: a zeroed middle EBR loses its own logical; the orphaned EBRs behind it are recovered") {
+    auto dev = loadSparseFixture("pt/mbr_basic.sparse");
+    REQUIRE(dev);
+    {
+        // A third logical so that the chain has a middle link: EBR#3 lands on the 1 MiB grid at 26624.
+        auto table = MbrTable::read(dev);
+        REQUIRE(table);
+        Partition l7;
+        l7.isLogical = true;
+        l7.firstLba = 28672;
+        l7.lastLba = 32767;
+        l7.type = PartitionType::mbr(0x83);
+        REQUIRE((*table)->addPartition(l7));
+        CHECK((*table)->find(7)->ebrLba == 26624);
+        REQUIRE((*table)->write(*dev));
+    }
+    auto pristine = snapshot(*dev);
+    {
+        auto table = MbrTable::read(dev);
+        REQUIRE(table);
+        CHECK((*table)->health() <= Validity::Info);
+        CHECK(logicalCount(**table) == 3);
+    }
+    REQUIRE(dev->zeroRange(kEbr2, 512));
+    auto table = MbrTable::read(dev);
+    REQUIRE(table);
+    auto& mbr = **table;
+    CHECK(isRepairable(mbr, "mbr.ebr_chain_broken"));
+    CHECK(isRepairable(mbr, "mbr.logical_lost"));
+    CHECK(logicalCount(mbr) == 1);
+
+    REQUIRE(mbr.repair(*dev, RepairOptions{}));
+    CHECK(mbr.health() <= Validity::Info);
+    // Logical 6 lived only in the zeroed sector and is gone; the old logical 7 is back as 6.
+    REQUIRE(logicalCount(mbr) == 2);
+    const Partition* a = mbr.find(5);
+    const Partition* b = mbr.find(6);
+    REQUIRE(a);
+    REQUIRE(b);
+    CHECK(a->firstLba == 12288);
+    CHECK(b->firstLba == 28672);
+    CHECK(b->lastLba == 32767);
+    CHECK(b->type.mbrId == 0x83);
+    CHECK(b->ebrLba == 26624);
+    // The recovered EBR is untouched, the head EBR keeps its logical and now links straight to it.
+    CHECK(*dev->read(26624 * 512, 512) == *pristine->read(26624 * 512, 512));
+    CHECK(*dev->read(kEbr1 + kEntry1, 16) == *pristine->read(kEbr1 + kEntry1, 16));
+    auto link = dev->read(kEbr1 + kEntry2, 16);
+    REQUIRE(link);
+    CHECK(std::to_integer<int>((*link)[4]) == 0x05);
+    CHECK(layout::gen::MbrEntry(*link).firstLba() == 26624 - 10240);
+    CHECK(layout::gen::MbrEntry(*link).sectorCount() == 32767 - 26624 + 1);
+}
+
+TEST_CASE("MBR: unreadable EBRs: the orphan scan rebuilds the chain, and repair refuses to write an empty one") {
+    SUBCASE("unreadable head EBR, the second EBR is found on the 1 MiB grid") {
+        auto mem = loadSparseFixture("pt/mbr_basic.sparse");
+        REQUIRE(mem);
+        auto dev = std::make_shared<FaultyDevice>(mem, std::set<Lba>{10240});
+        auto table = MbrTable::read(dev);
+        REQUIRE(table);
+        auto& mbr = **table;
+        CHECK(isRepairable(mbr, "mbr.ebr_unreadable"));
+        CHECK(isRepairable(mbr, "mbr.logical_lost"));
+        CHECK(logicalCount(mbr) == 0);
+        CHECK(mbr.partitions().size() == 3);
+        const auto tree = mbr.describe();
+        REQUIRE(tree.child("EBR @ LBA 10240"));
+        CHECK(tree.child("EBR @ LBA 10240")->validity == Validity::Error);
+        REQUIRE(mbr.repair(*dev, RepairOptions{}));
+        CHECK(!dev->isBad(10240));   // the head EBR was rewritten
+        CHECK(mbr.health() <= Validity::Info);
+        REQUIRE(logicalCount(mbr) == 1);
+        const Partition* l = mbr.find(5);
+        REQUIRE(l);
+        CHECK(l->firstLba == 18432);
+        CHECK(l->sectors() == 8192);
+        CHECK(l->type.mbrId == 0x07);
+        CHECK(l->ebrLba == 10240);   // the chain head moved to the extended partition's first sector
+    }
+    SUBCASE("unreadable middle EBR with nothing behind it: the chain is closed at the last good EBR") {
+        auto mem = loadSparseFixture("pt/mbr_basic.sparse");
+        REQUIRE(mem);
+        auto dev = std::make_shared<FaultyDevice>(mem, std::set<Lba>{16384});
+        auto table = MbrTable::read(dev);
+        REQUIRE(table);
+        auto& mbr = **table;
+        CHECK(isRepairable(mbr, "mbr.ebr_unreadable"));
+        CHECK(logicalCount(mbr) == 1);
+        REQUIRE(mbr.repair(*dev, RepairOptions{}));
+        CHECK(mbr.health() <= Validity::Info);
+        CHECK(logicalCount(mbr) == 1);
+        CHECK(std::all_of(mem->bytes().begin() + kEbr1 + kEntry2, mem->bytes().begin() + kEbr1 + kEntry2 + 16, [](std::byte b) { return b == std::byte{0}; }));
+    }
+    SUBCASE("unreadable head EBR and nothing recoverable: repair fails without writing") {
+        auto mem = loadSparseFixture("pt/mbr_basic.sparse");
+        REQUIRE(mem);
+        REQUIRE(mem->zeroRange(kEbr2, 512));
+        auto dev = std::make_shared<FaultyDevice>(mem, std::set<Lba>{10240});
+        auto table = MbrTable::read(dev);
+        REQUIRE(table);
+        auto& mbr = **table;
+        CHECK(logicalCount(mbr) == 0);
+        auto r = mbr.repair(*dev, RepairOptions{});
+        REQUIRE(!r);
+        CHECK(r.error().category() == ErrorCategory::InvalidFormat);
+        CHECK(dev->isBad(10240));    // untouched
+        CHECK(isRepairable(mbr, "mbr.ebr_unreadable"));
+    }
+}
+
+TEST_CASE("MBR: looping, mis-typed and out-of-range EBR links are diagnosed and repaired") {
+    auto pristine = loadSparseFixture("pt/mbr_basic.sparse");
+    REQUIRE(pristine);
+    SUBCASE("loop: the second EBR links back to the first") {
+        auto dev = snapshot(*pristine);
+        pokeEntry(*dev, kEbr2 + kEntry2, 0x00, 0x05, 0, 10240);
+        auto table = MbrTable::read(dev);
+        REQUIRE(table);
+        auto& mbr = **table;
+        CHECK(isRepairable(mbr, "mbr.ebr_chain_loop"));
+        CHECK(logicalCount(mbr) == 2);
+        REQUIRE(mbr.repair(*dev, RepairOptions{}));
+        CHECK(mbr.health() <= Validity::Info);
+        checkRegionsEqual(*dev, *pristine, mbr.metadataRegions());
+    }
+    SUBCASE("link typed 0x83 instead of 0x05") {
+        auto dev = snapshot(*pristine);
+        pokeU8(*dev, kEbr1 + kEntry2 + 4, 0x83);
+        auto table = MbrTable::read(dev);
+        REQUIRE(table);
+        auto& mbr = **table;
+        CHECK(mbr.health() == Validity::Warning);
+        CHECK(isRepairable(mbr, "mbr.ebr_link_type"));
+        CHECK(logicalCount(mbr) == 2);
+        const auto tree = mbr.describe();
+        REQUIRE(tree.child("EBR @ LBA 10240"));
+        REQUIRE(tree.child("EBR @ LBA 10240")->child("entries")->children.size() == 2);
+        CHECK(tree.child("EBR @ LBA 10240")->child("entries")->children[1].name == "next EBR link");
+        CHECK(tree.child("EBR @ LBA 10240")->child("entries")->children[1].validity == Validity::Warning);
+        REQUIRE(mbr.repair(*dev, RepairOptions{}));
+        CHECK(mbr.health() <= Validity::Info);
+        checkRegionsEqual(*dev, *pristine, mbr.metadataRegions());
+    }
+    SUBCASE("link pointing past the extended partition: the lost EBR is found by the scan") {
+        auto dev = snapshot(*pristine);
+        pokeU32(*dev, kEbr1 + kEntry2 + 8, 0x00FF0000);
+        auto table = MbrTable::read(dev);
+        REQUIRE(table);
+        auto& mbr = **table;
+        CHECK(isRepairable(mbr, "mbr.ebr_link_outside"));
+        CHECK(isRepairable(mbr, "mbr.logical_lost"));
+        CHECK(logicalCount(mbr) == 1);
+        REQUIRE(mbr.repair(*dev, RepairOptions{}));
+        CHECK(mbr.health() <= Validity::Info);
+        CHECK(logicalCount(mbr) == 2);
+        REQUIRE(mbr.metadataRegions().size() == 3);
+        checkRegionsEqual(*dev, *pristine, mbr.metadataRegions());
+    }
+}
+
+TEST_CASE("MBR: a status byte other than 0x00/0x80 is a warning; sectors that are not tables stay rejected") {
+    auto pristine = loadSparseFixture("pt/mbr_basic.sparse");
+    REQUIRE(pristine);
+    auto dev = snapshot(*pristine);
+    pokeU8(*dev, kEntry2, 0x01);
+    auto any = PartitionTable::read(dev);
+    REQUIRE(any);
+    CHECK((*any)->type() == TableType::Mbr);
+    auto table = MbrTable::read(dev);
+    REQUIRE(table);
+    auto& mbr = **table;
+    CHECK(mbr.health() == Validity::Warning);
+    CHECK(isRepairable(mbr, "mbr.entry_status"));
+    CHECK(findDiagnostic(mbr, "mbr.entry_status")->message.find("0x01") != std::string::npos);
+    CHECK(mbr.partitions().size() == 5);
+    CHECK(mbr.partitions()[1].attributes == 0);
+    const auto tree = mbr.describe();
+    REQUIRE(tree.child("MBR sector")->child("entries")->children.size() == 3);
+    CHECK(tree.child("MBR sector")->child("entries")->children[1].name == "entry 2");
+    CHECK(tree.child("MBR sector")->child("entries")->children[1].validity == Validity::Warning);
+    CHECK(tree.child("MBR sector")->child("entries")->children[0].validity == Validity::Ok);
+    REQUIRE(mbr.repair(*dev, RepairOptions{}));
+    CHECK(mbr.diagnostics().empty());
+    CHECK(*dev->read(0, 512) == *pristine->read(0, 512));
+
+    // Boot code at 0x1BE with a 0x55AA signature: every "entry" has a stray status, none is certain.
+    auto bogus = std::make_shared<MemoryDevice>(4 * MiB, 512);
+    pokeU8(*bogus, 0, 0xEB);
+    for (ByteCount off : {kEntry1, kEntry2, kEntry3, kEntry4}) pokeEntry(*bogus, off, 0x33, 0x07, 2048, 100);
+    pokeU8(*bogus, 0x1FE, 0x55);
+    pokeU8(*bogus, 0x1FF, 0xAA);
+    CHECK(MbrTable::read(bogus).error().category() == ErrorCategory::NotFound);
+    CHECK((*PartitionTable::read(bogus))->type() == TableType::None);
+    // One certain entry does not rescue a doubtful one whose LBAs run off the device.
+    auto mixed = snapshot(*pristine);
+    pokeEntry(*mixed, kEntry4, 0x33, 0x07, 0x7FFFFFFF, 100);
+    CHECK(MbrTable::read(mixed).error().category() == ErrorCategory::NotFound);
+}
+
+TEST_CASE("MBR: CHS sector 0 and stale slots are reported per entry; repair reproduces sfdisk's sector") {
+    auto pristine = loadSparseFixture("pt/mbr_basic.sparse");
+    REQUIRE(pristine);
+    auto dev = snapshot(*pristine);
+    REQUIRE(dev->zeroRange(kEntry1 + 1, 3));      // first CHS of entry 1 -> C0/H0/S0
+    pokeU32(*dev, kEntry4 + 12, 5);               // slot 4: type 0, but a sector count left behind
+    auto table = MbrTable::read(dev);
+    REQUIRE(table);
+    auto& mbr = **table;
+    CHECK(mbr.health() == Validity::Warning);
+    CHECK(isRepairable(mbr, "mbr.chs_invalid"));
+    CHECK(isRepairable(mbr, "mbr.entry_stale"));
+    CHECK(findDiagnostic(mbr, "mbr.entry_stale")->severity == Validity::Info);
+    CHECK(mbr.partitions().size() == 5);          // the stale slot is not a partition
+    const auto tree = mbr.describe();
+    const auto* entries = tree.child("MBR sector")->child("entries");
+    REQUIRE(entries);
+    REQUIRE(entries->children.size() == 4);       // the stale slot is shown
+    CHECK(entries->children[0].validity == Validity::Warning);
+    CHECK(entries->children[0].child("first_chs")->value == "C0/H0/S0");
+    CHECK(entries->children[3].name == "entry 4");
+    CHECK(entries->children[3].validity == Validity::Info);
+    REQUIRE(mbr.repair(*dev, RepairOptions{}));
+    CHECK(mbr.diagnostics().empty());
+    CHECK(*dev->read(0, 512) == *pristine->read(0, 512));
+}
+
+TEST_CASE("MBR: table-level diagnostics") {
+    auto pristine = loadSparseFixture("pt/mbr_basic.sparse");
+    REQUIRE(pristine);
+    auto readWith = [&](auto patch) {
+        auto dev = snapshot(*pristine);
+        patch(*dev);
+        auto t = MbrTable::read(dev);
+        REQUIRE(t);
+        return std::move(*t);
+    };
+    SUBCASE("overlap") {
+        auto t = readWith([](BlockDevice& d) { pokeU32(d, kEntry1 + 12, 5000); });
+        CHECK(findDiagnostic(*t, "mbr.overlap")->severity == Validity::Error);
+        CHECK(!isRepairable(*t, "mbr.overlap"));
+    }
+    SUBCASE("out of range") {
+        auto t = readWith([](BlockDevice& d) { pokeU32(d, kEntry2 + 12, 0x00FFFFFF); });
+        CHECK(findDiagnostic(*t, "mbr.out_of_range")->severity == Validity::Error);
+    }
+    SUBCASE("more than one bootable") {
+        auto t = readWith([](BlockDevice& d) { pokeU8(d, kEntry2, 0x80); });
+        CHECK(findDiagnostic(*t, "mbr.multiple_bootable")->severity == Validity::Warning);
+        CHECK(!findDiagnostic(*t, "mbr.entry_status"));
+    }
+    SUBCASE("more than one extended; an all-zero first EBR is an empty chain, not a break") {
+        auto t = readWith([](BlockDevice& d) { pokeU8(d, kEntry2 + 4, 0x0F); });
+        CHECK(findDiagnostic(*t, "mbr.multiple_extended")->severity == Validity::Error);
+        CHECK(!findDiagnostic(*t, "mbr.ebr_chain_broken"));
+        CHECK(!findDiagnostic(*t, "mbr.logical_lost"));
+        CHECK(logicalCount(*t) == 0);
+    }
+    SUBCASE("protective entry without a GPT") {
+        auto t = readWith([](BlockDevice& d) { pokeU8(d, kEntry2 + 4, 0xEE); });
+        CHECK(findDiagnostic(*t, "mbr.protective_entry")->severity == Validity::Warning);
+    }
+    SUBCASE("unaligned start") {
+        auto t = readWith([](BlockDevice& d) {
+            pokeU32(d, kEntry2 + 8, 6145);
+            pokeU32(d, kEntry2 + 12, 4095);
+        });
+        CHECK(findDiagnostic(*t, "mbr.unaligned")->severity == Validity::Info);
+    }
+    SUBCASE("logical outside a shrunken extended partition") {
+        auto t = readWith([](BlockDevice& d) { pokeU32(d, kEntry3 + 12, 12288); });
+        CHECK(findDiagnostic(*t, "mbr.logical_outside_extended")->severity == Validity::Error);
+        CHECK(logicalCount(*t) == 2);
+    }
+}
+
+TEST_CASE("MBR: a created table gets a random disk signature; copy_protected survives a round trip") {
+    Geometry geo{.sizeBytes = 8 * MiB, .logicalSectorSize = 512};
+    auto a = MbrTable::createEmpty(geo);
+    auto b = MbrTable::createEmpty(geo);
+    CHECK(a->diskSignature() != 0);
+    CHECK(b->diskSignature() != 0);
+    CHECK(a->diskSignature() != b->diskSignature());
+    auto dev = std::make_shared<MemoryDevice>(geo.sizeBytes, 512);
+    REQUIRE(a->write(*dev));
+    auto back = MbrTable::read(dev);
+    REQUIRE(back);
+    CHECK((*back)->diskSignature() == a->diskSignature());
+
+    auto fixture = loadSparseFixture("pt/mbr_basic.sparse");
+    REQUIRE(fixture);
+    pokeU8(*fixture, 0x1BC, 0x5A);
+    pokeU8(*fixture, 0x1BD, 0x5A);
+    auto table = MbrTable::read(fixture);
+    REQUIRE(table);
+    CHECK((*table)->copyProtected() == 0x5A5A);
+    CHECK((*table)->diskSignature() == 0xdeadbeef);
+    auto copy = std::make_shared<MemoryDevice>(fixture->size(), 512);
+    REQUIRE((*table)->write(*copy));
+    CHECK(*copy->read(0x1B8, 6) == *fixture->read(0x1B8, 6));   // disk signature and copy_protected
+    auto reread = MbrTable::read(copy);
+    REQUIRE(reread);
+    CHECK((*reread)->copyProtected() == 0x5A5A);
+}
+
+// ============================================================================ GPT GUIDs and PMBR
+
+namespace {
+bool isVersion4(const Uuid& u) { return !u.isNil() && (u.bytes()[6] >> 4) == 4 && (u.bytes()[8] & 0xC0) == 0x80; }
+} // namespace
+
+TEST_CASE("GPT: created tables and partitions get version-4 GUIDs; an explicit GUID is kept") {
+    Geometry geo{.sizeBytes = 64 * MiB, .logicalSectorSize = 512};
+    auto table = GptTable::createEmpty(geo);
+    CHECK(isVersion4(table->diskGuid()));
+    CHECK(GptTable::createEmpty(geo)->diskGuid() != table->diskGuid());
+    Partition p;
+    p.firstLba = 2048;
+    p.lastLba = 4095;
+    p.type = *types::forRole(Role::EfiSystem, TableType::Gpt);
+    REQUIRE(table->addPartition(p));
+    p.firstLba = 4096;
+    p.lastLba = 6143;
+    REQUIRE(table->addPartition(p));
+    p.firstLba = 6144;
+    p.lastLba = 8191;
+    p.uuid = *Uuid::parse("AAAAAAAA-0000-0000-0000-000000000003");
+    REQUIRE(table->addPartition(p));
+    REQUIRE(table->partitions().size() == 3);
+    CHECK(isVersion4(table->partitions()[0].uuid));
+    CHECK(isVersion4(table->partitions()[1].uuid));
+    CHECK(table->partitions()[0].uuid != table->partitions()[1].uuid);
+    CHECK(table->partitions()[2].uuid.toString() == "AAAAAAAA-0000-0000-0000-000000000003");
+    // An update without a GUID keeps the partition's identity.
+    Partition upd = table->partitions()[0];
+    const Uuid before = upd.uuid;
+    upd.uuid = Uuid{};
+    upd.name = "renamed";
+    REQUIRE(table->updatePartition(upd));
+    CHECK(table->partitions()[0].uuid == before);
+
+    auto dev = std::make_shared<MemoryDevice>(geo.sizeBytes, 512);
+    REQUIRE(table->write(*dev));
+    auto back = GptTable::read(dev);
+    REQUIRE(back);
+    CHECK((*back)->health() == Validity::Ok);
+    REQUIRE((*back)->partitions().size() == 3);
+    for (std::size_t i = 0; i < 3; ++i) CHECK((*back)->partitions()[i].uuid == table->partitions()[i].uuid);
+    CHECK((*back)->diskGuid() == table->diskGuid());
+}
+
+TEST_CASE("GPT: a protective MBR entry that does not cover the disk is diagnosed and rebuilt") {
+    auto pristine = loadSparseFixture("pt/gpt_basic.sparse");
+    REQUIRE(pristine);
+    auto dev = snapshot(*pristine);
+    pokeU32(*dev, kEntry1 + 12, 1000);
+    auto table = GptTable::read(dev);
+    REQUIRE(table);
+    auto& gpt = **table;
+    CHECK(gpt.hasProtectiveMbr());
+    CHECK(!gpt.isHybridMbr());
+    CHECK(gpt.health() == Validity::Warning);
+    CHECK(isRepairable(gpt, "gpt.pmbr_size_mismatch"));
+    const auto tree = gpt.describe();
+    REQUIRE(tree.child("protective MBR")->child("entries")->children.size() == 1);
+    CHECK(tree.child("protective MBR")->child("entries")->children[0].validity == Validity::Warning);
+    REQUIRE(gpt.repair(*dev, RepairOptions{}));
+    CHECK(gpt.health() == Validity::Ok);
+    CHECK(!findDiagnostic(gpt, "gpt.pmbr_size_mismatch"));
+    CHECK(*dev->read(0, 512) == *pristine->read(0, 512));
+
+    auto shifted = snapshot(*pristine);
+    pokeU32(*shifted, kEntry1 + 8, 2);
+    auto t2 = GptTable::read(shifted);
+    REQUIRE(t2);
+    CHECK(isRepairable(**t2, "gpt.pmbr_size_mismatch"));
+}
+
+TEST_CASE("GPT: hybrid MBR entries must mirror GPT partitions; repair leaves LBA 0 alone") {
+    auto dev = loadSparseFixture("pt/gpt_basic.sparse");
+    REQUIRE(dev);
+    // Entry 2 mirrors GPT partition 3 (14336 + 18399 sectors) as a FAT32 LBA partition.
+    pokeEntry(*dev, kEntry2, 0x00, 0x0C, 14336, 18399);
+    {
+        auto table = GptTable::read(dev);
+        REQUIRE(table);
+        auto& gpt = **table;
+        CHECK(gpt.hasProtectiveMbr());
+        CHECK(gpt.isHybridMbr());
+        CHECK(findDiagnostic(gpt, "gpt.pmbr_hybrid"));
+        CHECK(!findDiagnostic(gpt, "gpt.hybrid_entry_mismatch"));
+        CHECK(!findDiagnostic(gpt, "gpt.pmbr_size_mismatch"));
+        CHECK(gpt.health() <= Validity::Info);
+        CHECK(gpt.describe().child("hybrid MBR") != nullptr);
+    }
+    // One sector off: a stale copy of the partition.
+    pokeU32(*dev, kEntry2 + 8, 14337);
+    // And something repairable elsewhere, so that repair really writes.
+    pokeU8(*dev, 32767 * 512 + 200, 0x5A);
+    auto table = GptTable::read(dev);
+    REQUIRE(table);
+    auto& gpt = **table;
+    const auto* mismatch = findDiagnostic(gpt, "gpt.hybrid_entry_mismatch");
+    REQUIRE(mismatch);
+    CHECK(mismatch->severity == Validity::Warning);
+    CHECK(!mismatch->repairable);
+    CHECK(mismatch->message.find("0x0C") != std::string::npos);
+    CHECK(isRepairable(gpt, "gpt.backup_header_reserved"));
+    const auto tree = gpt.describe();
+    REQUIRE(tree.child("hybrid MBR")->child("entries")->children.size() == 2);
+    CHECK(tree.child("hybrid MBR")->child("entries")->children[1].validity == Validity::Warning);
+    CHECK(tree.child("hybrid MBR")->child("entries")->children[0].validity == Validity::Ok);
+    const auto lba0 = *dev->read(0, 512);
+    REQUIRE(gpt.repair(*dev, RepairOptions{}));
+    CHECK(*dev->read(0, 512) == lba0);
+    CHECK(!findDiagnostic(gpt, "gpt.backup_header_reserved"));
+    CHECK(findDiagnostic(gpt, "gpt.hybrid_entry_mismatch"));
+}

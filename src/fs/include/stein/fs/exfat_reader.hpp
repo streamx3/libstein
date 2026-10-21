@@ -52,7 +52,7 @@ private:
     std::shared_ptr<BlockDevice> m_device;
     ByteCount m_bps = 512, m_clusterBytes = 0, m_fatOffset = 0, m_fatBytes = 0, m_heapOffset = 0;
     std::uint32_t m_clusterCount = 0, m_rootCluster = 0;
-    mutable std::vector<std::byte> m_fat;   // first FAT, read once
+    mutable std::vector<std::byte> m_fat;   // the live FAT, read once
     std::vector<char16_t> m_upcase;         // 65536 entries, or empty = ASCII-only folding
     std::unordered_map<std::uint64_t, Entry> m_cache;   // inode id -> entry set, filled by listDir/lookup
 };

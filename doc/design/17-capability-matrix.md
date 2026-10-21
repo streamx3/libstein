@@ -11,8 +11,8 @@ L0 detect/geometry/label/uuid · L1 used-block map · L2 offline metadata edit
 | FS | L0 | L1 | L2 label/uuid | L2 resize | L2 check | L2 create | L3 | L4 |
 |---|---|---|---|---|---|---|---|---|
 | ext2/3/4 | **done** | **done** (allocation map; used-only imaging) | v1 | v2 (x in v1) | v2 (x in v1) | v1 | **done** (reader: extents, indirect, inline, htree, symlinks) | v2 |
-| FAT12/16/32 | **done** | **done** (allocation map; used-only imaging) | v1 | v2 (FAT32 only, cluster-count rules) | v1 (FreeBSD fsck_msdosfs port) | v1 | **done** (reader: LFN, chains) | v1 |
-| exFAT | **done** | **done** (allocation map; used-only imaging) | v1 | v2 | v2 | v1 | **done** (reader: NoFatChain, up-case table) | v1 |
+| FAT12/16/32 | **done** (boot sector described whole; BPB/FSInfo sanity, FAT[0]/FAT[1] media and clean/hard-error bits, hidden_sectors vs partition start; FAT32 backup boot/FSInfo and mirrored FAT copies compared, `repair()` rewrites them from the live ones) | **done** (allocation map from the active FAT per ext_flags; used-only imaging) | v1 | v2 (FAT32 only, cluster-count rules) | v1 (FreeBSD fsck_msdosfs port) | v1 | **done** (reader: LFN, chains, active FAT) | v1 |
+| exFAT | **done** (boot regions with checksums and backup, `repair()` restores or reseals them; geometry/truncation checks; used space counted from bitmaps up to 8 MiB; TexFAT second FAT compared, not repaired) | **done** (allocation map from the live bitmap per volume_flags; used-only imaging) | v1 | v2 | v2 | v1 | **done** (reader: NoFatChain, up-case table, live FAT per volume_flags) | v1 |
 | NTFS | **done** | **done** (allocation map; used-only imaging) | v1 | v3 (x in v1) | – (x) | v2 (x in v1) | **done** (reader: MFT, INDX, reparse links) | v3 |
 | HFS+ / HFSX | **done** | **done** (allocation map; used-only imaging) | v1 | v3 | – | v2 | **done** (reader: B-trees, overflow extents, hard links, HFSX case) | v3 |
 | HFS (classic) | **done** (incl. wrapper) | – | v1 | – | – | – | – | – |
@@ -33,8 +33,8 @@ L0 detect/geometry/label/uuid · L1 used-block map · L2 offline metadata edit
 
 | Table | read | diagnostics | write/edit | repair | notes |
 |---|---|---|---|---|---|
-| GPT (+ protective/hybrid MBR) | **done** | **done** (CRCs, header pairs, overlaps, out-of-bounds, backup location, hybrid) | **done** | **done** (rebuild either copy, fix CRCs, relocate backup, fix PMBR) | own code from UEFI 2.10 §5; byte-identical with sgdisk |
-| MBR + EBR | **done** | **done** (overlap, chain loops/breaks, logical outside extended, protective leftovers) | **done** | v1 (rewrite EBR chain) | own code; byte-identical with sfdisk |
+| GPT (+ protective/hybrid MBR) | **done** | **done** (CRCs, header pairs, overlaps, out-of-bounds, backup location, PMBR extent, hybrid entries mirrored by GPT entries) | **done** | **done** (rebuild either copy, fix CRCs, relocate backup, fix PMBR; a hybrid MBR is left alone) | own code from UEFI 2.10 §5; byte-identical with sgdisk; v4 GUIDs from `crypto::randomBytes` |
+| MBR + EBR | **done** | **done** (overlap, chain loops/breaks, lost logicals, links outside the extended partition, logical outside extended, protective leftovers, status/CHS/stale entries) | **done** | **done** (rewrite EBR chain, orphaned-EBR recovery on the 1 MiB and 63-sector grids within 64 MiB of reads, normalise entries; refuses to empty a chain it could not read) | own code; byte-identical with sfdisk |
 | APM (+ DDM block0) | v1 | v1 | v2 | v2 | FreeBSD `g_part_apm.c`; required explicitly by R4 |
 | BSD disklabel (+ nested in MBR) | v1 | v1 | v2 | – | FreeBSD `g_part_bsd.c` |
 | Windows LDM (dynamic disks) | v1 | v1 | – | – | FreeBSD `g_part_ldm.c`; volumes via `stein_volume` |
@@ -84,7 +84,9 @@ L0 detect/geometry/label/uuid · L1 used-block map · L2 offline metadata edit
 |---|---|---|
 | CreateTable GPT/MBR/APM | **done** | zeroes old signatures first; preview on overlay |
 | Add/Delete/Update partition | **done** | bounds/overlap validation from `PartitionTable`; optional signature wipe |
-| RepairTable | **done** | GPT copies rebuild/relocate |
+| RepairTable | **done** | any table with repairable diagnostics: GPT copies rebuild/relocate and PMBR, MBR EBR chain rewrite and orphan recovery |
 | WipeSignatures | **done** | regions from the probe tree |
+| Filesystem repair (FAT backup boot/FSInfo/FAT copies, exFAT boot regions) | **done**, not an operation | `fs::FileSystem::repair()`, called directly by `stein repair` and the app |
+| ConvertTable MBR ↔ GPT | not scheduled | no code, no milestone; `13-operations.md` §3 |
 | Resize/move partition (data) | planned | M3 |
 | CreateImage/RestoreImage as operations | planned | currently direct functions in `stein_image` |

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// FAT12/16/32 reader: BPB geometry, cluster chains through the first FAT,
+// FAT12/16/32 reader: BPB geometry, cluster chains through the active FAT,
 // fixed root directory (12/16) or root chain (32), long file names (UTF-16)
 // with checksum validation and 8.3 fallback, DOS timestamps.
 #include "detectors.hpp"
@@ -75,16 +75,18 @@ Expected<std::unique_ptr<FatReader>> FatReader::open(std::shared_ptr<BlockDevice
     const std::uint64_t dataStart = ByteCount{reserved} + ByteCount{fats} * fatSectors + rootDirSectors;
     if (totalSectors == 0 || fatSectors == 0 || dataStart >= totalSectors) return fail(ErrorCategory::InvalidFormat, "bad FAT geometry");
     r->m_clusters = static_cast<std::uint32_t>((totalSectors - dataStart) / r->m_spc);
-    const bool isFat32 = bpb.sectorsPerFat16() == 0 && bpb.rootEntries() == 0;
-    r->m_bits = isFat32 ? 32 : r->m_clusters < 4085 ? 12 : 16;
+    const bool fat32Layout = bpb.sectorsPerFat16() == 0;
+    r->m_bits = fatBitsFor(fat32Layout, r->m_clusters);
     r->m_endMark = r->m_bits == 12 ? 0xFF8 : r->m_bits == 16 ? 0xFFF8 : 0x0FFFFFF8;
     r->m_clusterBytes = ByteCount{r->m_bps} * r->m_spc;
-    r->m_fatOffset = ByteCount{reserved} * r->m_bps;
+    // Chains are followed through the FAT the driver keeps current (fat_reader.hpp).
+    const std::uint32_t activeFat = fat32Layout ? fatActiveIndex(e32.extFlags(), fats) : 0;
+    r->m_fatOffset = (ByteCount{reserved} + ByteCount{activeFat} * fatSectors) * r->m_bps;
     r->m_fatBytes = ByteCount{fatSectors} * r->m_bps;
     r->m_rootOffset = (ByteCount{reserved} + ByteCount{fats} * fatSectors) * r->m_bps;
     r->m_rootBytes = ByteCount{rootDirSectors} * r->m_bps;
     r->m_dataOffset = dataStart * r->m_bps;
-    r->m_rootCluster = isFat32 ? e32.rootCluster() : 0;
+    r->m_rootCluster = fat32Layout ? e32.rootCluster() : 0;
     return r;
 }
 

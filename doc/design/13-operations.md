@@ -45,12 +45,21 @@ Rules:
   possible for metadata-only changes (table edits, label changes). Data
   overwrites are not revertible and are flagged `Irreversible` for the UI.
 
-## 3. Standard operations (v1 set)
+## 3. Standard operations
 
-Partition table: `CreateTable`, `RepairTable` (GPT from backup, CRC fix,
-relocate backup header), `ConvertTable` (MBR ↔ GPT where entries fit),
-`CreatePartition`, `DeletePartition`, `ResizePartition`, `MovePartition`,
-`SetPartitionType`, `SetPartitionFlags`, `SetPartitionName`, `SetPartitionUuid`.
+What exists in `stein_ops` (2026-10-21): `CreateTable` (GPT, MBR, APM),
+`AddPartition` (MBR logicals included; the table places the EBR),
+`DeletePartition`, `UpdatePartition` (type, name, attributes, bounds; metadata
+only, no data moved), `RepairTable` (any table whose diagnostics are
+repairable: GPT copies, CRCs, backup placement and PMBR; MBR EBR chain rewrite
+and orphaned-EBR recovery) and `WipeSignatures`. Filesystem repair (FAT backup
+boot sector, backup FSInfo and stale FAT copies; exFAT boot regions) is
+`fs::FileSystem::repair()`, called directly by `stein repair` and the app, not
+an operation. `ConvertTable` (MBR ↔ GPT) does not exist and is not scheduled;
+no milestone carries it. Everything below that is not named above is the
+design's intended set, not code.
+
+Partition table: `ResizePartition`, `MovePartition` (data-moving; M3).
 
 Filesystem: `Format` (mkfs), `ResizeFileSystem`, `CheckFileSystem`,
 `SetLabel`, `SetUuid`, `WipeSignatures` (secure-ish erase of headers),

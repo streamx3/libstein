@@ -4,10 +4,13 @@
 #include "stein_fixture.hpp"
 #include "stein_test.hpp"
 
+#include "stein/block/memory_device.hpp"
+#include "stein/block/slice_device.hpp"
 #include "stein/core/endian.hpp"
 #include "stein/core/strings.hpp"
 #include "stein/layout/gen/exfat.hpp"
 #include "stein/layout/node.hpp"
+#include "stein/fs/fat_reader.hpp"
 #include "stein/fs/filesystem.hpp"
 #include "stein/fs/udf_reader.hpp"
 
@@ -111,10 +114,13 @@ TEST_CASE("FAT: boot label vs root directory label, serial, cluster count typing
     CHECK((*fs)->info().version == "FAT32");
     CHECK((*fs)->info().clean == true);
     const auto tree = (*fs)->describe();   // held: child() pointers into a temporary tree dangle
-    CHECK(tree.child("FAT32 extended BPB") != nullptr);
+    REQUIRE(tree.child("boot sector") != nullptr);
+    CHECK(tree.child("boot sector")->child("BPB") != nullptr);
+    CHECK(tree.child("boot sector")->child("FAT32 extended BPB") != nullptr);
     CHECK(tree.child("FSInfo sector") != nullptr);
-    CHECK(tree.child("backup boot sector BPB") != nullptr);
-    CHECK(tree.child("backup FAT32 extended BPB") != nullptr);
+    REQUIRE(tree.child("backup boot sector") != nullptr);
+    CHECK(tree.child("backup boot sector")->child("BPB") != nullptr);
+    CHECK(tree.child("backup boot sector")->child("FAT32 extended BPB") != nullptr);
     const auto* entry = tree.child("root directory volume label entry");
     REQUIRE(entry != nullptr);
     CHECK(entry->child("name")->value == "STEIN_FAT32");
@@ -1243,11 +1249,14 @@ TEST_CASE("exfat: both boot regions are described, their checksums verified, the
         REQUIRE(bitmap);
         REQUIRE(upcase);
         CHECK(bitmap->child("data_length")->validity == stein::layout::Validity::Ok);
-        const bool fullFixture = std::string(fixture).rfind("exfatfs/", 0) == 0;   // fs/exfat.sparse is trimmed to the boot regions and FAT
-        if (fullFixture) {
+        // fs/exfat.sparse is trimmed, but its runs keep the root directory, the bitmap and the
+        // up-case table (the checksum verifies), so every fixture asserts the same things.
+        {
             CHECK(upcase->validity == stein::layout::Validity::Ok);
-            if (const auto* label = descendant(tree, {"root directory", "volume label entry"}))
-                CHECK(label->child("volume_label")->value == (*fs)->info().label);
+            const auto* label = descendant(tree, {"root directory", "volume label entry"});
+            REQUIRE(label);
+            CHECK(label->child("volume_label")->value == (*fs)->info().label);
+            CHECK_FALSE((*fs)->info().label.empty());
             // Damage the stored table: the checksum field says what it should be.
             const ByteCount heap = ByteCount{stein::layout::gen::ExfatBootSector(*boot).clusterHeapOffset()} * sectorBytes;
             const ByteCount clusterBytes = *(*fs)->info().blockSize;
@@ -1368,3 +1377,718 @@ TEST_CASE("exfat: repair restores the damaged boot region from the sound one") {
     CHECK(sameAsPristine("no-op repair"));
 }
 
+
+// ---- FAT and exFAT: diagnostics, repair, geometry ------------------------------------------
+
+namespace {
+const FsDiagnostic* diagOf(const FileSystem& fs, std::string_view code) {
+    for (const auto& d : fs.diagnostics())
+        if (d.code == code) return &d;
+    return nullptr;
+}
+std::size_t diagCount(const FileSystem& fs, std::string_view code) {
+    std::size_t n = 0;
+    for (const auto& d : fs.diagnostics()) n += d.code == code;
+    return n;
+}
+std::string diagCodes(const FileSystem& fs) {
+    std::string out;
+    for (const auto& d : fs.diagnostics()) out += d.code + " ";
+    return out;
+}
+void patchBytes(BlockDevice& dev, ByteCount off, std::initializer_list<std::uint8_t> bytes) {
+    std::vector<std::byte> b;
+    for (auto v : bytes) b.push_back(std::byte{v});
+    REQUIRE(dev.writeAt(off, b));
+}
+void patchLe16(BlockDevice& dev, ByteCount off, std::uint16_t v) { patchBytes(dev, off, {std::uint8_t(v & 0xFF), std::uint8_t(v >> 8)}); }
+void patchLe32(BlockDevice& dev, ByteCount off, std::uint32_t v) {
+    patchBytes(dev, off, {std::uint8_t(v & 0xFF), std::uint8_t((v >> 8) & 0xFF), std::uint8_t((v >> 16) & 0xFF), std::uint8_t(v >> 24)});
+}
+std::uint32_t readLe32(BlockDevice& dev, ByteCount off) {
+    auto b = dev.read(off, 4);
+    REQUIRE(b);
+    return loadLe32(b->data());
+}
+// The FAT32 fixtures keep their backup boot sector at sector 6: a BPB patch goes to both copies so
+// that only the fact under test shows up, not fat.backup_boot_mismatch.
+void patchFat32Boot(BlockDevice& dev, ByteCount off, std::initializer_list<std::uint8_t> bytes) {
+    patchBytes(dev, off, bytes);
+    patchBytes(dev, 6 * 512 + off, bytes);
+}
+// exFAT fixtures (512-byte sectors): patch both boot sectors and reseal both checksum sectors
+// (specification §3.4, VolumeFlags and PercentInUse excluded) so only the patched fact shows.
+void patchExfatBoot(BlockDevice& dev, ByteCount off, std::initializer_list<std::uint8_t> bytes) {
+    for (ByteCount region : {ByteCount{0}, ByteCount{12 * 512}}) {
+        patchBytes(dev, region + off, bytes);
+        auto sectors = dev.read(region, 11 * 512);
+        REQUIRE(sectors);
+        std::uint32_t c = 0;
+        for (std::size_t i = 0; i < sectors->size(); ++i) {
+            if (i == 106 || i == 107 || i == 112) continue;
+            c = ((c & 1u) ? 0x80000000u : 0u) + (c >> 1) + std::to_integer<std::uint32_t>((*sectors)[i]);
+        }
+        std::vector<std::byte> seal(512);
+        for (std::size_t i = 0; i < seal.size(); i += 4) storeLe32(seal.data() + i, c);
+        REQUIRE(dev.writeAt(region + 11 * 512, seal));
+    }
+}
+bool sameBytes(const MemoryDevice& a, const MemoryDevice& b, const char* when) {
+    const auto x = a.bytes(), y = b.bytes();
+    REQUIRE(x.size() == y.size());
+    for (std::size_t i = 0; i < x.size(); ++i)
+        if (x[i] != y[i]) {
+            MESSAGE(when << ": first difference at byte " << i);
+            return false;
+        }
+    return true;
+}
+} // namespace
+
+TEST_CASE("FAT: the boot sector is described whole on FAT12/16/32 (BPB, extended BPB, boot code, signature); pristine fixtures raise nothing") {
+    struct Case {
+        const char* fixture;
+        const char* version;
+        const char* ebpb;
+        const char* label;
+        std::uint64_t codeBytes;
+    };
+    const Case cases[] = {
+        {"fs/fat12.sparse", "FAT12", "FAT12/16 extended BPB", "STEIN_FAT12", 448},
+        {"fs/fat16.sparse", "FAT16", "FAT12/16 extended BPB", "STEIN_FAT16", 448},
+        {"fs/fat32.sparse", "FAT32", "FAT32 extended BPB", "STEIN_FAT32", 420},
+    };
+    for (const auto& c : cases) {
+        CAPTURE(c.fixture);
+        auto fs = probe(loadSparseFixture(c.fixture));
+        REQUIRE((fs && *fs));
+        CHECK((*fs)->info().version == c.version);
+        CHECK((*fs)->info().label == c.label);
+        CHECK((*fs)->info().clean == true);
+        CHECK_MESSAGE((*fs)->diagnostics().empty(), diagCodes(**fs));
+        CHECK((*fs)->health() == layout::Validity::Ok);
+        const auto tree = (*fs)->describe();
+        const auto* boot = tree.child("boot sector");
+        REQUIRE(boot);
+        CHECK(boot->isStruct);
+        CHECK(boot->absOffset == 0);
+        CHECK(boot->size == 512);
+        const auto* bpb = boot->child("BPB");
+        REQUIRE(bpb);
+        CHECK(bpb->size == 36);
+        CHECK(bpb->child("bytes_per_sector")->value == "512");
+        CHECK(bpb->child("media")->pretty == "fixed disk");
+        CHECK(bpb->child("media")->validity == layout::Validity::Ok);
+        CHECK(bpb->child("num_fats")->value == "2");
+        const auto* ebpb = boot->child(c.ebpb);
+        REQUIRE(ebpb);
+        CHECK(ebpb->absOffset == 36);
+        CHECK(ebpb->child("volume_label")->value == c.label);
+        CHECK(ebpb->child("fs_type")->value == c.version);
+        CHECK(ebpb->child("boot_signature")->pretty == "extended fields present");
+        CHECK(ebpb->child("reserved1")->pretty == "none");
+        const auto* code = boot->child("boot_code");
+        REQUIRE(code);
+        CHECK(code->absOffset == 36 + ebpb->size);
+        CHECK(code->size == c.codeBytes);
+        const auto* sig = boot->child("boot_signature");
+        REQUIRE(sig);
+        CHECK(sig->absOffset == 510);
+        CHECK(sig->size == 2);
+        CHECK(sig->value == "43605");   // 0xAA55
+        CHECK(sig->validity == layout::Validity::Ok);
+        // The children tile the sector with no gap or overlap.
+        std::uint64_t end = 0;
+        for (const auto& child : boot->children) {
+            CHECK(child.absOffset == end);
+            end = child.endOffset();
+        }
+        CHECK(end == 512);
+        const auto* entry = tree.child("root directory volume label entry");
+        REQUIRE(entry);
+        CHECK(entry->child("name")->value == c.label);
+        CHECK(entry->child("attr")->pretty == "volume_id");
+    }
+    // FAT32 adds FSInfo and the two backup copies, all in step on a fresh volume; the free count
+    // gives the used space (one cluster: the root directory).
+    auto fs = probe(loadSparseFixture("fs/fat32.sparse"));
+    REQUIRE((fs && *fs));
+    const auto tree = (*fs)->describe();
+    REQUIRE(tree.child("FSInfo sector"));
+    CHECK(tree.child("FSInfo sector")->child("free_count")->value == "129021");
+    CHECK(tree.child("FSInfo sector")->child("lead_signature")->validity == layout::Validity::Ok);
+    REQUIRE((*fs)->info().usedBytes.has_value());
+    CHECK(*(*fs)->info().usedBytes == 512);
+    const auto* backup = tree.child("backup boot sector");
+    REQUIRE(backup);
+    CHECK(backup->absOffset == 6 * 512);
+    CHECK(backup->size == 512);
+    REQUIRE(backup->child("FAT32 extended BPB"));
+    CHECK(backup->child("FAT32 extended BPB")->child("volume_label")->value == "STEIN_FAT32");
+    CHECK(backup->child("boot_signature")->value == "43605");
+    REQUIRE(tree.child("backup FSInfo sector"));
+    CHECK(tree.child("backup FSInfo sector")->absOffset == 7 * 512);
+    CHECK(tree.child("boot sector")->child("FAT32 extended BPB")->child("ext_flags")->pretty == "none");
+}
+
+TEST_CASE("FAT: FAT12/16/32 cluster-count thresholds (4085 / 65525) are one function shared by detector and reader") {
+    using stein::fs::detail::fatActiveIndex;
+    using stein::fs::detail::fatBitsFor;
+    CHECK(fatBitsFor(false, 1) == 12);
+    CHECK(fatBitsFor(false, 4084) == 12);
+    CHECK(fatBitsFor(false, 4085) == 16);
+    CHECK(fatBitsFor(false, 65524) == 16);
+    CHECK(fatBitsFor(false, 65525) == 16);   // a 16-bit layout cannot turn into FAT32; detectFat reports the overflow
+    CHECK(fatBitsFor(true, 100) == 32);
+    CHECK(fatBitsFor(true, 65524) == 32);
+    CHECK(fatBitsFor(true, 65525) == 32);
+    CHECK(fatActiveIndex(0x0000, 2) == 0);
+    CHECK(fatActiveIndex(0x0001, 2) == 0);   // mirroring on: the index means nothing
+    CHECK(fatActiveIndex(0x0081, 2) == 1);
+    CHECK(fatActiveIndex(0x0080, 2) == 0);
+    CHECK(fatActiveIndex(0x0085, 2) == 0);   // out of range: FAT 0
+    // The fixtures sit on each side: 2036 clusters, 16343 clusters, FAT32 layout with 129022.
+    auto f12 = probe(loadSparseFixture("fs/fat12.sparse"));
+    auto f16 = probe(loadSparseFixture("fs/fat16.sparse"));
+    auto f32 = probe(loadSparseFixture("fs/fat32.sparse"));
+    REQUIRE((f12 && *f12 && f16 && *f16 && f32 && *f32));
+    CHECK((*f12)->type() == FsType::Fat12);
+    CHECK((*f16)->type() == FsType::Fat16);
+    CHECK((*f32)->type() == FsType::Fat32);
+    CHECK(*(*f12)->info().blockSize == 2048);
+    CHECK(*(*f32)->info().blockSize == 512);
+    CHECK(diagOf(**f32, "fat.small_fat32") == nullptr);
+    // A FAT32 layout with few clusters is still FAT32 (what mkfs.vfat -F 32 makes on small media).
+    {
+        auto dev = loadSparseFixture("fs/fat32.sparse");
+        patchFat32Boot(*dev, 32, {0x00, 0x40, 0x00, 0x00});   // total_sectors32 = 16384
+        auto fs = probe(dev);
+        REQUIRE((fs && *fs));
+        CHECK((*fs)->type() == FsType::Fat32);
+        const auto* d = diagOf(**fs, "fat.small_fat32");
+        REQUIRE(d);
+        CHECK(d->severity == layout::Validity::Info);
+    }
+    // A 16-bit layout claiming 65525 or more clusters stays FAT16 and is called out as impossible.
+    {
+        auto dev = loadSparseFixture("fs/fat16.sparse");
+        patchLe16(*dev, 19, 0);
+        patchLe32(*dev, 32, 164 + 4 * 65600);
+        auto fs = probe(dev);
+        REQUIRE((fs && *fs));
+        CHECK((*fs)->type() == FsType::Fat16);
+        const auto* d = diagOf(**fs, "fat.bpb_geometry");
+        REQUIRE(d);
+        CHECK(d->severity == layout::Validity::Error);
+        CHECK(d->message.find("FAT16 cannot address 65600 clusters") != std::string::npos);
+        CHECK(diagOf(**fs, "fat.truncated") != nullptr);
+        CHECK(diagOf(**fs, "fat.fat_too_small") != nullptr);
+    }
+}
+
+TEST_CASE("FAT32: backup boot sector and backup FSInfo drift are repairable; repair restores the pristine bytes") {
+    auto dev = loadSparseFixture("fs/fat32.sparse");
+    auto pristine = loadSparseFixture("fs/fat32.sparse");
+    REQUIRE((dev && pristine));
+    // A label edited in the backup copy only.
+    const std::string label = "DRIFTED    ";
+    REQUIRE(dev->writeAt(6 * 512 + 36 + 0x23, std::as_bytes(std::span(label.data(), 11))));
+    auto drifted = probe(dev);
+    REQUIRE((drifted && *drifted));
+    const auto* d = diagOf(**drifted, "fat.backup_boot_mismatch");
+    REQUIRE(d);
+    CHECK(d->repairable);
+    CHECK(d->severity == layout::Validity::Warning);
+    CHECK((*drifted)->info().label == "STEIN_FAT32");
+    CHECK((*drifted)->describe().child("backup boot sector")->child("FAT32 extended BPB")->child("volume_label")->value == "DRIFTED");
+    REQUIRE((*drifted)->repair(*dev));
+    CHECK(sameBytes(*dev, *pristine, "backup boot sector rewritten"));
+    auto healed = probe(dev);
+    REQUIRE((healed && *healed));
+    CHECK_MESSAGE((*healed)->diagnostics().empty(), diagCodes(**healed));
+
+    // A stale free count in the backup FSInfo: the live one is what counts, the copy is synced.
+    patchLe32(*dev, 7 * 512 + 0x1E8, 4242);
+    auto stale = probe(dev);
+    REQUIRE((stale && *stale));
+    d = diagOf(**stale, "fat.backup_fsinfo_mismatch");
+    REQUIRE(d);
+    CHECK(d->repairable);
+    CHECK(d->severity == layout::Validity::Info);
+    CHECK(*(*stale)->info().usedBytes == 512);
+    CHECK((*stale)->describe().child("backup FSInfo sector")->child("free_count")->value == "4242");
+    REQUIRE((*stale)->repair(*dev));
+    CHECK(sameBytes(*dev, *pristine, "backup FSInfo rewritten"));
+
+    // Both at once, then nothing: repair() on a clean volume is a no-op that succeeds.
+    patchBytes(*dev, 6 * 512 + 0x1FE, {0x00, 0x00});
+    patchLe32(*dev, 7 * 512, 0);
+    auto both = probe(dev);
+    REQUIRE((both && *both));
+    CHECK(diagOf(**both, "fat.backup_boot_mismatch"));
+    CHECK(diagOf(**both, "fat.backup_fsinfo_mismatch"));
+    CHECK((*both)->describe().child("backup boot sector")->child("boot_signature")->validity == layout::Validity::Error);
+    REQUIRE((*both)->repair(*dev));
+    CHECK(sameBytes(*dev, *pristine, "both copies rewritten"));
+    auto clean = probe(dev);
+    REQUIRE((clean && *clean));
+    REQUIRE((*clean)->repair(*dev));
+    CHECK(sameBytes(*dev, *pristine, "no-op repair"));
+}
+
+TEST_CASE("FAT32: mirrored FAT copies are compared and repaired from the active one; ext_flags picks the live FAT when mirroring is off") {
+    auto dev = loadSparseFixture("fs/fat32.sparse");
+    auto pristine = loadSparseFixture("fs/fat32.sparse");
+    REQUIRE((dev && pristine));
+    const ByteCount fat0 = 32 * 512, fat1 = (32 + 1009) * 512;
+    // One entry of FAT 1 changed.
+    patchLe32(*dev, fat1 + 8, 0x0ABCDEF0);
+    auto differ = probe(dev);
+    REQUIRE((differ && *differ));
+    const auto* d = diagOf(**differ, "fat.fat_copies_differ");
+    REQUIRE(d);
+    CHECK(d->repairable);
+    CHECK(d->severity == layout::Validity::Warning);
+    CHECK(d->message.find("FAT 1 differs from FAT 0") != std::string::npos);
+    CHECK(d->message.find("FAT byte 8") != std::string::npos);
+    REQUIRE((*differ)->repair(*dev));
+    CHECK(sameBytes(*dev, *pristine, "FAT 1 rewritten from FAT 0"));
+    auto healed = probe(dev);
+    REQUIRE((healed && *healed));
+    CHECK_MESSAGE((*healed)->diagnostics().empty(), diagCodes(**healed));
+
+    // Mirroring off, FAT 0 active: FAT 1 is stale by design, so it is neither compared nor rewritten.
+    patchLe32(*dev, fat1 + 8, 0x0ABCDEF0);
+    patchFat32Boot(*dev, 36 + 4, {0x80, 0x00});
+    auto solo = probe(dev);
+    REQUIRE((solo && *solo));
+    CHECK(diagOf(**solo, "fat.fat_copies_differ") == nullptr);
+    CHECK_MESSAGE((*solo)->diagnostics().empty(), diagCodes(**solo));
+    CHECK((*solo)->describe().child("boot sector")->child("FAT32 extended BPB")->child("ext_flags")->pretty == "no_fat_mirroring");
+    REQUIRE((*solo)->repair(*dev));
+    CHECK(readLe32(*dev, fat1 + 8) == 0x0ABCDEF0);
+
+    // An active index past the last FAT.
+    patchFat32Boot(*dev, 36 + 4, {0x85, 0x00});
+    auto out = probe(dev);
+    REQUIRE((out && *out));
+    d = diagOf(**out, "fat.active_fat_out_of_range");
+    REQUIRE(d);
+    CHECK(d->severity == layout::Validity::Error);
+    CHECK(d->message.find("FAT 5") != std::string::npos);
+    CHECK((*out)->describe().child("boot sector")->child("FAT32 extended BPB")->child("ext_flags")->pretty == "active_fat_bit0|active_fat_bit2|no_fat_mirroring");
+
+    // A FAT past the 64 MiB comparison window is said to be only partly compared.
+    REQUIRE(dev->writeAt(0, pristine->bytes()));
+    patchFat32Boot(*dev, 36, {0x08, 0x00, 0x02, 0x00});   // sectors_per_fat32 = 131080 (64 MiB + 4 KiB)
+    patchFat32Boot(*dev, 32, {0xFF, 0xFF, 0xFF, 0x7F});   // total_sectors32: enough clusters to need it
+    auto huge = probe(dev);
+    REQUIRE((huge && *huge));
+    d = diagOf(**huge, "fat.fat_copies_not_compared");
+    REQUIRE(d);
+    CHECK(d->severity == layout::Validity::Info);
+    CHECK(diagOf(**huge, "fat.truncated") != nullptr);
+
+    // The reader and the allocation map follow the live FAT: make FAT 1 live and wreck FAT 0.
+    auto full = loadSparseFixture("fatfs/fat32.sparse");
+    REQUIRE(full);
+    const auto oracle = loadExtOracle("fat32", "fatfs");
+    patchFat32Boot(*full, 36 + 4, {0x81, 0x00});
+    REQUIRE(full->zeroRange(fat0, 4096));
+    auto live = probe(full);
+    REQUIRE((live && *live));
+    CHECK(diagOf(**live, "fat.fat_copies_differ") == nullptr);
+    CHECK(diagOf(**live, "fat.media_mismatch") == nullptr);   // FAT[0] is read from the live copy
+    auto reader = (*live)->openReader();
+    REQUIRE(reader);
+    auto big = fs::resolvePath(**reader, "big.bin");
+    REQUIRE(big);
+    CHECK((*reader)->stat(*big)->allocatedBytes >= 150 * 1024);
+    auto data = fs::readAll(**reader, *big);
+    REQUIRE(data);
+    CHECK(Hasher::hex(Hasher::digest(HashAlgorithm::Sha256, *data)) == oracle.sha.at("big.bin"));
+    auto map = (*live)->allocationMap();
+    REQUIRE(map);
+    CHECK(map->usedBlocks() > 300);
+    // Through the wrecked FAT 0 the same volume falls apart: FAT[0] no longer repeats the media byte
+    // and the chains are gone.
+    patchFat32Boot(*full, 36 + 4, {0x80, 0x00});
+    auto dead = probe(full);
+    REQUIRE((dead && *dead));
+    CHECK(diagOf(**dead, "fat.media_mismatch") != nullptr);
+    auto reader2 = (*dead)->openReader();
+    REQUIRE(reader2);
+    auto big2 = fs::resolvePath(**reader2, "big.bin");
+    CHECK((!big2 || (*reader2)->stat(*big2)->allocatedBytes < 150 * 1024));
+}
+
+TEST_CASE("FAT: FAT[0] media byte, FAT[1] clean-shutdown and hard-error bits, boot sector state flag: one clean answer") {
+    const ByteCount fat0 = 4 * 512, fat1 = 68 * 512;   // fs/fat16.sparse
+    {
+        auto dev = loadSparseFixture("fs/fat16.sparse");
+        patchBytes(*dev, fat0, {0xF0});
+        patchBytes(*dev, fat1, {0xF0});
+        auto fs = probe(dev);
+        REQUIRE((fs && *fs));
+        const auto* d = diagOf(**fs, "fat.media_mismatch");
+        REQUIRE(d);
+        CHECK(d->severity == layout::Validity::Warning);
+        CHECK(d->message.find("0xF0") != std::string::npos);
+        CHECK(d->message.find("0xF8") != std::string::npos);
+        CHECK((*fs)->info().clean == true);
+    }
+    {
+        auto dev = loadSparseFixture("fs/fat16.sparse");
+        patchLe16(*dev, fat0 + 2, 0x7FFF);   // clean-shutdown bit cleared
+        patchLe16(*dev, fat1 + 2, 0x7FFF);
+        auto fs = probe(dev);
+        REQUIRE((fs && *fs));
+        const auto* d = diagOf(**fs, "fat.dirty");
+        REQUIRE(d);
+        CHECK(d->severity == layout::Validity::Warning);
+        CHECK(d->message.find("FAT[1] clean-shutdown bit") != std::string::npos);
+        CHECK(d->message.find("boot sector") == std::string::npos);
+        CHECK((*fs)->info().clean == false);
+        CHECK(diagOf(**fs, "fat.hard_error") == nullptr);
+        auto map = (*fs)->allocationMap();
+        REQUIRE_FALSE(map);
+        CHECK(map.error().category() == ErrorCategory::Busy);
+    }
+    {
+        auto dev = loadSparseFixture("fs/fat16.sparse");
+        patchLe16(*dev, fat0 + 2, 0xBFFF);   // hard-error bit cleared
+        patchLe16(*dev, fat1 + 2, 0xBFFF);
+        auto fs = probe(dev);
+        REQUIRE((fs && *fs));
+        const auto* d = diagOf(**fs, "fat.hard_error");
+        REQUIRE(d);
+        CHECK(d->severity == layout::Validity::Warning);
+        CHECK(diagOf(**fs, "fat.dirty") == nullptr);
+        CHECK((*fs)->info().clean == true);
+    }
+    {
+        auto dev = loadSparseFixture("fs/fat16.sparse");
+        patchBytes(*dev, 37, {0x01});   // the NT / Linux state flag
+        auto fs = probe(dev);
+        REQUIRE((fs && *fs));
+        const auto* d = diagOf(**fs, "fat.dirty");
+        REQUIRE(d);
+        CHECK(d->message.find("boot sector state flag") != std::string::npos);
+        CHECK(d->message.find(" and ") == std::string::npos);
+        CHECK((*fs)->info().clean == false);
+        CHECK((*fs)->describe().child("boot sector")->child("FAT12/16 extended BPB")->child("reserved1")->pretty == "dirty");
+        // Both flags: still one diagnostic, naming both.
+        patchLe16(*dev, fat0 + 2, 0x7FFF);
+        patchLe16(*dev, fat1 + 2, 0x7FFF);
+        auto fs2 = probe(dev);
+        REQUIRE((fs2 && *fs2));
+        CHECK(diagCount(**fs2, "fat.dirty") == 1);
+        CHECK(diagOf(**fs2, "fat.dirty")->message.find("boot sector state flag and FAT[1] clean-shutdown bit") != std::string::npos);
+    }
+    // FAT32: the bits sit in the high nibble of the 28-bit entry; the state flag at byte 65.
+    {
+        auto dev = loadSparseFixture("fs/fat32.sparse");
+        patchLe32(*dev, 32 * 512 + 4, 0x07FFFFFF);
+        patchLe32(*dev, (32 + 1009) * 512 + 4, 0x07FFFFFF);
+        auto fs = probe(dev);
+        REQUIRE((fs && *fs));
+        REQUIRE(diagOf(**fs, "fat.dirty"));
+        CHECK((*fs)->info().clean == false);
+        CHECK(diagOf(**fs, "fat.fat_copies_differ") == nullptr);
+        patchLe32(*dev, 32 * 512 + 4, 0x0BFFFFFF);
+        patchLe32(*dev, (32 + 1009) * 512 + 4, 0x0BFFFFFF);
+        auto fs2 = probe(dev);
+        REQUIRE((fs2 && *fs2));
+        CHECK(diagOf(**fs2, "fat.dirty") == nullptr);
+        REQUIRE(diagOf(**fs2, "fat.hard_error"));
+        patchLe32(*dev, 32 * 512 + 4, 0x0FFFFFFF);
+        patchLe32(*dev, (32 + 1009) * 512 + 4, 0x0FFFFFFF);
+        patchFat32Boot(*dev, 65, {0x01});
+        auto fs3 = probe(dev);
+        REQUIRE((fs3 && *fs3));
+        REQUIRE(diagOf(**fs3, "fat.dirty"));
+        CHECK((*fs3)->describe().child("boot sector")->child("FAT32 extended BPB")->child("reserved1")->pretty == "dirty");
+    }
+    // FAT12 has no such bits in FAT[1]: clearing it means nothing.
+    {
+        auto dev = loadSparseFixture("fs/fat12.sparse");
+        patchBytes(*dev, 512 + 1, {0x0F, 0x00});    // FAT[0] stays 0xFF8, FAT[1] becomes 0
+        patchBytes(*dev, 3584 + 1, {0x0F, 0x00});
+        auto fs = probe(dev);
+        REQUIRE((fs && *fs));
+        CHECK((*fs)->info().clean == true);
+        CHECK_MESSAGE((*fs)->diagnostics().empty(), diagCodes(**fs));
+    }
+}
+
+TEST_CASE("FAT: BPB and FSInfo sanity become diagnostics, not just field flags") {
+    // sectors_per_cluster 3 on a sector that calls itself FAT: kept as a broken FAT, described, not readable.
+    {
+        auto dev = loadSparseFixture("fs/fat16.sparse");
+        patchBytes(*dev, 13, {3});
+        auto fs = probe(dev);
+        REQUIRE((fs && *fs));
+        CHECK((*fs)->info().version == "FAT16");
+        const auto* d = diagOf(**fs, "fat.bpb_geometry");
+        REQUIRE(d);
+        CHECK(d->severity == layout::Validity::Error);
+        CHECK(d->message.find("sectors_per_cluster 3") != std::string::npos);
+        CHECK_FALSE(has((*fs)->capabilities(), Capability::Read));
+        CHECK_FALSE(has((*fs)->capabilities(), Capability::UsedBlocks));
+        CHECK((*fs)->describe().child("boot sector") != nullptr);
+        // Without the extended signature and fs_type string the same bytes are not FAT at all.
+        patchBytes(*dev, 38, {0x00});
+        patchBytes(*dev, 54, {0, 0, 0, 0, 0, 0, 0, 0});
+        auto none = probe(dev);
+        REQUIRE(none);
+        CHECK(*none == nullptr);
+    }
+    {
+        auto dev = loadSparseFixture("fs/fat16.sparse");
+        patchLe16(*dev, 11, 1000);
+        auto fs = probe(dev);
+        REQUIRE((fs && *fs));
+        const auto* d = diagOf(**fs, "fat.bpb_geometry");
+        REQUIRE(d);
+        CHECK(d->message.find("bytes_per_sector 1000") != std::string::npos);
+    }
+    {
+        auto dev = loadSparseFixture("fs/fat12.sparse");
+        patchLe16(*dev, 17, 100);   // 100 * 32 = 3200 bytes: not whole sectors
+        auto fs = probe(dev);
+        REQUIRE((fs && *fs));
+        CHECK((*fs)->type() == FsType::Fat12);
+        const auto* d = diagOf(**fs, "fat.root_entries_unaligned");
+        REQUIRE(d);
+        CHECK(d->severity == layout::Validity::Warning);
+        CHECK(diagOf(**fs, "fat.bpb_geometry") == nullptr);
+    }
+    {
+        auto dev = loadSparseFixture("fs/fat12.sparse");
+        patchLe16(*dev, 17, 0);
+        auto fs = probe(dev);
+        REQUIRE((fs && *fs));
+        const auto* d = diagOf(**fs, "fat.bpb_geometry");
+        REQUIRE(d);
+        CHECK(d->severity == layout::Validity::Error);
+        CHECK(d->message.find("root_entries is 0") != std::string::npos);
+    }
+    {
+        auto dev = loadSparseFixture("fs/fat12.sparse");
+        patchLe16(*dev, 19, 9000);   // the device holds 8192 sectors
+        auto fs = probe(dev);
+        REQUIRE((fs && *fs));
+        const auto* d = diagOf(**fs, "fat.truncated");
+        REQUIRE(d);
+        CHECK(d->severity == layout::Validity::Warning);
+        CHECK(d->message.find("9000 sectors") != std::string::npos);
+        CHECK(*(*fs)->info().totalBytes == 9000 * 512);
+    }
+    {
+        auto dev = loadSparseFixture("fs/fat12.sparse");
+        patchLe16(*dev, 22, 1);   // one sector of FAT for ~2000 clusters
+        auto fs = probe(dev);
+        REQUIRE((fs && *fs));
+        const auto* d = diagOf(**fs, "fat.fat_too_small");
+        REQUIRE(d);
+        CHECK(d->severity == layout::Validity::Error);
+        CHECK(d->message.find("each FAT has 512 bytes") != std::string::npos);
+    }
+    {
+        auto dev = loadSparseFixture("fs/fat32.sparse");
+        patchFat32Boot(*dev, 17, {0x10, 0x00});   // root_entries 16 on FAT32
+        auto fs = probe(dev);
+        REQUIRE((fs && *fs));
+        CHECK((*fs)->type() == FsType::Fat32);
+        const auto* d = diagOf(**fs, "fat.bpb_geometry");
+        REQUIRE(d);
+        CHECK(d->severity == layout::Validity::Warning);
+        CHECK(d->message.find("root_entries must be 0") != std::string::npos);
+    }
+    // FSInfo: signatures, free count, next-free hint, sector number.
+    {
+        auto dev = loadSparseFixture("fs/fat32.sparse");
+        patchLe32(*dev, 512, 0);
+        auto fs = probe(dev);
+        REQUIRE((fs && *fs));
+        const auto* d = diagOf(**fs, "fat.fsinfo_bad");
+        REQUIRE(d);
+        CHECK(d->severity == layout::Validity::Warning);
+        CHECK(d->message.find("lead") != std::string::npos);
+        CHECK_FALSE((*fs)->info().usedBytes.has_value());
+        CHECK((*fs)->describe().child("FSInfo sector")->child("lead_signature")->validity == layout::Validity::Error);
+    }
+    {
+        auto dev = loadSparseFixture("fs/fat32.sparse");
+        patchLe32(*dev, 512 + 0x1E8, 200000);
+        auto fs = probe(dev);
+        REQUIRE((fs && *fs));
+        const auto* d = diagOf(**fs, "fat.fsinfo_free_count");
+        REQUIRE(d);
+        CHECK(d->severity == layout::Validity::Warning);
+        CHECK(d->message.find("200000") != std::string::npos);
+        CHECK_FALSE((*fs)->info().usedBytes.has_value());
+    }
+    {
+        auto dev = loadSparseFixture("fs/fat32.sparse");
+        patchLe32(*dev, 512 + 0x1EC, 200000);
+        auto fs = probe(dev);
+        REQUIRE((fs && *fs));
+        const auto* d = diagOf(**fs, "fat.fsinfo_next_free");
+        REQUIRE(d);
+        CHECK(d->severity == layout::Validity::Info);
+        CHECK(*(*fs)->info().usedBytes == 512);
+    }
+    {
+        auto dev = loadSparseFixture("fs/fat32.sparse");
+        patchFat32Boot(*dev, 36 + 0x0C, {40, 0});   // fsinfo_sector 40, past the 32 reserved sectors
+        auto fs = probe(dev);
+        REQUIRE((fs && *fs));
+        const auto* d = diagOf(**fs, "fat.fsinfo_bad");
+        REQUIRE(d);
+        CHECK(d->message.find("outside") != std::string::npos);
+        CHECK((*fs)->describe().child("FSInfo sector") == nullptr);
+        CHECK((*fs)->describe().child("backup boot sector") != nullptr);
+        CHECK_FALSE((*fs)->info().usedBytes.has_value());
+        // fsinfo_sector 0 is read as 1, the way Linux does.
+        patchFat32Boot(*dev, 36 + 0x0C, {0, 0});
+        auto fs2 = probe(dev);
+        REQUIRE((fs2 && *fs2));
+        CHECK(diagOf(**fs2, "fat.fsinfo_bad") == nullptr);
+        CHECK(*(*fs2)->info().usedBytes == 512);
+    }
+}
+
+TEST_CASE("FAT: hidden_sectors is checked against the partition's start LBA when the volume is a slice") {
+    auto whole = loadSparseFixture("fs/fat12.sparse");   // 4 MiB, formatted as a whole device: hidden_sectors 0
+    REQUIRE(whole);
+    auto disk = std::make_shared<MemoryDevice>(5 * MiB, 512);
+    REQUIRE(disk->writeAt(1 * MiB, whole->bytes()));
+    auto part = SliceDevice::create(disk, Region{1 * MiB, 4 * MiB});
+    REQUIRE(part);
+    auto fs = probe(*part);
+    REQUIRE((fs && *fs));
+    CHECK((*fs)->info().label == "STEIN_FAT12");
+    const auto* d = diagOf(**fs, "fat.hidden_sectors_mismatch");
+    REQUIRE(d);
+    CHECK(d->severity == layout::Validity::Info);
+    CHECK(d->message.find("hidden_sectors is 0") != std::string::npos);
+    CHECK(d->message.find("LBA 2048") != std::string::npos);
+    // Seen through a read-only wrapper the slice's offset still counts.
+    auto ro = std::make_shared<ReadOnlyDevice>(*part);
+    auto viaRo = probe(ro);
+    REQUIRE((viaRo && *viaRo));
+    CHECK(diagOf(**viaRo, "fat.hidden_sectors_mismatch") != nullptr);
+    // The formatter that knew its partition wrote 2048.
+    patchLe32(**part, 28, 2048);
+    auto fixed = probe(*part);
+    REQUIRE((fixed && *fixed));
+    CHECK_MESSAGE((*fixed)->diagnostics().empty(), diagCodes(**fixed));
+    // A whole device has no partition start to compare with.
+    auto plain = probe(whole);
+    REQUIRE((plain && *plain));
+    CHECK(diagOf(**plain, "fat.hidden_sectors_mismatch") == nullptr);
+}
+
+TEST_CASE("exfat: geometry sanity, truncation, exact used space from the bitmap, TexFAT's second FAT") {
+    // Used space: the bitmap's set bits, not percent_in_use, on every fixture (all under 8 MiB).
+    for (const char* fixture : {"fs/exfat.sparse", "exfatfs/exfat.sparse", "exfatfs/exfat_32k.sparse"}) {
+        CAPTURE(fixture);
+        auto fs = probe(loadSparseFixture(fixture));
+        REQUIRE((fs && *fs));
+        CHECK_MESSAGE((*fs)->diagnostics().empty(), diagCodes(**fs));
+        auto map = (*fs)->allocationMap();
+        REQUIRE(map);
+        REQUIRE((*fs)->info().usedBytes.has_value());
+        CHECK(*(*fs)->info().usedBytes == map->usedBytes());
+    }
+    {
+        auto dev = loadSparseFixture("fs/exfat.sparse");
+        auto fs = probe(dev);
+        REQUIRE((fs && *fs));
+        CHECK(*(*fs)->info().usedBytes == 4 * 4096);   // percent_in_use says 0 %
+        // A bitmap entry claiming more than 8 MiB keeps the percentage (probe time stays bounded).
+        const auto tree = (*fs)->describe();
+        const auto* bitmap = descendant(tree, {"root directory", "allocation bitmap entry"});
+        REQUIRE(bitmap);
+        patchLe32(*dev, bitmap->absOffset + 24, 9 * 1024 * 1024);
+        patchLe32(*dev, bitmap->absOffset + 28, 0);
+        auto pct = probe(dev);
+        REQUIRE((pct && *pct));
+        CHECK(*(*pct)->info().usedBytes == 0);
+    }
+    // Geometry: Error where impossible, Warning where merely inconsistent.
+    auto geometryWith = [](ByteCount off, std::initializer_list<std::uint8_t> bytes, layout::Validity severity, const char* fragment) {
+        CAPTURE(fragment);
+        auto dev = loadSparseFixture("fs/exfat.sparse");
+        patchExfatBoot(*dev, off, bytes);
+        auto fs = probe(dev);
+        REQUIRE((fs && *fs));
+        CHECK(diagOf(**fs, "exfat.boot_checksum") == nullptr);   // the patch was sealed
+        bool found = false;
+        for (const auto& d : (*fs)->diagnostics())
+            if (d.code == "exfat.geometry" && d.severity == severity && d.message.find(fragment) != std::string::npos) found = true;
+        CHECK_MESSAGE(found, diagCodes(**fs));
+        return std::move(*fs);
+    };
+    geometryWith(0x50, {10, 0, 0, 0}, layout::Validity::Error, "fat_offset 10");
+    geometryWith(0x58, {0x34, 0x08, 0, 0}, layout::Validity::Error, "past the cluster heap at 2100");
+    geometryWith(0x54, {10, 0, 0, 0}, layout::Validity::Error, "fat_length 10");
+    geometryWith(0x5C, {0x20, 0x4E, 0, 0}, layout::Validity::Error, "beyond volume_length");
+    auto slack = geometryWith(0x5C, {0x98, 0x3A, 0, 0}, layout::Validity::Warning, "leaves 6976 sectors");
+    for (const auto& d : slack->diagnostics()) CHECK(d.severity <= layout::Validity::Warning);
+    geometryWith(0x60, {1, 0, 0, 0}, layout::Validity::Error, "first_cluster_of_root 1");
+    {
+        auto dev = loadSparseFixture("fs/exfat.sparse");
+        patchExfatBoot(*dev, 0x48, {0x01, 0x00, 0x02, 0x00, 0, 0, 0, 0});   // volume_length 131073 on a 131072-sector device
+        auto fs = probe(dev);
+        REQUIRE((fs && *fs));
+        const auto* d = diagOf(**fs, "exfat.truncated");
+        REQUIRE(d);
+        CHECK(d->severity == layout::Validity::Warning);
+        CHECK(diagOf(**fs, "exfat.geometry") == nullptr);
+    }
+    // TexFAT: two FATs. The fixture's second FAT area is blank, so the copies differ (not
+    // repairable: on a real TexFAT volume the two may be mid-transaction); with the first FAT
+    // copied over it they agree, and with volume_flags naming the second as live everything is
+    // read through it.
+    {
+        auto dev = loadSparseFixture("exfatfs/exfat.sparse");
+        const ByteCount fat1 = 2048 * 512, fatBytes = 128 * 512;
+        patchExfatBoot(*dev, 0x6E, {2});
+        auto differ = probe(dev);
+        REQUIRE((differ && *differ));
+        const auto* d = diagOf(**differ, "exfat.fat_copies_differ");
+        REQUIRE(d);
+        CHECK(d->severity == layout::Validity::Warning);
+        CHECK_FALSE(d->repairable);
+        CHECK(diagOf(**differ, "exfat.geometry") == nullptr);
+        auto first = dev->read(fat1, fatBytes);
+        REQUIRE(first);
+        REQUIRE(dev->writeAt(fat1 + fatBytes, *first));
+        auto same = probe(dev);
+        REQUIRE((same && *same));
+        CHECK(diagOf(**same, "exfat.fat_copies_differ") == nullptr);
+        auto usedThroughFirst = (*same)->allocationMap();
+        REQUIRE(usedThroughFirst);
+        patchExfatBoot(*dev, 0x6A, {0x01, 0x00});   // active FAT: the second
+        REQUIRE(dev->zeroRange(fat1, fatBytes));      // the first is now stale by design
+        auto second = probe(dev);
+        REQUIRE((second && *second));
+        CHECK(diagOf(**second, "exfat.fat_copies_differ") != nullptr);
+        CHECK(*(*second)->info().usedBytes == usedThroughFirst->usedBytes());
+        auto map = (*second)->allocationMap();
+        REQUIRE(map);
+        CHECK(map->usedBlocks() == usedThroughFirst->usedBlocks());
+        auto reader = (*second)->openReader();
+        REQUIRE_MESSAGE(reader, (reader ? std::string() : reader.error().toString()));
+        auto hello = fs::resolvePath(**reader, "hello.txt");
+        REQUIRE(hello);
+        CHECK((*reader)->stat(*hello)->size == 20);
+        auto frag = fs::resolvePath(**reader, "frag.bin");
+        REQUIRE(frag);
+        auto data = fs::readAll(**reader, *frag);
+        REQUIRE(data);
+        CHECK(Hasher::hex(Hasher::digest(HashAlgorithm::Sha256, *data)) == loadExtOracle("exfat", "exfatfs").sha.at("frag.bin"));
+    }
+}

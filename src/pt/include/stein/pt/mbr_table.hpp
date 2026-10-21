@@ -22,6 +22,10 @@ public:
     std::vector<Region> metadataRegions() const override;
     layout::Node describe() const override;
     Expected<void> write(BlockDevice& device) const override;
+    // Rewrites the EBR chain from the logicals held, after looking behind a broken link for
+    // EBR sectors the walk could no longer reach. Refuses to replace a chain it could not read
+    // with an empty one.
+    Expected<void> repair(BlockDevice& device, const RepairOptions& options) override;
     Expected<void> addPartition(const Partition& partition) override;
     Expected<void> removePartition(std::uint32_t index) override;
     Expected<void> updatePartition(const Partition& partition) override;
@@ -29,23 +33,43 @@ public:
 
     std::uint32_t diskSignature() const { return m_diskSignature; }
     void setDiskSignature(std::uint32_t s) { m_diskSignature = s; }
+    std::uint16_t copyProtected() const { return m_copyProtected; }
     const Partition* extendedPartition() const;
     // Sectors between an EBR and its logical partition's data when we place EBRs ourselves.
     static constexpr Lba kDefaultEbrGap = 2048;
+    // Upper bound on what the orphaned-EBR scan of repair() reads.
+    static constexpr ByteCount kRecoveryScanBudget = 64 * MiB;
 
 private:
+    // How the EBR walk of read() ended.
+    enum class ChainEnd : std::uint8_t {
+        None,         // no extended partition
+        Empty,        // first EBR sector is all zero: an extended partition without logicals yet
+        Terminated,   // an EBR without a link
+        Unreadable,   // I/O error on an EBR
+        Unsigned,     // an EBR without the 0xAA55 signature
+        Outside,      // a link pointing outside the extended partition or the device
+        Loop,         // a link back to a visited EBR, or more than 128 links
+    };
+    bool chainBroken() const { return m_chainEnd >= ChainEnd::Unreadable; }
+
     MbrTable() = default;
-    void addDiagnostic(layout::Validity sev, std::string code, std::string message, std::optional<Region> region = {});
+    void addDiagnostic(layout::Validity sev, std::string code, std::string message, std::optional<Region> region = {},
+                       bool repairable = false);
     void validate();
     std::vector<std::byte> serializeEntry(const Partition& p, Lba relativeTo) const;
+    std::vector<Partition> recoverLogicals(BlockDevice& device, const Partition& ext) const;
 
     Geometry m_geometry;
     std::uint32_t m_diskSignature = 0;
+    std::uint16_t m_copyProtected = 0;               // 0x1BC of LBA 0, preserved on write
     std::vector<std::byte> m_bootstrap;              // 440 bytes of LBA 0, preserved on write
     std::vector<Partition> m_partitions;             // primaries (1-4) then logicals (5+), sorted by index
     std::vector<Diagnostic> m_diagnostics;
     std::vector<std::byte> m_sector0;                // as read, for describe()
     std::vector<std::pair<Lba, std::vector<std::byte>>> m_ebrs;   // EBR sectors as read
+    ChainEnd m_chainEnd = ChainEnd::None;
+    std::optional<Lba> m_chainBreakLba;              // where the walk stopped when chainBroken()
 };
 
 } // namespace stein::pt

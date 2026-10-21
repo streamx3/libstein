@@ -2,11 +2,14 @@
 #include "stein/pt/gpt_table.hpp"
 
 #include "stein/core/crc32.hpp"
+#include "stein/core/crypto.hpp"
 #include "stein/core/strings.hpp"
 #include "stein/layout/gen/gpt.hpp"
 #include "stein/layout/gen/mbr.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <random>
 
 namespace stein::pt {
 
@@ -22,6 +25,20 @@ std::uint32_t headerCrc(std::span<const std::byte> header, std::uint32_t headerS
     std::vector<std::byte> copy(header.begin(), header.begin() + headerSize);
     gen::GptHeader::setHeaderCrc32(copy, 0);
     return Crc32::compute(copy);
+}
+
+// RFC 4122 version-4 UUID. Uuid keeps the printed byte order, so the version nibble lands in
+// byte 6 and the variant bits in byte 8 whatever GPT's mixed-endian storage does with them.
+Uuid randomUuidV4() {
+    Uuid::Bytes b{};
+    if (!crypto::randomBytes(b)) {
+        // No OS randomness: a clock-seeded generator still beats the nil GUID, which GPT reads as "unused".
+        std::mt19937_64 g(static_cast<std::uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()));
+        for (auto& x : b) x = static_cast<std::uint8_t>(g());
+    }
+    b[6] = static_cast<std::uint8_t>((b[6] & 0x0F) | 0x40);
+    b[8] = static_cast<std::uint8_t>((b[8] & 0x3F) | 0x80);
+    return Uuid(b);
 }
 
 } // namespace
@@ -241,6 +258,36 @@ Expected<std::unique_ptr<GptTable>> GptTable::read(BlockDevicePtr device) {
         t->addDiagnostic(Validity::Warning, "gpt.pmbr_missing", "no protective MBR at LBA 0", Region{0, ss}, true);
     else if (t->m_isHybridMbr)
         t->addDiagnostic(Validity::Info, "gpt.pmbr_hybrid", "hybrid MBR present (left untouched by repair)", Region{0, ss});
+    // Protective MBR shape (UEFI 2.10 §5.2.3): the 0xEE entry starts at LBA 1 and covers the
+    // whole disk, or 0xFFFFFFFF of it when the disk is larger. The other entries of a hybrid
+    // MBR mirror GPT partitions; one that does not is a stale copy that BIOS would still boot.
+    if (t->m_hasProtectiveMbr) {
+        const std::uint32_t expectCount = static_cast<std::uint32_t>(std::min<std::uint64_t>(sectors - 1, 0xFFFFFFFFull));
+        for (int i = 0; i < 4; ++i) {
+            gen::MbrEntry e(std::span<const std::byte>(t->m_mbrSector).subspan(gen::MbrSector::kEntriesOffset + static_cast<std::size_t>(i) * 16, 16));
+            const Region where{gen::MbrSector::kEntriesOffset + static_cast<ByteCount>(i) * 16, 16};
+            const std::string slot = "MBR entry " + std::to_string(i + 1);
+            if (e.type() == kProtectiveType) {
+                // gdisk shortens the 0xEE entry of a hybrid MBR on purpose (it stops before the
+                // first hybridised partition), so on a hybrid this is information, not a warning.
+                if (e.firstLba() != 1 || e.sectorCount() != expectCount)
+                    t->addDiagnostic(t->m_isHybridMbr ? Validity::Info : Validity::Warning, "gpt.pmbr_size_mismatch",
+                                     "protective " + slot + " covers LBA " + std::to_string(e.firstLba()) + " + " + std::to_string(e.sectorCount()) +
+                                         " sectors instead of LBA 1 + " + std::to_string(expectCount) +
+                                         (t->m_isHybridMbr ? " (hybrid MBR, left untouched by repair)" : ""),
+                                     where, !t->m_isHybridMbr);
+            } else if (e.type() != 0 && (primaryUsable || backupUsable)) {
+                const bool mirrored = std::any_of(t->m_partitions.begin(), t->m_partitions.end(), [&](const Partition& p) {
+                    return p.firstLba == e.firstLba() && p.sectors() == e.sectorCount();
+                });
+                if (!mirrored)
+                    t->addDiagnostic(Validity::Warning, "gpt.hybrid_entry_mismatch",
+                                     "hybrid " + slot + " (type " + toHex(e.type(), 2) + ", LBA " + std::to_string(e.firstLba()) + " + " +
+                                         std::to_string(e.sectorCount()) + " sectors) coincides with no GPT partition",
+                                     where, false);
+            }
+        }
+    }
     t->validateEntries();
     return t;
 }
@@ -283,7 +330,7 @@ std::unique_ptr<GptTable> GptTable::createEmpty(const Geometry& geometry, std::u
     t->m_alternateLba = expectedBackupLba(sectors);
     t->m_backupEntriesLba = t->m_alternateLba > arr ? t->m_alternateLba - arr : 0;
     t->m_lastUsable = t->m_backupEntriesLba > 0 ? t->m_backupEntriesLba - 1 : 0;
-    // A random-looking disk GUID from the geometry would be deterministic; callers set a real one.
+    t->m_diskGuid = randomUuidV4();   // callers may still setDiskGuid() a chosen one
     t->m_hasProtectiveMbr = true;
     return t;
 }
@@ -329,6 +376,7 @@ Expected<void> GptTable::addPartition(const Partition& in) {
     }
     if (utf16Length(p.name) > 36) return fail(ErrorCategory::InvalidArgument, "name longer than 36 UTF-16 units");
     if (auto r = validatePlacement(p, std::nullopt); !r) return r;
+    if (p.uuid.isNil()) p.uuid = randomUuidV4();   // a nil unique GUID marks the entry unused to some readers
     m_partitions.push_back(std::move(p));
     std::sort(m_partitions.begin(), m_partitions.end(), [](const Partition& a, const Partition& b) { return a.firstLba < b.firstLba; });
     return {};
@@ -347,7 +395,9 @@ Expected<void> GptTable::updatePartition(const Partition& in) {
     if (in.type.scheme != TableType::Gpt) return fail(ErrorCategory::InvalidArgument, "partition type is not a GPT type");
     if (utf16Length(in.name) > 36) return fail(ErrorCategory::InvalidArgument, "name longer than 36 UTF-16 units");
     if (auto r = validatePlacement(in, in.index); !r) return r;
-    *it = in;
+    Partition p = in;
+    if (p.uuid.isNil()) p.uuid = it->uuid.isNil() ? randomUuidV4() : it->uuid;   // an update without a GUID keeps the identity
+    *it = std::move(p);
     std::sort(m_partitions.begin(), m_partitions.end(), [](const Partition& a, const Partition& b) { return a.firstLba < b.firstLba; });
     return {};
 }
@@ -533,6 +583,8 @@ layout::Node GptTable::describe() const {
                 auto n = e.describe(gen::MbrSector::kEntriesOffset + static_cast<std::uint64_t>(i) * 16);
                 n.name = "entry " + std::to_string(i + 1);
                 if (auto* t = n.child("type")) t->pretty = types::name(PartitionType::mbr(e.type()));
+                for (const auto& d : m_diagnostics)   // PMBR / hybrid entry diagnostics name this entry's bytes
+                    if (d.region && *d.region == Region{n.absOffset, n.size}) n.flag(d.severity, d.message);
                 entries->addChild(std::move(n));
             }
         }

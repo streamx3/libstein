@@ -6,13 +6,13 @@
 //   stein table   <image>                 partition table details
 //   stein inspect <image> [--doc]         hexinator-style tree of every metadata structure
 //   stein verify  <image>                 exit 0 if healthy, 1 on warnings, 2 on errors
-//   stein repair  <image> [--dry-run]     fix repairable problems (GPT: rebuild/relocate copies; filesystems: checksums, backup copies)
+//   stein repair  <image> [--dry-run]     fix repairable problems (GPT: rebuild/relocate copies; MBR: relink the EBR chain; filesystems: checksums, backup copies)
 //   stein pt dump <image> <piece.sparse>  save the partition-table metadata alone
 //   stein pt restore <piece.sparse> <image>
 //   stein pt create|add|rm|set|wipe ...   edit the table (simulated on an overlay, applied in one pass)
 //   stein types [gpt|mbr]                 list known partition types
 //
-// <image> is a regular file or (on Linux) a raw block device such as /dev/sdb.
+// <image> is a regular file, a .sparse piece (a STEINSPARSE1 run list, opened read-only in memory) or (on Linux) a raw block device such as /dev/sdb.
 #include <functional>
 #include "stein/block/file_device.hpp"
 #include "stein/block/sparse_file.hpp"
@@ -41,6 +41,7 @@
 #include <cstdio>
 #include <thread>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -58,12 +59,14 @@ int usage() {
                "  stein table   <image>                     partition table details\n"
                "  stein inspect <image> [--doc] [--sector-size N]\n"
                "  stein verify  <image>\n"
-               "  stein repair  <image> [--dry-run]         table copies, then filesystems that can fix their own metadata (exFAT boot regions)\n"
+               "  stein repair  <image> [--dry-run]         table copies and the MBR EBR chain, then filesystems that can fix their own metadata\n"
+               "      (FAT: backup boot sector, backup FSInfo, stale FAT copies; exFAT: boot regions and their checksums)\n"
                "  stein pt dump <image> <piece.sparse>\n"
                "  stein pt restore <piece.sparse> <image>\n"
                "      pieces are encrypted when --passphrase (or $STEIN_PASSPHRASE) is given\n"
                "  stein pt create  <image> gpt|mbr|apm [--dry-run] [--force]\n"
-               "  stein pt add     <image> [--start LBA|SIZE] [--size SIZE|--end LBA] [--type CODE] [--name NAME] [--index N] [--no-wipe]\n"
+               "  stein pt add     <image> [--start LBA|SIZE] [--size SIZE|--end LBA] [--type CODE] [--name NAME] [--index N] [--no-wipe] [--logical]\n"
+               "      --logical (MBR) puts the partition inside the extended one: in its largest gap, or at --start\n"
                "  stein pt rm      <image> <index>\n"
                "  stein pt set     <image> <index> [--type CODE] [--name NAME] [--start ..] [--size ..|--end ..]\n"
                "  stein pt wipe    <image> [<index>]       zero filesystem/table signatures (whole device or one partition)\n"
@@ -84,7 +87,7 @@ int usage() {
                "  stein fs      <image> [--doc]       filesystem / container signature, label, uuid\n"
                "  stein fs dump <image> <piece.sparse> [--part N]   save the filesystem's metadata regions alone\n"
                "  stein fs restore <piece.sparse> <image>\n"
-               "  <image> may be a file, a .stein image, a split raw set (disk.img.000 ...) or a block device\n"
+               "  <image> may be a file, a .stein image, a .sparse piece (read-only), a split raw set (disk.img.000 ...) or a block device\n"
                "  stein media scan <device|file>                      read-only surface scan (unreadable sectors)\n"
                "  stein media test <device|file> [--quick N] [--keep] --force   DESTRUCTIVE capacity/fake-flash test\n"
                "  stein luks info    <image|device> [--part N]        header, cipher, key slots\n"
@@ -99,7 +102,7 @@ int usage() {
                "  stein ls  <image|device> [path] [--part N] [--lv NAME] [--volume V] [--snapshot S] [--passphrase P]   list a directory in-process\n"
                "                                 (--volume/--snapshot: an APFS container's volume by name or slot, and a snapshot by name or xid)\n"
                "  stein cat <image|device> <path> ...                                       print a file\n"
-               "  stein cp  <image|device> <path> <out> ...                                 copy a file out (ext2/3/4 so far)\n"
+               "  stein cp  <image|device> <path> <out> ...                                 copy a file or a directory tree out (any filesystem stein can read)\n"
                "  stein mount <image|device> <mountpoint> [--part N] [--lv NAME] [--passphrase P] [--allow-other]\n"
                "      read-only mount of a filesystem inside an image / LUKS / LVM (Linux: FUSE, macOS: NFS loopback, Windows: WinFsp)\n"
                "  stein serve <image|device> [--port N] [--raw] [--part N] [--lv NAME] [--passphrase P]\n"
@@ -124,6 +127,7 @@ int die(const Error& e) {
 struct Args {
     std::vector<std::string> positional;
     bool doc = false, dryRun = false, noVerify = false, force = false, noWipe = false, unlock = false, usedOnly = false, allowOther = false;
+    bool logical = false;                        // pt add --logical: inside the extended partition
     int level = 0;
     std::string compress, split, chunk, zeros;   // zeros: image restore --zeros write|gaps|skip
     bool rewriteAll = false;                     // image restore --rewrite-all: no compare-before-write
@@ -172,6 +176,7 @@ Args parse(int argc, char** argv) {
         else if (s == "--raw") a.raw = true;
         else if (s == "--no-mount") a.noMount = true;
         else if (s == "--no-wipe") a.noWipe = true;
+        else if (s == "--logical") a.logical = true;
         else if (s == "--unlock") a.unlock = true;
         else if (s == "--used-only") a.usedOnly = true;
         else if (s == "--quick" && i + 1 < argc) a.quick = static_cast<std::uint32_t>(std::stoul(argv[++i]));
@@ -250,10 +255,32 @@ Expected<KdfParams> kdfFromArgs(const Args& a) {
     return k;
 }
 
+// A STEINSPARSE1 piece (test fixture, `pt dump` / `fs dump` output) or its encrypted STEINPIECE1E form.
+bool looksLikeSparsePiece(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    char magic[12];
+    if (!in || !in.read(magic, sizeof magic)) return false;
+    return std::memcmp(magic, SparseFile::kMagic, sizeof magic) == 0 || std::memcmp(magic, SparseFile::kEncryptedMagic, sizeof magic) == 0;
+}
+
 Expected<std::shared_ptr<BlockDevice>> openImage(const std::string& path, bool writable, std::uint32_t ss) {
     // A .stein image opens as a (read-only) device like any disk.
     std::error_code ec;
     if (platform::isDevicePath(path)) return platform::openAny(path, writable ? platform::OpenMode::ReadWrite : platform::OpenMode::ReadOnly, ss);
+    // A sparse piece is a list of byte runs, not a disk: it opens as the in-memory device it
+    // describes (its own size and sector size), and only read-only, since writes would land in
+    // memory and vanish. To edit one, restore it onto a raw file first.
+    if (std::filesystem::is_regular_file(path, ec) && looksLikeSparsePiece(path)) {
+        if (writable)
+            return fail(ErrorCategory::Permission, path + " is a sparse piece (byte runs, not a disk); stein opens those read-only. "
+                                                   "Restore it onto a raw file first: stein pt restore <piece> <file>");
+        auto piece = SparseFile::read(path, g_passphrase);
+        if (!piece) return fail(piece.error());
+        auto mem = std::make_shared<MemoryDevice>(piece->totalSize, piece->sectorSize);
+        if (auto r = SparseFile::apply(*piece, *mem); !r) return fail(r.error());
+        mem->setReadOnly(true);
+        return std::shared_ptr<BlockDevice>(std::move(mem));
+    }
     if (!writable && std::filesystem::is_regular_file(path, ec) && image::SteinReader::looksLikeStein(path)) return image::openImage(path, g_passphrase);
     // qcow2 / VHD / VHDX / VMDK / VDI containers open read-only as the disk they describe.
     if (std::filesystem::is_regular_file(path, ec)) {
@@ -850,13 +877,31 @@ int cmdPtEdit(const Args& a) {
         pt::Partition p;
         p.index = a.index.empty() ? 0 : static_cast<std::uint32_t>(std::stoul(a.index));
         p.name = a.name;
+        p.isLogical = a.logical;
         auto type = parseType(table.type(), a.type);
         if (!type) return die(type.error());
         p.type = *type;
         // Default placement: the largest free region, start aligned to 1 MiB.
         const SectorCount align = std::max<SectorCount>(1, (1 * MiB) / ss);
         auto free = table.freeRegions(align);
-        if (free.empty() && a.start.empty()) return die(Error(ErrorCategory::OutOfRange, "no free space in the table"));
+        if (a.logical) {
+            // Only the extended partition's interior is a candidate. freeRegions() treats the
+            // container as free space, so its gaps may reach past the container's ends: clip them.
+            if (table.type() != pt::TableType::Mbr) return die(Error(ErrorCategory::InvalidArgument, "--logical needs an MBR table"));
+            const pt::Partition* ext = nullptr;
+            for (const auto& q : table.partitions())
+                if (q.isExtended) ext = &q;
+            if (!ext) return die(Error(ErrorCategory::NotFound, "no extended partition to hold a logical one (add it first: --type 05 or 0f)"));
+            std::vector<pt::FreeRegion> inside;
+            for (auto f : free) {
+                f.firstLba = std::max(f.firstLba, ext->firstLba);
+                f.lastLba = std::min(f.lastLba, ext->lastLba);
+                if (f.lastLba > f.firstLba) inside.push_back(f);
+            }
+            free = std::move(inside);
+        }
+        if (free.empty() && a.start.empty())
+            return die(Error(ErrorCategory::OutOfRange, a.logical ? "no free space inside the extended partition" : "no free space in the table"));
         pt::FreeRegion target;
         for (const auto& f : free)
             if (f.sectors() > target.sectors()) target = f;
@@ -868,7 +913,13 @@ int cmdPtEdit(const Args& a) {
             for (const auto& f : free)
                 if (*s >= f.firstLba && *s <= f.lastLba) target = f;
         } else {
-            p.firstLba = ((target.firstLba + align - 1) / align) * align;
+            // A logical's gap begins with its EBR sector; the data starts on the next alignment
+            // boundary after it (fdisk's layout, and what MbrTable expects of the first logical).
+            const Lba dataStart = a.logical ? target.firstLba + 1 : target.firstLba;
+            p.firstLba = ((dataStart + align - 1) / align) * align;
+            if (p.firstLba > target.lastLba)
+                return die(Error(ErrorCategory::OutOfRange, "the largest gap " + std::string(a.logical ? "inside the extended partition " : "") +
+                                                                "is too small for an aligned partition; give --start"));
         }
         if (!a.end.empty()) {
             auto e = parseLba(a.end, ss);

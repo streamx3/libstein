@@ -73,7 +73,9 @@ Expected<std::unique_ptr<ExfatReader>> ExfatReader::open(std::shared_ptr<BlockDe
     r->m_device = std::move(device);
     r->m_bps = ByteCount{1} << bpsShift;
     r->m_clusterBytes = r->m_bps << spcShift;
-    r->m_fatOffset = ByteCount{b.fatOffset()} * r->m_bps;
+    // TexFAT (two FATs): volume_flags bit 0 names the live FAT; otherwise there is only the first.
+    const bool secondFat = b.numberOfFats() == 2 && (b.volumeFlags() & 0x1);
+    r->m_fatOffset = (ByteCount{b.fatOffset()} + (secondFat ? ByteCount{b.fatLength()} : 0)) * r->m_bps;
     r->m_fatBytes = ByteCount{b.fatLength()} * r->m_bps;
     r->m_heapOffset = ByteCount{b.clusterHeapOffset()} * r->m_bps;
     r->m_clusterCount = b.clusterCount();

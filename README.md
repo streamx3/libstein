@@ -43,11 +43,12 @@ ctest --preset debug
 ./build/debug/tools/stein/stein list                      # disks (Linux)
 ./build/debug/tools/stein/stein probe /dev/sdb            # table, partitions, filesystems
 ./build/debug/tools/stein/stein inspect /dev/sdb --doc    # every header field, annotated
-./build/debug/tools/stein/stein repair disk.img --dry-run # GPT: rebuild a lost copy; exFAT: boot region checksums and backup
+./build/debug/tools/stein/stein repair disk.img --dry-run # GPT: rebuild a lost copy, fix the PMBR; MBR: relink the EBR chain, recover lost logicals; FAT: backup boot sector, backup FSInfo, stale FAT copies; exFAT: boot regions and checksums
 ./build/debug/tools/stein/stein pt create disk.img gpt     # edits are simulated, shown, then applied
 ./build/debug/tools/stein/stein pt add disk.img --size 512M --type EF00 --name EFI --dry-run
+./build/debug/tools/stein/stein pt add disk.img --logical --type 83          # MBR: inside the extended partition (its largest gap, or --start); the EBR is placed by the library
 ./build/debug/tools/stein/stein image create /dev/sdb backup.stein --compress lz4 --used-only --passphrase ...   # encrypted, free space skipped
-./build/debug/tools/stein/stein probe backup.stein        # an image is a disk; so is vm.qcow2 / .vhdx / .vmdk / .vdi / .vhd / evidence.E01 / mac.dmg
+./build/debug/tools/stein/stein probe backup.stein        # an image is a disk; so is vm.qcow2 / .vhdx / .vmdk / .vdi / .vhd / evidence.E01 / mac.dmg; a .sparse piece (pt dump, fs dump) opens read-only
 ./build/debug/tools/stein/stein image restore backup.stein /dev/sdc
 ./build/debug/tools/stein/stein image create /dev/sdb disk.img && ./build/debug/tools/stein/stein image restore vm.qcow2 /dev/sdc   # raw (dd / GNOME Disks) in and out
 ./build/debug/tools/stein/stein image info backup.stein        # format 1.1, writer version, feature bits, completeness
@@ -56,7 +57,7 @@ ctest --preset debug
 ./build/debug/tools/stein/stein media test /dev/sdX --force    # fake-flash capacity test (destructive); `media scan` is read-only
 ./build/debug/tools/stein/stein ls backup.stein --part 2 /home              # browse ext4/NTFS/FAT/exFAT/HFS+/APFS/ISO/UDF/XFS/btrfs/squashfs/erofs inside an image, partition,
 ./build/debug/tools/stein/stein cp disk.img --passphrase ... --lv root /etc/fstab fstab   # LUKS container or LVM volume
-./build/debug/tools/stein/stein cp backup.stein --part 2 /home/alice ./alice   # whole directory trees copied out, no mount
+./build/debug/tools/stein/stein cp backup.stein --part 2 /home/alice ./alice   # a file or a whole directory tree copied out of any filesystem stein can read, no mount
 ./build/debug/tools/stein/stein ls mac.dmg --volume Data --snapshot com.apple.TimeMachine.2026-10-06-120000.local /Users   # APFS volume and snapshot
 ./build/debug/tools/stein/stein luks info /dev/sdb2 && ./build/debug/tools/stein/stein lvm list /dev/sdb3
 ./build/debug/tools/stein/stein tcrypt unlock vault.hc --passphrase ... --pim 0   # VeraCrypt/TrueCrypt: header found by trial decryption
@@ -101,8 +102,8 @@ to the OS (Linux: FUSE, Windows: WinFsp, macOS: built-in NFS loopback).
 | Filesystem | Detect, label, UUID | Used-block map | Read files | Mount | Write |
 |---|---|---|---|---|---|
 | ext2 / ext3 / ext4 | ✓ | ✓ | ✓ extents, indirect, inline data, htree, symlinks | ✓ | – |
-| FAT12 / 16 / 32 | ✓ | ✓ | ✓ long names | ✓ | – |
-| exFAT | ✓ boot regions (checksums verified, repair restores the damaged copy), OEM parameters, bitmap / up-case (table checksum) / label / GUID entries | ✓ | ✓ NoFatChain, up-case table | ✓ | – |
+| FAT12 / 16 / 32 | ✓ boot sector described whole (BPB, extended BPB, boot code, signature); BPB and FSInfo sanity, FAT[0] media byte, FAT[1] clean / hard-error bits, hidden_sectors against the partition start; FAT32 backup boot sector, backup FSInfo and mirrored FAT copies compared (64 MiB cap), repair rewrites them from the live ones | ✓ from the active FAT (ext_flags) | ✓ long names | ✓ | – |
+| exFAT | ✓ boot regions (checksums verified, repair restores the damaged copy), OEM parameters, bitmap / up-case (table checksum) / label / GUID entries; geometry and truncation checks; used space counted from the allocation bitmap (percent_in_use when the bitmap exceeds 8 MiB); TexFAT second FAT compared, not repaired | ✓ live bitmap per volume_flags | ✓ NoFatChain, up-case table, live FAT per volume_flags | ✓ | – |
 | NTFS | ✓ | ✓ | ◐ MFT, attribute lists, sparse runs, reparse links; compressed and encrypted files refused | ✓ | – |
 | HFS+ / HFSX | ✓ | ✓ | ✓ B-trees, overflow extents, hard links, case rules | ✓ | – |
 | HFS (classic, incl. wrapper) | ✓ | – | – | – | – |
@@ -122,8 +123,8 @@ to the OS (Linux: FUSE, Windows: WinFsp, macOS: built-in NFS loopback).
 
 | Table | Read and diagnose | Create / edit | Repair |
 |---|---|---|---|
-| GPT (+ protective and hybrid MBR) | ✓ CRCs, header pairs, overlaps, bounds, backup placement | ✓ byte-identical with sgdisk | ✓ rebuild either copy, fix CRCs, relocate backup, fix PMBR |
-| MBR + EBR chains | ✓ overlaps, chain loops and breaks | ✓ byte-identical with sfdisk | ◐ (EBR chain rewrite planned) |
+| GPT (+ protective and hybrid MBR) | ✓ CRCs, header pairs, overlaps, bounds, backup placement, protective MBR extent, hybrid entries checked against GPT entries | ✓ byte-identical with sgdisk; v4 GUIDs for new disks and partitions | ✓ rebuild either copy, fix CRCs, relocate backup, fix PMBR (a hybrid MBR is reported, not touched) |
+| MBR + EBR chains | ✓ overlaps, chain loops and breaks, lost logicals, links outside the extended partition, status bytes, CHS, stale slots | ✓ byte-identical with sfdisk; logicals with their EBRs | ✓ rewrite the EBR chain, recover orphaned EBRs behind a break (links, then the 1 MiB and 63-sector grids, at most 64 MiB read), normalise status / CHS / stale entries; refuses to write an empty chain |
 | Apple Partition Map | ✓ | ✓ | – |
 | BSD disklabel, Windows LDM, Sun/SGI/Amiga/Atari/PC98 | – (planned) | – | – |
 

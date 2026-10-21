@@ -99,22 +99,15 @@ Expected<std::vector<std::unique_ptr<Job>>> CreateTable::plan(const probe::Node&
     std::vector<std::unique_ptr<Job>> jobs;
     // Remove whatever claims the device today (old table copies, whole-device filesystem).
     for (const auto& r : signatureRegions(topology)) jobs.push_back(std::make_unique<ZeroRegionJob>(r, "old signatures"));
+    // createEmpty() already draws a random disk GUID (GPT) or disk signature (MBR).
     auto table = pt::PartitionTable::createEmpty(m_type, topology.device->geometry());
     if (!table) return fail(table.error());
-    if (auto* gpt = dynamic_cast<pt::GptTable*>(table->get())) {
-        // Fresh disk GUID.
-        std::array<std::uint8_t, 16> b{};
-        for (auto& x : b) x = static_cast<std::uint8_t>(std::rand() & 0xFF);
-        b[6] = static_cast<std::uint8_t>((b[6] & 0x0F) | 0x40);
-        b[8] = static_cast<std::uint8_t>((b[8] & 0x3F) | 0x80);
-        gpt->setDiskGuid(Uuid(b));
-    }
     jobs.push_back(std::make_unique<WriteTableJob>(std::move(*table)));
     return jobs;
 }
 
 std::string AddPartition::description() const {
-    return "Add " + partitionLabel(m_partition) + ": " + pt::types::name(m_partition.type) + ", sectors " + std::to_string(m_partition.firstLba) + ".." +
+    return "Add " + std::string(m_partition.isLogical ? "logical " : "") + partitionLabel(m_partition) + ": " + pt::types::name(m_partition.type) + ", sectors " + std::to_string(m_partition.firstLba) + ".." +
            std::to_string(m_partition.lastLba);
 }
 

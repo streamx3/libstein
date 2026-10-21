@@ -7,14 +7,68 @@
 #include "stein/fs/fat_reader.hpp"
 #include "stein/layout/gen/fat.hpp"
 
+#include <bit>
+
 namespace stein::fs::detail {
 
 namespace gen = layout::gen;
 using layout::Validity;
 
+// The generated structs tile the 512-byte boot sector; describeFatBootSector() relies on it.
+static_assert(gen::FatBpb::kSize + gen::Fat16Ebpb::kSize + gen::Fat16BootTail::kSize == 512);
+static_assert(gen::FatBpb::kSize + gen::Fat32Ebpb::kSize + gen::Fat32BootTail::kSize == 512);
+
 namespace {
 
 bool isPow2(std::uint32_t v) { return v && (v & (v - 1)) == 0; }
+
+// "3 MiB", "512 KiB", "67108864 bytes": for messages, whole units only.
+std::string humanBytes(ByteCount n) {
+    if (n >= GiB && n % GiB == 0) return std::to_string(n / GiB) + " GiB";
+    if (n >= MiB && n % MiB == 0) return std::to_string(n / MiB) + " MiB";
+    if (n >= KiB && n % KiB == 0) return std::to_string(n / KiB) + " KiB";
+    return std::to_string(n) + " bytes";
+}
+
+// FAT copies are compared this far at most: 64 MiB of FAT32 entries is 16 Mi clusters, a
+// 64 GiB volume at 4 KiB per cluster. Beyond that a probe would read for seconds.
+constexpr ByteCount kFatCompareLimit = 64 * MiB;
+constexpr ByteCount kFatChunk = 1 * MiB;
+// An allocation bitmap this size (64 Mi clusters) is counted bit by bit at probe time.
+constexpr ByteCount kExfatBitmapCountLimit = 8 * MiB;
+
+// Byte offset of the first difference between [a, a+length) and [b, b+length), read in
+// chunks; nullopt when equal. A read error ends the comparison (a truncated device has
+// already been reported as such).
+Expected<std::optional<ByteCount>> firstDifference(BlockDevice& dev, ByteCount a, ByteCount b, ByteCount length) {
+    for (ByteCount done = 0; done < length; done += kFatChunk) {
+        const ByteCount n = std::min(kFatChunk, length - done);
+        auto x = dev.read(a + done, n);
+        if (!x) return fail(x.error());
+        auto y = dev.read(b + done, n);
+        if (!y) return fail(y.error());
+        const auto [ix, iy] = std::mismatch(x->begin(), x->end(), y->begin());
+        if (ix != x->end()) return std::optional<ByteCount>(done + static_cast<ByteCount>(ix - x->begin()));
+    }
+    return std::optional<ByteCount>();
+}
+
+// Make [to, to+length) equal to [from, from+length), writing only the sectors that differ.
+Expected<void> copyChangedSectors(BlockDevice& dev, ByteCount from, ByteCount to, ByteCount length, ByteCount sector) {
+    for (ByteCount done = 0; done < length; done += kFatChunk) {
+        const ByteCount n = std::min(kFatChunk, length - done);
+        auto src = dev.read(from + done, n);
+        if (!src) return fail(src.error());
+        auto dst = dev.read(to + done, n);
+        if (!dst) return fail(dst.error());
+        for (ByteCount s = 0; s < n; s += sector) {
+            const ByteCount len = std::min(sector, n - s);
+            if (std::equal(src->begin() + s, src->begin() + s + len, dst->begin() + s)) continue;
+            if (auto w = dev.writeAt(to + done + s, std::span<const std::byte>(*src).subspan(s, len)); !w) return w;
+        }
+    }
+    return {};
+}
 
 // Scan a directory region for the volume label entry (attribute 0x08, not deleted, not LFN);
 // returns its offset inside the region.
@@ -30,9 +84,93 @@ std::optional<std::size_t> fatDirLabelAt(std::span<const std::byte> dir) {
     return std::nullopt;
 }
 
+// Bytes of FAT that entries 0..clusters+1 occupy.
+ByteCount fatBytesNeeded(int bits, std::uint64_t clusters) {
+    const std::uint64_t entries = clusters + 2;
+    if (bits == 12) return (entries * 3 + 1) / 2;
+    return entries * static_cast<std::uint64_t>(bits / 8);
+}
+
+// The partition's start LBA when `dev` is a slice of a larger device, looked through wrappers
+// that only view their parent whole (extent {0, parent size}). Nothing for a whole device.
+std::optional<std::uint64_t> partitionStartLba(const BlockDevice& dev) {
+    const BlockDevice* d = &dev;
+    std::shared_ptr<BlockDevice> keep;
+    for (int hops = 0; hops < 8; ++hops) {
+        const auto ext = d->extentsOnParent();
+        auto parent = d->parent();
+        if (ext.size() != 1 || !parent) return std::nullopt;
+        if (ext.front().offset == 0 && ext.front().length == parent->size()) {
+            keep = parent;
+            d = keep.get();
+            continue;
+        }
+        return ext.front().offset / dev.sectorSize();
+    }
+    return std::nullopt;
+}
+
+// The boot sector as one node spanning all 512 bytes: the common BPB, the extended BPB of the
+// FAT type, then the boot code and the 0xAA55 signature directly under the sector (the shape
+// exFAT's boot sector has). The FAT32 backup copy goes through the same function.
+layout::Node describeFatBootSector(std::span<const std::byte> s, ByteCount base, bool fat32Layout, const char* title) {
+    layout::Node sector;
+    sector.name = title;
+    sector.isStruct = true;
+    sector.absOffset = base;
+    sector.size = 512;
+    auto bpb = gen::FatBpb(s).describe(base);
+    bpb.name = "BPB";
+    sector.addChild(std::move(bpb));
+    layout::Node tail;
+    if (fat32Layout) {
+        auto e = gen::Fat32Ebpb(s.subspan(36, gen::Fat32Ebpb::kSize)).describe(base + 36);
+        e.name = "FAT32 extended BPB";
+        sector.addChild(std::move(e));
+        tail = gen::Fat32BootTail(s.subspan(90, gen::Fat32BootTail::kSize)).describe(base + 90);
+    } else {
+        auto e = gen::Fat16Ebpb(s.subspan(36, gen::Fat16Ebpb::kSize)).describe(base + 36);
+        e.name = "FAT12/16 extended BPB";
+        sector.addChild(std::move(e));
+        tail = gen::Fat16BootTail(s.subspan(62, gen::Fat16BootTail::kSize)).describe(base + 62);
+    }
+    for (auto& c : tail.children) sector.addChild(std::move(c));
+    return sector;
+}
+
+// What repair() puts right on a FAT volume, all of it copies of metadata that exists elsewhere:
+// the FAT32 backup boot sector and backup FSInfo sector are rewritten from the live ones, and
+// with mirroring on every other FAT is rewritten from the active one. Only sectors that differ
+// are written; directories and file data are never touched. Unlike exFAT's VolumeFlags and
+// PercentInUse, no byte of a FAT boot sector may legitimately differ between the copies.
+struct FatRepairPlan {
+    ByteCount bps = 0;
+    std::uint32_t reserved = 0, fats = 0, fatSectors = 0, activeFat = 0;
+    bool mirroring = true;
+    std::uint32_t backupSector = 0, fsinfoSector = 0;   // 0 = no copy to keep in sync
+    ByteCount fatBytesInUse = 0;                        // entries 0..clusters+1, whole sectors
+};
+
+Expected<void> repairFat(BlockDevice& target, const FatRepairPlan& p) {
+    if (p.backupSector) {
+        if (auto r = copyChangedSectors(target, 0, ByteCount{p.backupSector} * p.bps, p.bps, p.bps); !r) return r;
+        if (p.fsinfoSector)
+            if (auto r = copyChangedSectors(target, ByteCount{p.fsinfoSector} * p.bps, ByteCount{p.backupSector + 1} * p.bps, p.bps, p.bps); !r) return r;
+    }
+    if (p.mirroring && p.fats >= 2) {
+        const ByteCount active = (ByteCount{p.reserved} + ByteCount{p.activeFat} * p.fatSectors) * p.bps;
+        for (std::uint32_t i = 0; i < p.fats; ++i) {
+            if (i == p.activeFat) continue;
+            const ByteCount other = (ByteCount{p.reserved} + ByteCount{i} * p.fatSectors) * p.bps;
+            if (auto r = copyChangedSectors(target, active, other, p.fatBytesInUse, p.bps); !r) return r;
+        }
+    }
+    return target.flush();
+}
+
 } // namespace
 
-// FAT: a cluster is used when its FAT entry is non-zero.
+// FAT: a cluster is used when its entry in the active FAT is non-zero.
 class FatAllocation final : public AllocationSource {
 public:
     std::uint32_t bps = 0, spc = 0, bits = 16;
@@ -65,11 +203,13 @@ public:
     }
 };
 
-// exFAT: the allocation bitmap file, found through the root directory (entry type 0x81).
+// exFAT: the allocation bitmap file, found through the root directory (entry type 0x81). On a
+// TexFAT volume (two FATs) there are two bitmaps and volume_flags bit 0 says which pair is live.
 class ExfatAllocation final : public AllocationSource {
 public:
     ByteCount bps = 0, cluster = 0, fatOffset = 0, heapOffset = 0;
     std::uint32_t clusterCount = 0, rootCluster = 0;
+    bool secondBitmap = false;
 
     Expected<std::uint32_t> next(BlockDevice& dev, std::uint32_t c) const {
         auto e = dev.read(fatOffset + ByteCount{c} * 4, 4);
@@ -90,9 +230,11 @@ public:
                 const auto type = std::to_integer<std::uint8_t>((*dir)[e]);
                 if (type == 0x00) break;
                 if (type == 0x81) {
+                    const bool second = (std::to_integer<std::uint8_t>((*dir)[e + 1]) & 0x01) != 0;
+                    if (second != secondBitmap && bitmapFirst) continue;   // the other pair's bitmap
                     bitmapFirst = loadLe32(dir->data() + e + 20);
                     bitmapLen = loadLe64(dir->data() + e + 24);
-                    break;
+                    if (second == secondBitmap) break;
                 }
             }
             auto n = next(dev, c);
@@ -128,47 +270,131 @@ Result detectFat(Dev dev) {
     gen::FatBpb bpb(s);
     const auto jump = std::to_integer<std::uint8_t>(s[0]);
     if (jump != 0xEB && jump != 0xE9 && jump != 0x49 /* some exotic */) return notMine("no jump");
-    const std::uint32_t bps = bpb.bytesPerSector(), spc = bpb.sectorsPerCluster(), reserved = bpb.reservedSectors(),
-                        fats = bpb.numFats();
-    if (!(bps == 512 || bps == 1024 || bps == 2048 || bps == 4096) || !isPow2(spc) || reserved == 0 || fats == 0 || fats > 2)
-        return notMine("BPB fields implausible");
     gen::Fat16Ebpb e16(s.subspan(36, gen::Fat16Ebpb::kSize));
     gen::Fat32Ebpb e32(s.subspan(36, gen::Fat32Ebpb::kSize));
+    const std::uint32_t bps = bpb.bytesPerSector(), spc = bpb.sectorsPerCluster(), reserved = bpb.reservedSectors(),
+                        fats = bpb.numFats();
+    // sectors_per_fat16 == 0 marks the FAT32 layout; the type then follows from it, else from
+    // the cluster count (fat_reader.hpp, shared with the reader).
+    const bool fat32Layout = bpb.sectorsPerFat16() == 0;
     const std::uint32_t totalSectors = bpb.totalSectors16() ? bpb.totalSectors16() : bpb.totalSectors32();
-    const std::uint32_t fatSectors = bpb.sectorsPerFat16() ? bpb.sectorsPerFat16() : e32.sectorsPerFat32();
-    if (totalSectors == 0 || fatSectors == 0) return notMine("no sector counts");
-    const std::uint32_t rootDirSectors = (bpb.rootEntries() * 32u + bps - 1) / bps;
+    const std::uint32_t fatSectors = fat32Layout ? e32.sectorsPerFat32() : bpb.sectorsPerFat16();
+
+    // Geometry the probe cannot proceed without. A boot sector that calls itself FAT (extended
+    // boot signature or fs_type string) and still gets these wrong is a broken FAT volume and is
+    // reported as one, with the sector described; anything else is simply not FAT.
+    std::vector<std::string> fatal;
+    if (!(bps == 512 || bps == 1024 || bps == 2048 || bps == 4096)) fatal.push_back("bytes_per_sector " + std::to_string(bps) + " is not 512, 1024, 2048 or 4096");
+    if (!isPow2(spc) || spc > 128) fatal.push_back("sectors_per_cluster " + std::to_string(spc) + " is not a power of two up to 128");
+    if (reserved == 0) fatal.push_back("reserved_sectors is 0");
+    if (fats == 0) fatal.push_back("num_fats is 0");
+    if (totalSectors == 0) fatal.push_back("total sectors is 0");
+    if (fatSectors == 0) fatal.push_back("sectors per FAT is 0");
+    const std::uint32_t rootDirSectors = bps ? (bpb.rootEntries() * 32u + bps - 1) / bps : 0;
     const std::uint64_t dataStart = ByteCount{reserved} + ByteCount{fats} * fatSectors + rootDirSectors;
-    if (dataStart >= totalSectors) return notMine("data area outside volume");
-    const std::uint64_t clusters = (totalSectors - dataStart) / spc;
-    const bool isFat32 = bpb.sectorsPerFat16() == 0 && bpb.rootEntries() == 0;
+    if (fatal.empty() && dataStart >= totalSectors)
+        fatal.push_back("reserved area, FATs and root directory take " + std::to_string(dataStart) + " of " + std::to_string(totalSectors) + " sectors: no data area");
+    const auto extended = [](std::uint8_t sig) { return sig == 0x29 || sig == 0x28; };
+    const auto saysFat = [](const std::string& fsType) { return fsType.rfind("FAT", 0) == 0; };
+    const bool callsItselfFat = fat32Layout ? (extended(e32.bootSignature()) || saysFat(e32.fsType()))
+                                            : (extended(e16.bootSignature()) || saysFat(e16.fsType()));
+    if (!fatal.empty() && !callsItselfFat) return notMine("BPB fields implausible");
+    if (fats > 2 && !callsItselfFat) return notMine("more than two FATs");
 
     auto fs = std::make_unique<SimpleFileSystem>(dev);
     auto& info = fs->mutableInfo();
-    if (isFat32) info.type = FsType::Fat32;
-    else if (clusters < 4085) info.type = FsType::Fat12;
-    else if (clusters < 65525) info.type = FsType::Fat16;
-    else info.type = FsType::Fat32;
-    if (isFat32 && clusters < 65525) fs->diag(Validity::Info, "fat.small_fat32", "FAT32 layout with fewer than 65525 clusters");
+    if (!fatal.empty()) {
+        // Enough to name the type and show the sector; there are no clusters to count and
+        // nothing the reader could trust.
+        info.type = fat32Layout ? FsType::Fat32 : e16.fsType() == "FAT12" ? FsType::Fat12 : FsType::Fat16;
+        info.version = std::string(displayName(info.type));
+        std::string why;
+        for (const auto& f : fatal) why += (why.empty() ? "" : "; ") + f;
+        fs->diag(Validity::Error, "fat.bpb_geometry", why);
+        fs->setTreeName(info.version + " filesystem");
+        fs->addNode(describeFatBootSector(s, 0, fat32Layout, "boot sector"));
+        fs->addRegion(Region{0, 512});
+        return std::unique_ptr<FileSystem>(std::move(fs));
+    }
+
+    const std::uint64_t clusters = (totalSectors - dataStart) / spc;
+    const int bits = fatBitsFor(fat32Layout, clusters);
+    info.type = bits == 12 ? FsType::Fat12 : bits == 16 ? FsType::Fat16 : FsType::Fat32;
     info.version = std::string(displayName(info.type));
-    info.blockSize = ByteCount{bps} * spc;
+    const ByteCount clusterBytes = ByteCount{bps} * spc;
+    info.blockSize = clusterBytes;
     info.totalBytes = ByteCount{totalSectors} * bps;
+
+    // --- BPB sanity the per-field rules of the tree cannot express ---
+    if (fat32Layout && clusters <= kFat16MaxClusters) fs->diag(Validity::Info, "fat.small_fat32", "FAT32 layout with fewer than 65525 clusters");
+    if (!fat32Layout && clusters > kFat16MaxClusters)
+        fs->diag(Validity::Error, "fat.bpb_geometry", "FAT16 cannot address " + std::to_string(clusters) + " clusters (at most 65524); read as FAT16 anyway");
+    if (fat32Layout && clusters > kFat32MaxClusters)
+        fs->diag(Validity::Error, "fat.bpb_geometry", "FAT32 cannot address " + std::to_string(clusters) + " clusters (at most " + std::to_string(kFat32MaxClusters) + ")");
+    if (!fat32Layout && bpb.rootEntries() == 0) fs->diag(Validity::Error, "fat.bpb_geometry", "root_entries is 0 on a FAT12/16 volume: there is no root directory");
+    else if (!fat32Layout && (bpb.rootEntries() * 32u) % bps != 0)
+        fs->diag(Validity::Warning, "fat.root_entries_unaligned", "root_entries " + std::to_string(bpb.rootEntries()) + " * 32 bytes is not a multiple of the " + std::to_string(bps) + "-byte sector");
+    if (fat32Layout && bpb.rootEntries() != 0) fs->diag(Validity::Warning, "fat.bpb_geometry", "root_entries must be 0 on FAT32 (is " + std::to_string(bpb.rootEntries()) + ")");
+    if (fats > 2) fs->diag(Validity::Warning, "fat.bpb_geometry", "num_fats " + std::to_string(fats) + ": 1 or 2 expected");
+    if (*info.totalBytes > dev->size())
+        fs->diag(Validity::Warning, "fat.truncated", "BPB counts " + std::to_string(totalSectors) + " sectors (" + humanBytes(*info.totalBytes) + ") but the device holds " + humanBytes(dev->size()) + ": the volume is truncated");
+    const ByteCount fatBytes = ByteCount{fatSectors} * bps;
+    const ByteCount fatNeeded = fatBytesNeeded(bits, clusters);
+    if (fatNeeded > fatBytes)
+        fs->diag(Validity::Error, "fat.fat_too_small", "each FAT has " + std::to_string(fatBytes) + " bytes; " + std::to_string(fatNeeded) + " are needed for " + std::to_string(clusters) + " clusters");
+
+    // --- which FAT is live (FAT32 ext_flags; always FAT 0 with mirroring) ---
+    const std::uint16_t extFlags = fat32Layout ? e32.extFlags() : 0;
+    const bool mirroring = !fat32Layout || fatMirroring(extFlags);
+    const std::uint32_t activeFat = fat32Layout ? fatActiveIndex(extFlags, fats) : 0;
+    if (!mirroring && (extFlags & 0x0F) >= fats)
+        fs->diag(Validity::Error, "fat.active_fat_out_of_range", "ext_flags names FAT " + std::to_string(extFlags & 0x0F) + " as the active copy but the volume has " + std::to_string(fats) + "; FAT 0 is read");
+    const ByteCount fatOffset = (ByteCount{reserved} + ByteCount{activeFat} * fatSectors) * bps;
+
+    // --- FAT[0] and FAT[1] of the active FAT ---
+    // FAT[0]'s low byte repeats the media byte; FAT[1] carries the clean-shutdown (set = clean)
+    // and hard-error (set = no error) bits on FAT16/32. FAT12 has neither.
+    std::optional<bool> fatClean, fatNoHardError;
+    if (auto head = dev->read(fatOffset, 8)) {
+        const auto media0 = std::to_integer<std::uint8_t>((*head)[0]);
+        if (media0 != bpb.media())
+            fs->diag(Validity::Warning, "fat.media_mismatch", "FAT[0] low byte " + toHex(media0, 2) + " does not repeat the BPB media byte " + toHex(bpb.media(), 2));
+        if (bits == 16) {
+            const std::uint16_t e1 = loadLe16(head->data() + 2);
+            fatClean = (e1 & 0x8000) != 0;
+            fatNoHardError = (e1 & 0x4000) != 0;
+        } else if (bits == 32) {
+            const std::uint32_t e1 = loadLe32(head->data() + 4) & 0x0FFFFFFFu;
+            fatClean = (e1 & 0x08000000u) != 0;
+            fatNoHardError = (e1 & 0x04000000u) != 0;
+        }
+    }
+
+    // --- volume state: one answer from two flags ---
+    // Two places record an unclean unmount: the extended BPB's reserved1 bit 0 (what Windows
+    // NT onwards and Linux set at mount and clear at unmount) and FAT[1]'s clean-shutdown bit
+    // (the DOS / Windows 9x convention, which Windows still maintains). Either one saying
+    // "dirty" makes info.clean false and raises one fat.dirty naming the flag(s);
+    // allocationMap() then refuses to trust the FAT.
+    const std::uint8_t state = fat32Layout ? e32.reserved1() : e16.reserved1();
+    std::string dirtyBy;
+    if (state & 0x01) dirtyBy = "boot sector state flag";
+    if (fatClean && !*fatClean) dirtyBy += std::string(dirtyBy.empty() ? "" : " and ") + "FAT[1] clean-shutdown bit";
+    info.clean = dirtyBy.empty();
+    if (!dirtyBy.empty()) fs->diag(Validity::Warning, "fat.dirty", "volume was not cleanly unmounted (" + dirtyBy + "); needs chkdsk / fsck.fat");
+    if (fatNoHardError && !*fatNoHardError)
+        fs->diag(Validity::Warning, "fat.hard_error", "FAT[1] hard-error bit: the driver met disk I/O errors the last time the volume was mounted");
 
     std::string bootLabel;
     std::uint32_t serial = 0;
-    std::uint8_t dirtyFlags = 0;
-    if (isFat32) {
-        if (e32.bootSignature() == 0x29 || e32.bootSignature() == 0x28) {
+    if (fat32Layout) {
+        if (extended(e32.bootSignature())) {
             bootLabel = e32.volumeLabel();
             serial = e32.volumeId();
         }
-        dirtyFlags = e32.reserved1();
-    } else {
-        if (e16.bootSignature() == 0x29 || e16.bootSignature() == 0x28) {
-            bootLabel = e16.volumeLabel();
-            serial = e16.volumeId();
-        }
-        dirtyFlags = e16.reserved1();
+    } else if (extended(e16.bootSignature())) {
+        bootLabel = e16.volumeLabel();
+        serial = e16.volumeId();
     }
     // The root directory's label entry is authoritative (this is what blkid reports as LABEL).
     std::string dirLabel;
@@ -181,11 +407,11 @@ Result detectFat(Dev dev) {
             labelEntry.assign(dir.begin() + static_cast<std::ptrdiff_t>(*at), dir.begin() + static_cast<std::ptrdiff_t>(*at + 32));
         }
     };
-    if (isFat32) {
+    if (fat32Layout) {
         const std::uint32_t root = e32.rootCluster();
         if (root >= 2 && root - 2 < clusters) {
             const ByteCount off = (dataStart + ByteCount{root - 2} * spc) * bps;
-            if (auto dir = dev->read(off, ByteCount{spc} * bps)) takeLabel(*dir, off);
+            if (auto dir = dev->read(off, clusterBytes)) takeLabel(*dir, off);
         }
     } else {
         const ByteCount off = (ByteCount{reserved} + ByteCount{fats} * fatSectors) * bps;
@@ -195,51 +421,69 @@ Result detectFat(Dev dev) {
     }
     info.label = !dirLabel.empty() ? dirLabel : (bootLabel == "NO NAME" ? "" : bootLabel);
     if (serial) info.uuid = serialHex(serial);
-    info.clean = !(dirtyFlags & 0x01);
-    if (dirtyFlags & 0x01) fs->diag(Validity::Warning, "fat.dirty", "volume is marked dirty (needs chkdsk)");
     if (!bootLabel.empty() && bootLabel != "NO NAME") info.extra = "boot-sector label: " + bootLabel;
 
     fs->setTreeName(info.version + " filesystem");
-    auto tree = bpb.describe(0);
-    tree.name = "boot sector BPB";
-    fs->addNode(std::move(tree));
-    if (isFat32) {
-        auto t = e32.describe(36);
-        t.name = "FAT32 extended BPB";
-        fs->addNode(std::move(t));
-        fs->addRegion(Region{0, ByteCount{reserved} * bps});   // boot sector, FSInfo, backup boot sector
-        const std::uint32_t fsinfo = e32.fsinfoSector();
-        if (fsinfo && fsinfo < reserved) {
-            if (auto fi = dev->read(ByteCount{fsinfo} * bps, 512)) {
-                auto n = gen::Fat32Fsinfo(*fi).describe(ByteCount{fsinfo} * bps);
-                n.name = "FSInfo sector";
-                gen::Fat32Fsinfo f(*fi);
-                if (f.freeCount() != 0xFFFFFFFFu && f.freeCount() <= clusters)
-                    info.usedBytes = (clusters - f.freeCount()) * ByteCount{spc} * bps;
-                fs->addNode(std::move(n));
+    fs->addNode(describeFatBootSector(s, 0, fat32Layout, "boot sector"));
+    fs->addRegion(Region{0, ByteCount{reserved} * bps});   // boot sector; on FAT32 also FSInfo and the backup copies
+    FatRepairPlan plan;
+    plan.bps = bps;
+    plan.reserved = reserved;
+    plan.fats = fats;
+    plan.fatSectors = fatSectors;
+    plan.activeFat = activeFat;
+    plan.mirroring = mirroring;
+    if (fat32Layout) {
+        // FSInfo: Linux reads sector 1 when the BPB says 0, so do we.
+        const std::uint32_t fsinfo = e32.fsinfoSector() ? e32.fsinfoSector() : 1;
+        std::vector<std::byte> fsinfoSector;
+        if (fsinfo >= reserved) {
+            fs->diag(Validity::Warning, "fat.fsinfo_bad", "FSInfo sector " + std::to_string(fsinfo) + " lies outside the " + std::to_string(reserved) + " reserved sectors");
+        } else if (auto fi = dev->read(ByteCount{fsinfo} * bps, bps)) {
+            fsinfoSector = *fi;
+            gen::Fat32Fsinfo f(*fi);
+            auto n = f.describe(ByteCount{fsinfo} * bps);
+            n.name = "FSInfo sector";
+            fs->addNode(std::move(n));
+            std::string bad;
+            if (f.leadSignature() != 0x41615252u) bad = "lead";
+            if (f.structSignature() != 0x61417272u) bad += std::string(bad.empty() ? "" : ", ") + "struct";
+            if (f.trailSignature() != 0xAA550000u) bad += std::string(bad.empty() ? "" : ", ") + "trail";
+            if (!bad.empty()) {
+                fs->diag(Validity::Warning, "fat.fsinfo_bad", "FSInfo sector " + std::to_string(fsinfo) + ": " + bad + " signature wrong; its free-cluster hint is not trusted");
+            } else {
+                if (f.freeCount() != 0xFFFFFFFFu) {
+                    if (f.freeCount() > clusters)
+                        fs->diag(Validity::Warning, "fat.fsinfo_free_count", "FSInfo free_count " + std::to_string(f.freeCount()) + " exceeds the " + std::to_string(clusters) + " clusters of the volume");
+                    else info.usedBytes = (clusters - f.freeCount()) * clusterBytes;
+                }
+                if (f.nextFree() != 0xFFFFFFFFu && (f.nextFree() < 2 || f.nextFree() >= clusters + 2))
+                    fs->diag(Validity::Info, "fat.fsinfo_next_free", "FSInfo next_free " + std::to_string(f.nextFree()) + " is not a cluster number (2.." + std::to_string(clusters + 1) + ")");
             }
         }
         // The backup boot sector (usually 6) is what a repair tool restores from; show it and say
         // when it has drifted from the live one (a label edited in one sector only, for instance).
+        // Its FSInfo copy follows it in the next sector.
         const std::uint32_t backup = e32.backupBootSector();
-        if (backup && backup < reserved) {
-            if (auto bb = dev->read(ByteCount{backup} * bps, 512)) {
-                std::span<const std::byte> b(*bb);
-                auto n = gen::FatBpb(b).describe(ByteCount{backup} * bps);
-                n.name = "backup boot sector BPB";
-                fs->addNode(std::move(n));
-                auto n2 = gen::Fat32Ebpb(b.subspan(36, gen::Fat32Ebpb::kSize)).describe(ByteCount{backup} * bps + 36);
-                n2.name = "backup FAT32 extended BPB";
-                fs->addNode(std::move(n2));
-                if (!std::equal(b.begin(), b.begin() + 90, s.begin()))
-                    fs->diag(Validity::Warning, "fat.backup_boot_mismatch", "backup boot sector (sector " + std::to_string(backup) + ") differs from the boot sector");
+        if (backup && backup < reserved && backup != fsinfo) {
+            auto live = dev->read(0, bps);
+            if (auto bb = dev->read(ByteCount{backup} * bps, bps); bb && live) {
+                fs->addNode(describeFatBootSector(*bb, ByteCount{backup} * bps, true, "backup boot sector"));
+                if (!std::equal(bb->begin(), bb->end(), live->begin()))
+                    fs->diag(Validity::Warning, "fat.backup_boot_mismatch", "backup boot sector (sector " + std::to_string(backup) + ") differs from the boot sector", true);
+                plan.backupSector = backup;
+            }
+            if (!fsinfoSector.empty() && backup + 1 < reserved && backup + 1 != fsinfo) {
+                if (auto bf = dev->read(ByteCount{backup + 1} * bps, bps)) {
+                    auto n = gen::Fat32Fsinfo(*bf).describe(ByteCount{backup + 1} * bps);
+                    n.name = "backup FSInfo sector";
+                    fs->addNode(std::move(n));
+                    if (!std::equal(bf->begin(), bf->end(), fsinfoSector.begin()))
+                        fs->diag(Validity::Info, "fat.backup_fsinfo_mismatch", "backup FSInfo sector (sector " + std::to_string(backup + 1) + ") differs from the FSInfo sector", true);
+                    plan.fsinfoSector = fsinfo;
+                }
             }
         }
-    } else {
-        auto t = e16.describe(36);
-        t.name = "FAT12/16 extended BPB";
-        fs->addNode(std::move(t));
-        fs->addRegion(Region{0, ByteCount{reserved} * bps});
     }
     // The label the OS shows lives in the root directory, not in the boot sector.
     if (labelEntryOffset) {
@@ -249,18 +493,46 @@ Result detectFat(Dev dev) {
     }
     if (!dirLabel.empty() && !bootLabel.empty() && bootLabel != "NO NAME" && bootLabel != dirLabel)
         fs->diag(Validity::Info, "fat.label_mismatch", "boot-sector label \"" + bootLabel + "\" differs from the root directory label \"" + dirLabel + "\", which is the one the OS shows");
+
+    // --- FAT copies ---
+    // With mirroring on every FAT is a copy of the active one. Compared over the entries in use
+    // (0..clusters+1) up to the 64 MiB limit; a FAT bigger than that is said to be only partly
+    // compared. The repair rewrites the differing sectors of the other copies from the active one.
+    const ByteCount fatInUse = std::min(fatBytes, alignUp(fatNeeded, bps));
+    plan.fatBytesInUse = fatInUse;
+    if (fats >= 2 && mirroring) {
+        const ByteCount compared = std::min(fatInUse, kFatCompareLimit);
+        for (std::uint32_t i = 0; i < fats; ++i) {
+            if (i == activeFat) continue;
+            const ByteCount other = (ByteCount{reserved} + ByteCount{i} * fatSectors) * bps;
+            auto diff = firstDifference(*dev, fatOffset, other, compared);
+            if (!diff) break;   // beyond the device: fat.truncated has said so
+            if (*diff)
+                fs->diag(Validity::Warning, "fat.fat_copies_differ", "FAT " + std::to_string(i) + " differs from FAT " + std::to_string(activeFat) + " (first difference at FAT byte " + std::to_string(**diff) + ")", true);
+        }
+        if (fatInUse > kFatCompareLimit)
+            fs->diag(Validity::Info, "fat.fat_copies_not_compared", "FAT copies compared over their first 64 MiB only; each FAT holds " + humanBytes(fatInUse) + " of entries");
+    }
+
+    // --- where the volume sits ---
+    // hidden_sectors is the partition's start LBA as the formatter saw it. Probing a slice of a
+    // larger device, the two should agree; a moved or re-imaged volume shows up here.
+    if (auto start = partitionStartLba(*dev); start && *start != bpb.hiddenSectors())
+        fs->diag(Validity::Info, "fat.hidden_sectors_mismatch", "hidden_sectors is " + std::to_string(bpb.hiddenSectors()) + " but the volume starts at LBA " + std::to_string(*start) + " of its parent device");
+
     {
         auto alloc = std::make_unique<FatAllocation>();
         alloc->bps = bps;
         alloc->spc = spc;
-        alloc->bits = info.type == FsType::Fat12 ? 12 : info.type == FsType::Fat16 ? 16 : 32;
-        alloc->fatOffset = ByteCount{reserved} * bps;
-        alloc->fatBytes = ByteCount{fatSectors} * bps;
+        alloc->bits = static_cast<std::uint32_t>(bits);
+        alloc->fatOffset = fatOffset;
+        alloc->fatBytes = fatBytes;
         alloc->dataOffset = dataStart * bps;
         alloc->clusters = clusters;
         fs->setAllocationSource(std::move(alloc));
         fs->setReaderSource(makeFatReaderSource());
     }
+    if (plan.backupSector || (fats >= 2 && mirroring)) fs->setRepair([plan](BlockDevice& target) { return repairFat(target, plan); });
     // FATs and (FAT12/16) root directory are metadata too.
     fs->addRegion(Region{ByteCount{reserved} * bps, ByteCount{fats} * fatSectors * bps});
     if (rootDirSectors) fs->addRegion(Region{(ByteCount{reserved} + ByteCount{fats} * fatSectors) * bps, ByteCount{rootDirSectors} * bps});
@@ -491,13 +763,17 @@ void describeExfatBootRegions(const Dev& dev, SimpleFileSystem& fs, const gen::E
         }
 }
 
-// The root directory's volume-wide entries: allocation bitmap, up-case table (its checksum
-// verified over the stored table), volume label and volume GUID. First cluster only.
+// The root directory's volume-wide entries: allocation bitmap (its set bits counted for the
+// exact used space), up-case table (its checksum verified over the stored table), volume label
+// and volume GUID. First cluster only.
 void describeExfatRootEntries(const Dev& dev, SimpleFileSystem& fs, const gen::ExfatBootSector& b, ByteCount bps, ByteCount cluster) {
     const std::uint32_t root = b.firstClusterOfRoot();
     const std::uint32_t clusters = b.clusterCount();
     if (root < 2 || root - 2 >= clusters) return;
     const ByteCount heap = ByteCount{b.clusterHeapOffset()} * bps;
+    // TexFAT keeps two FAT/bitmap pairs; volume_flags bit 0 names the live one.
+    const bool secondPair = b.numberOfFats() == 2 && (b.volumeFlags() & 0x1);
+    const ByteCount fatOffset = (ByteCount{b.fatOffset()} + (secondPair ? ByteCount{b.fatLength()} : 0)) * bps;
     const ByteCount off = heap + ByteCount{root - 2} * cluster;
     auto dir = dev->read(off, std::min<ByteCount>(cluster, 64 * KiB));
     if (!dir) return;
@@ -514,7 +790,7 @@ void describeExfatRootEntries(const Dev& dev, SimpleFileSystem& fs, const gen::E
     // Is the run first..first+n-1 contiguous as the FAT sees it (entries unset, sequential, or EOC last)?
     auto contiguous = [&](std::uint32_t first, std::uint64_t length) {
         const std::uint64_t n = (length + cluster - 1) / cluster;
-        auto fat = dev->read(ByteCount{b.fatOffset()} * bps + ByteCount{first} * 4, n * 4);
+        auto fat = dev->read(fatOffset + ByteCount{first} * 4, n * 4);
         if (!fat) return false;
         for (std::uint64_t i = 0; i < n; ++i) {
             const std::uint32_t e = loadLe32(fat->data() + i * 4);
@@ -524,6 +800,32 @@ void describeExfatRootEntries(const Dev& dev, SimpleFileSystem& fs, const gen::E
         }
         return true;
     };
+    // The bytes of a root-directory file, following its FAT chain (an unset entry means "next
+    // cluster", as the formatters that skip FAT entries for these files intend).
+    auto readChain = [&](std::uint32_t first, std::uint64_t length) -> std::optional<std::vector<std::byte>> {
+        std::vector<std::byte> out;
+        out.reserve(static_cast<std::size_t>(length));
+        std::uint32_t c = first;
+        while (out.size() < length) {
+            if (c < 2 || c - 2 >= clusters) return std::nullopt;
+            auto part = dev->read(heap + ByteCount{c - 2} * cluster, std::min<ByteCount>(cluster, length - out.size()));
+            if (!part) return std::nullopt;
+            out.insert(out.end(), part->begin(), part->end());
+            auto e = dev->read(fatOffset + ByteCount{c} * 4, 4);
+            if (!e) return std::nullopt;
+            const std::uint32_t n = loadLe32(e->data());
+            c = n == 0 ? c + 1 : n;
+        }
+        return out;
+    };
+    // Which bitmap entry is the live one: the one flagged for the live pair, or the only one
+    // there (the allocation source falls back the same way).
+    bool haveLiveBitmap = false;
+    for (std::size_t e = 0; e + 32 <= dir->size(); e += 32) {
+        const auto type = std::to_integer<std::uint8_t>((*dir)[e]);
+        if (type == 0x00) break;
+        if (type == 0x81 && ((std::to_integer<std::uint8_t>((*dir)[e + 1]) & 0x1) != 0) == secondPair) haveLiveBitmap = true;
+    }
     for (std::size_t e = 0; e + 32 <= dir->size(); e += 32) {
         const auto entry = std::span<const std::byte>(*dir).subspan(e, 32);
         const auto type = std::to_integer<std::uint8_t>(entry[0]);
@@ -538,6 +840,19 @@ void describeExfatRootEntries(const Dev& dev, SimpleFileSystem& fs, const gen::E
                 c->flag(Validity::Warning, "expected " + std::to_string(expected) + " bytes for " + std::to_string(clusters) + " clusters");
             if (auto* c = n.child("first_cluster"); c && !inHeap(v.firstCluster(), v.dataLength())) c->flag(Validity::Error, "outside the cluster heap");
             else if (inHeap(v.firstCluster(), v.dataLength())) fs.addRegion(Region{heap + ByteCount{v.firstCluster() - 2} * cluster, v.dataLength()});
+            // Used space: percent_in_use is a 1 % figure and is what detectExFat() filled in.
+            // When the live bitmap is at most 8 MiB (64 Mi clusters) its set bits give the exact
+            // count instead; bigger bitmaps keep the percentage so probing stays bounded.
+            const bool live = !haveLiveBitmap || ((v.bitmapFlags() & 0x1) != 0) == secondPair;
+            if (live && inHeap(v.firstCluster(), v.dataLength()) && v.dataLength() >= expected && v.dataLength() <= kExfatBitmapCountLimit) {
+                if (auto bits = readChain(v.firstCluster(), expected)) {
+                    std::uint64_t used = 0;
+                    for (const auto byte : *bits) used += static_cast<std::uint64_t>(std::popcount(std::to_integer<unsigned>(byte)));
+                    // Bits past cluster_count in the last byte are padding.
+                    if (const unsigned tail = clusters % 8) used -= static_cast<std::uint64_t>(std::popcount(std::to_integer<unsigned>(bits->back()) >> tail));
+                    fs.mutableInfo().usedBytes = used * cluster;
+                }
+            }
             rootNode.addChild(std::move(n));
         } else if (type == 0x82) {
             auto n = gen::ExfatUpcaseEntry(entry).describe(at);
@@ -605,7 +920,41 @@ Result detectExFat(Dev dev) {
     info.clean = !(b.volumeFlags() & 0x2);
     if (b.volumeFlags() & 0x2) fs->diag(Validity::Warning, "exfat.dirty", "volume is marked dirty");
     if (b.volumeFlags() & 0x4) fs->diag(Validity::Warning, "exfat.media_failure", "media failure flag set");
+    // 1 % granularity; describeExfatRootEntries() replaces it with the bitmap's exact count.
     if (b.percentInUse() <= 100) info.usedBytes = *info.totalBytes * b.percentInUse() / 100;
+
+    // --- geometry (§3.1): Error where the layout is impossible, Warning where it is merely
+    // inconsistent with the volume length ---
+    const std::uint64_t fatEnd = ByteCount{b.fatOffset()} + ByteCount{b.fatLength()} * b.numberOfFats();
+    const std::uint64_t heapEnd = ByteCount{b.clusterHeapOffset()} + (ByteCount{b.clusterCount()} << spcShift);
+    if (b.fatOffset() < 24)
+        fs->diag(Validity::Error, "exfat.geometry", "fat_offset " + std::to_string(b.fatOffset()) + " lies inside the boot regions (sectors 0-23)");
+    if (fatEnd > b.clusterHeapOffset())
+        fs->diag(Validity::Error, "exfat.geometry", "the FAT" + std::string(b.numberOfFats() == 2 ? "s end" : " ends") + " at sector " + std::to_string(fatEnd) + ", past the cluster heap at " + std::to_string(b.clusterHeapOffset()));
+    if (ByteCount{b.fatLength()} * bps < (ByteCount{b.clusterCount()} + 2) * 4)
+        fs->diag(Validity::Error, "exfat.geometry", "fat_length " + std::to_string(b.fatLength()) + " sectors cannot hold entries for " + std::to_string(b.clusterCount()) + " clusters");
+    if (b.clusterCount() > 0xFFFFFFF5u)
+        fs->diag(Validity::Error, "exfat.geometry", "cluster_count " + std::to_string(b.clusterCount()) + " exceeds the 2^32 - 11 the FAT can address");
+    if (heapEnd > b.volumeLength())
+        fs->diag(Validity::Error, "exfat.geometry", "cluster heap ends at sector " + std::to_string(heapEnd) + ", beyond volume_length " + std::to_string(b.volumeLength()));
+    else if (b.volumeLength() - heapEnd >= (ByteCount{1} << spcShift))
+        fs->diag(Validity::Warning, "exfat.geometry", "cluster_count " + std::to_string(b.clusterCount()) + " leaves " + std::to_string(b.volumeLength() - heapEnd) + " sectors of the volume outside the heap");
+    if (*info.totalBytes > dev->size())
+        fs->diag(Validity::Warning, "exfat.truncated", "volume_length counts " + std::to_string(b.volumeLength()) + " sectors (" + humanBytes(*info.totalBytes) + ") but the device holds " + humanBytes(dev->size()) + ": the volume is truncated");
+    if (b.firstClusterOfRoot() < 2 || b.firstClusterOfRoot() - 2 >= b.clusterCount())
+        fs->diag(Validity::Error, "exfat.geometry", "first_cluster_of_root " + std::to_string(b.firstClusterOfRoot()) + " is outside the cluster heap (2.." + std::to_string(ByteCount{b.clusterCount()} + 1) + ")");
+    // TexFAT: two FATs, the live one named by volume_flags bit 0. They are compared over the
+    // entries in use, 64 MiB at most; nothing repairs them, as the two may legitimately be
+    // mid-transaction on such a volume.
+    const bool secondPair = b.numberOfFats() == 2 && (b.volumeFlags() & 0x1);
+    if (b.numberOfFats() == 2) {
+        const ByteCount inUse = std::min<ByteCount>(ByteCount{b.fatLength()} * bps, alignUp((ByteCount{b.clusterCount()} + 2) * 4, bps));
+        const ByteCount first = ByteCount{b.fatOffset()} * bps, second = first + ByteCount{b.fatLength()} * bps;
+        if (auto diff = firstDifference(*dev, first, second, std::min(inUse, kFatCompareLimit)); diff && *diff)
+            fs->diag(Validity::Warning, "exfat.fat_copies_differ", "the second FAT differs from the first (first difference at FAT byte " + std::to_string(**diff) + ")");
+        if (inUse > kFatCompareLimit)
+            fs->diag(Validity::Info, "exfat.fat_copies_not_compared", "FAT copies compared over their first 64 MiB only; each FAT holds " + humanBytes(inUse) + " of entries");
+    }
 
     // Volume label: directory entry type 0x83 in the root directory (first cluster only at L0).
     const std::uint32_t root = b.firstClusterOfRoot();
@@ -627,10 +976,11 @@ Result detectExFat(Dev dev) {
         auto alloc = std::make_unique<ExfatAllocation>();
         alloc->bps = bps;
         alloc->cluster = cluster;
-        alloc->fatOffset = ByteCount{b.fatOffset()} * bps;
+        alloc->fatOffset = (ByteCount{b.fatOffset()} + (secondPair ? ByteCount{b.fatLength()} : 0)) * bps;
         alloc->heapOffset = ByteCount{b.clusterHeapOffset()} * bps;
         alloc->clusterCount = b.clusterCount();
         alloc->rootCluster = root;
+        alloc->secondBitmap = secondPair;
         fs->setAllocationSource(std::move(alloc));
         fs->setReaderSource(makeExfatReaderSource());
     }

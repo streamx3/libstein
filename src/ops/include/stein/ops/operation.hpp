@@ -138,7 +138,7 @@ private:
 class RepairTable final : public Operation {
 public:
     explicit RepairTable(pt::RepairOptions options = {}) : m_options(options) {}
-    std::string description() const override { return "Repair partition table (rebuild damaged copies)"; }
+    std::string description() const override { return "Repair partition table (rebuild damaged copies, relink the EBR chain)"; }
     Expected<void> validate(const probe::Node& topology) const override;
     Expected<std::vector<std::unique_ptr<Job>>> plan(const probe::Node& topology) const override;
     bool isDestructive() const override { return false; }

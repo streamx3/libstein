@@ -20,7 +20,9 @@ Delivered (see `reports/2026-10-06-progress.md` for detail):
   Argon2id, key slots, JSON, LZ4, progress, reports, logging), `stein_layout`
   (manifest-generated structures, `LayoutTree`), `stein_block` (memory, file,
   slice, concat, overlay, sparse pieces incl. encrypted), `stein_pt`
-  (GPT/MBR/EBR/APM read, write, repair; byte-identical with sgdisk/sfdisk),
+  (GPT/MBR/EBR/APM read and write, byte-identical with sgdisk/sfdisk; GPT
+  repair, and since 2026-10-21 MBR/EBR repair: chain rewrite, orphaned-EBR
+  recovery; APM repair stays v2),
   `stein_fs` (35 formats at L0; allocation maps for ext2/3/4, FAT, exFAT,
   NTFS, HFS+), `stein_probe`, `stein_platform` (Linux, macOS, Windows:
   enumerate, open, mounts, unmount/lock, re-read, loop/hdiutil attach),
