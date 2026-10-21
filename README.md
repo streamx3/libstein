@@ -102,7 +102,7 @@ to the OS (Linux: FUSE, Windows: WinFsp, macOS: built-in NFS loopback).
 |---|---|---|---|---|---|
 | ext2 / ext3 / ext4 | ✓ | ✓ | ✓ extents, indirect, inline data, htree, symlinks | ✓ | – |
 | FAT12 / 16 / 32 | ✓ | ✓ | ✓ long names | ✓ | – |
-| exFAT | ✓ | ✓ | ✓ NoFatChain, up-case table | ✓ | – |
+| exFAT | ✓ boot regions (checksums verified), OEM parameters, bitmap / up-case (table checksum) / label / GUID entries | ✓ | ✓ NoFatChain, up-case table | ✓ | – |
 | NTFS | ✓ | ✓ | ◐ MFT, attribute lists, sparse runs, reparse links; compressed and encrypted files refused | ✓ | – |
 | HFS+ / HFSX | ✓ | ✓ | ✓ B-trees, overflow extents, hard links, case rules | ✓ | – |
 | HFS (classic, incl. wrapper) | ✓ | – | – | – | – |
