@@ -267,6 +267,63 @@ Result detectFat(Dev dev) {
     return std::unique_ptr<FileSystem>(std::move(fs));
 }
 
+namespace {
+// exFAT specification §3.4: the boot checksum runs over the first eleven sectors of a
+// boot region, skipping VolumeFlags (bytes 106-107) and PercentInUse (112) of the boot
+// sector; the twelfth sector repeats the 32-bit result until it is full.
+std::uint32_t exfatBootChecksum(std::span<const std::byte> sectors) {
+    std::uint32_t c = 0;
+    for (std::size_t i = 0; i < sectors.size(); ++i) {
+        if (i == 106 || i == 107 || i == 112) continue;
+        c = ((c & 1u) ? 0x80000000u : 0u) + (c >> 1) + std::to_integer<std::uint32_t>(sectors[i]);
+    }
+    return c;
+}
+
+// One boot region (main at sector 0, backup at sector 12) as a tree: the boot sector and
+// the checksum sector that seals it. The checksum is one field as wide as the sector, so a
+// hex editor that refills it writes the repeated value the specification asks for.
+layout::Node describeExfatBootRegion(std::span<const std::byte> bytes, ByteCount base, std::size_t bps, const char* title,
+                                     bool& checksumOk, bool& checksumRepeated) {
+    layout::Node region;
+    region.name = title;
+    region.isStruct = true;
+    region.absOffset = base;
+    region.size = 12 * bps;
+    auto boot = gen::ExfatBootSector(bytes.first(gen::ExfatBootSector::kSize)).describe(base);
+    boot.name = "boot sector";
+    region.addChild(std::move(boot));
+
+    layout::Node sector;
+    sector.name = "boot checksum";
+    sector.isStruct = true;
+    sector.absOffset = base + 11 * bps;
+    sector.size = bps;
+    const auto ck = bytes.subspan(11 * bps, bps);
+    const std::uint32_t stored = loadLe32(ck.data());
+    const std::uint32_t computed = exfatBootChecksum(bytes.first(11 * bps));
+    checksumRepeated = true;
+    for (std::size_t i = 4; i + 4 <= ck.size(); i += 4)
+        if (loadLe32(ck.data() + i) != stored) {
+            checksumRepeated = false;
+            break;
+        }
+    checksumOk = stored == computed;
+    layout::Node f;
+    f.name = "checksum";
+    f.type = layout::FieldType::Crc32;
+    f.absOffset = sector.absOffset;
+    f.size = bps;
+    f.value = toHex(stored, 8);
+    f.doc = "Boot checksum over the eleven sectors before it (VolumeFlags and PercentInUse excluded), repeated to fill the sector";
+    if (!checksumOk) f.flag(Validity::Error, "mismatch; computed " + toHex(computed, 8));
+    else if (!checksumRepeated) f.flag(Validity::Warning, "not repeated through the sector; computed " + toHex(computed, 8));
+    sector.addChild(std::move(f));
+    region.addChild(std::move(sector));
+    return region;
+}
+} // namespace
+
 Result detectExFat(Dev dev) {
     auto raw = readOrNotFound(*dev, 0, 512);
     if (!raw) return fail(raw.error());
@@ -319,9 +376,31 @@ Result detectExFat(Dev dev) {
         fs->setReaderSource(makeExfatReaderSource());
     }
     fs->setTreeName("exFAT filesystem");
-    auto tree = b.describe(0);
-    tree.name = "main boot sector";
-    fs->addNode(std::move(tree));
+    // Both boot regions, each sealed by its checksum sector. A device too short for them
+    // (never a real volume) falls back to the bare boot sector.
+    const std::size_t bpsz = static_cast<std::size_t>(bps);
+    if (auto regions = dev->read(0, 24 * bps); regions && regions->size() == 24 * bpsz) {
+        std::span<const std::byte> all(*regions);
+        bool mainOk = false, mainRepeated = false, backupOk = false, backupRepeated = false;
+        fs->addNode(describeExfatBootRegion(all.first(12 * bpsz), 0, bpsz, "main boot region", mainOk, mainRepeated));
+        fs->addNode(describeExfatBootRegion(all.subspan(12 * bpsz, 12 * bpsz), 12 * bps, bpsz, "backup boot region", backupOk, backupRepeated));
+        if (!mainOk) fs->diag(Validity::Error, "exfat.boot_checksum", "main boot region checksum (sector 11) does not match its sectors");
+        else if (!mainRepeated) fs->diag(Validity::Warning, "exfat.boot_checksum_partial", "main boot checksum is not repeated through sector 11");
+        if (!backupOk) fs->diag(Validity::Warning, "exfat.backup_boot_checksum", "backup boot region checksum (sector 23) does not match its sectors");
+        else if (!backupRepeated) fs->diag(Validity::Warning, "exfat.backup_boot_checksum_partial", "backup boot checksum is not repeated through sector 23");
+        // The backup copy is what a repair restores from; say when it has drifted. VolumeFlags
+        // and PercentInUse may legitimately differ between the two copies.
+        bool same = true;
+        for (std::size_t i = 0; i < 512 && same; ++i) {
+            if (i == 106 || i == 107 || i == 112) continue;
+            same = all[i] == all[12 * bpsz + i];
+        }
+        if (!same) fs->diag(Validity::Warning, "exfat.backup_boot_mismatch", "backup boot sector (sector 12) differs from the main boot sector");
+    } else {
+        auto tree = b.describe(0);
+        tree.name = "main boot sector";
+        fs->addNode(std::move(tree));
+    }
     fs->addRegion(Region{0, 12 * bps});                 // main boot region
     fs->addRegion(Region{12 * bps, 12 * bps});          // backup boot region
     fs->addRegion(Region{ByteCount{b.fatOffset()} * bps, ByteCount{b.fatLength()} * bps * b.numberOfFats()});

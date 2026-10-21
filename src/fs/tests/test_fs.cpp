@@ -4,7 +4,10 @@
 #include "stein_fixture.hpp"
 #include "stein_test.hpp"
 
+#include "stein/core/endian.hpp"
 #include "stein/core/strings.hpp"
+#include "stein/layout/gen/exfat.hpp"
+#include "stein/layout/node.hpp"
 #include "stein/fs/filesystem.hpp"
 #include "stein/fs/udf_reader.hpp"
 
@@ -107,11 +110,12 @@ TEST_CASE("FAT: boot label vs root directory label, serial, cluster count typing
     CHECK((*fs)->info().uuid == "DEAD-BEEF");
     CHECK((*fs)->info().version == "FAT32");
     CHECK((*fs)->info().clean == true);
-    CHECK((*fs)->describe().child("FAT32 extended BPB") != nullptr);
-    CHECK((*fs)->describe().child("FSInfo sector") != nullptr);
-    CHECK((*fs)->describe().child("backup boot sector BPB") != nullptr);
-    CHECK((*fs)->describe().child("backup FAT32 extended BPB") != nullptr);
-    const auto* entry = (*fs)->describe().child("root directory volume label entry");
+    const auto tree = (*fs)->describe();   // held: child() pointers into a temporary tree dangle
+    CHECK(tree.child("FAT32 extended BPB") != nullptr);
+    CHECK(tree.child("FSInfo sector") != nullptr);
+    CHECK(tree.child("backup boot sector BPB") != nullptr);
+    CHECK(tree.child("backup FAT32 extended BPB") != nullptr);
+    const auto* entry = tree.child("root directory volume label entry");
     REQUIRE(entry != nullptr);
     CHECK(entry->child("name")->value == "STEIN_FAT32");
     CHECK((*fs)->info().label == "STEIN_FAT32");
@@ -1186,3 +1190,91 @@ TEST_CASE("udf reader: genisoimage UDF 1.02 (bridge and UDF-only) read back exac
         CHECK((*r)->stat(*(*r)->root())->type == fs::FileType::Directory);
     }
 }
+
+namespace {
+const stein::layout::Node* descendant(const stein::layout::Node& n, std::initializer_list<const char*> path) {
+    const stein::layout::Node* cur = &n;
+    for (const char* name : path) {
+        cur = cur->child(name);
+        if (!cur) return nullptr;
+    }
+    return cur;
+}
+std::uint32_t computedFrom(const std::string& message) {
+    const auto at = message.find("computed 0x");
+    REQUIRE(at != std::string::npos);
+    return static_cast<std::uint32_t>(std::stoul(message.substr(at + 11), nullptr, 16));
+}
+} // namespace
+
+TEST_CASE("exfat: both boot regions are described, their checksums verified, the backup compared") {
+    for (const char* fixture : {"fs/exfat.sparse", "exfatfs/exfat.sparse", "exfatfs/exfat_32k.sparse"}) {
+        CAPTURE(fixture);
+        auto dev = loadSparseFixture(fixture);
+        REQUIRE(dev);
+        auto fs = probe(dev);
+        REQUIRE(fs);
+        REQUIRE(*fs);
+        auto tree = (*fs)->describe();
+        const auto* main = descendant(tree, {"main boot region", "boot checksum", "checksum"});
+        const auto* backup = descendant(tree, {"backup boot region", "boot checksum", "checksum"});
+        REQUIRE(main);
+        REQUIRE(backup);
+        CHECK(main->validity == stein::layout::Validity::Ok);
+        CHECK(backup->validity == stein::layout::Validity::Ok);
+        CHECK(main->type == stein::layout::FieldType::Crc32);
+        const auto boot = dev->read(0, 512);
+        REQUIRE(boot);
+        const std::size_t sectorBytes = std::size_t{1} << stein::layout::gen::ExfatBootSector(*boot).bytesPerSectorShift();
+        CHECK(main->size == sectorBytes);
+        const auto* sig = descendant(tree, {"main boot region", "boot sector", "boot_signature"});
+        REQUIRE(sig);
+        CHECK(sig->value == "43605");
+        for (const auto& d : (*fs)->diagnostics()) CHECK(d.code.find("exfat.b") == std::string::npos);
+
+        // Change one boot-sector byte: the main checksum fails with the right value in its
+        // message, the backup copy is reported as drifted.
+        const ByteCount bps = main->size;
+        const std::uint32_t good = static_cast<std::uint32_t>(std::stoul(main->value, nullptr, 16));
+        std::byte one{0x81};
+        REQUIRE(dev->writeAt(0x6F, std::span<const std::byte>(&one, 1)));   // drive_select
+        auto broken = probe(dev);
+        REQUIRE(broken);
+        auto t2 = (*broken)->describe();
+        const auto* m2 = descendant(t2, {"main boot region", "boot checksum", "checksum"});
+        REQUIRE(m2);
+        CHECK(m2->validity == stein::layout::Validity::Error);
+        const std::uint32_t computed = computedFrom(m2->message);
+        CHECK(computed != good);
+        bool checksumDiag = false, mismatchDiag = false;
+        for (const auto& d : (*broken)->diagnostics()) {
+            checksumDiag = checksumDiag || d.code == "exfat.boot_checksum";
+            mismatchDiag = mismatchDiag || d.code == "exfat.backup_boot_mismatch";
+        }
+        CHECK(checksumDiag);
+        CHECK(mismatchDiag);
+
+        // Writing the computed value through the sector (what a hex editor's "fix" does) heals it.
+        std::vector<std::byte> sector(static_cast<std::size_t>(bps));
+        for (std::size_t i = 0; i < sector.size(); i += 4) stein::storeLe32(sector.data() + i, computed);
+        REQUIRE(dev->writeAt(11 * bps, sector));
+        auto healed = probe(dev);
+        REQUIRE(healed);
+        const auto t3 = (*healed)->describe();
+        const auto* m3 = descendant(t3, {"main boot region", "boot checksum", "checksum"});
+        REQUIRE(m3);
+        CHECK(m3->validity == stein::layout::Validity::Ok);
+
+        // A checksum sector only partly filled is flagged, with the value to refill it.
+        stein::storeLe32(sector.data() + 4, computed ^ 1);
+        REQUIRE(dev->writeAt(11 * bps, sector));
+        auto partial = probe(dev);
+        REQUIRE(partial);
+        const auto t4 = (*partial)->describe();
+        const auto* m4 = descendant(t4, {"main boot region", "boot checksum", "checksum"});
+        REQUIRE(m4);
+        CHECK(m4->validity == stein::layout::Validity::Warning);
+        CHECK(computedFrom(m4->message) == computed);
+    }
+}
+

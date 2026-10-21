@@ -2,7 +2,7 @@
 
 [exfat_boot_sector]
 doc = "exFAT boot sector (sector 0 of the main boot region; copy at sector 12)"
-size = 120
+size = 512
 endian = "le"
 fields = [
   { name = "jump_boot",               offset = 0x00, type = "bytes", size = 3, expect_hex = "eb7690", doc = "EB 76 90" },
@@ -24,4 +24,6 @@ fields = [
   { name = "drive_select",            offset = 0x6F, type = "u8" },
   { name = "percent_in_use",          offset = 0x70, type = "u8", doc = "0..100, or 0xFF = unknown" },
   { name = "reserved",                offset = 0x71, type = "bytes", size = 7 },
+  { name = "boot_code",               offset = 0x78, type = "bytes", size = 390, doc = "Boot-strapping code (or zeros)" },
+  { name = "boot_signature",          offset = 0x1FE, type = "u16", expect = 0xAA55, doc = "Must be 0x55 0xAA" },
 ]
