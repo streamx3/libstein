@@ -27,3 +27,80 @@ fields = [
   { name = "boot_code",               offset = 0x78, type = "bytes", size = 390, doc = "Boot-strapping code (or zeros)" },
   { name = "boot_signature",          offset = 0x1FE, type = "u16", expect = 0xAA55, doc = "Must be 0x55 0xAA" },
 ]
+
+# Sector 9 of a boot region: ten 48-byte OEM parameter slots; a nil GUID marks an unused slot.
+[exfat_oem_parameter]
+doc = "exFAT OEM parameter (§3.3): GUID-tagged 48-byte record in the OEM parameters sector"
+size = 48
+endian = "le"
+fields = [
+  { name = "parameters_guid", offset = 0x00, type = "guid", doc = "Nil = unused slot; 0A0C7E46-3399-4021-90C8-FA6D389C4BA2 = flash parameters" },
+  { name = "custom_defined",  offset = 0x10, type = "bytes", size = 32 },
+]
+
+[exfat_flash_parameters]
+doc = "exFAT flash parameters (§3.3.1): the media's erase and page geometry, for alignment"
+size = 48
+endian = "le"
+fields = [
+  { name = "parameters_guid",    offset = 0x00, type = "guid" },
+  { name = "erase_block_size",   offset = 0x10, type = "u32", doc = "Bytes; 0 = unknown" },
+  { name = "page_size",          offset = 0x14, type = "u32", doc = "Bytes; 0 = unknown" },
+  { name = "spare_sectors",      offset = 0x18, type = "u32", doc = "Sectors the media keeps as spares; 0 = unknown" },
+  { name = "random_access_time", offset = 0x1C, type = "u32", doc = "Nanoseconds; 0 = unknown" },
+  { name = "programming_time",   offset = 0x20, type = "u32", doc = "Nanoseconds; 0 = unknown" },
+  { name = "read_cycle",         offset = 0x24, type = "u32", doc = "Nanoseconds; 0 = unknown" },
+  { name = "write_cycle",        offset = 0x28, type = "u32", doc = "Nanoseconds; 0 = unknown" },
+  { name = "reserved",           offset = 0x2C, type = "bytes", size = 4 },
+]
+
+# Root directory entries that describe the volume itself (§7.1–7.4). 32 bytes each.
+[exfat_bitmap_entry]
+doc = "exFAT allocation bitmap directory entry (type 0x81, §7.1)"
+size = 32
+endian = "le"
+fields = [
+  { name = "entry_type",    offset = 0x00, type = "u8", expect = 0x81 },
+  { name = "bitmap_flags",  offset = 0x01, type = "bits8", bits = { "0" = "second_bitmap" }, doc = "Bit 0: this is the second FAT's bitmap (TexFAT)" },
+  { name = "reserved",      offset = 0x02, type = "bytes", size = 18 },
+  { name = "first_cluster", offset = 0x14, type = "u32", min = 2 },
+  { name = "data_length",   offset = 0x18, type = "u64", nonzero = true, doc = "ceil(cluster_count / 8) bytes" },
+]
+
+[exfat_upcase_entry]
+doc = "exFAT up-case table directory entry (type 0x82, §7.2)"
+size = 32
+endian = "le"
+fields = [
+  { name = "entry_type",     offset = 0x00, type = "u8", expect = 0x82 },
+  { name = "reserved1",      offset = 0x01, type = "bytes", size = 3 },
+  { name = "table_checksum", offset = 0x04, type = "crc32", doc = "exFAT table checksum over the stored (possibly compressed) table bytes" },
+  { name = "reserved2",      offset = 0x08, type = "bytes", size = 12 },
+  { name = "first_cluster",  offset = 0x14, type = "u32", min = 2 },
+  { name = "data_length",    offset = 0x18, type = "u64", nonzero = true },
+]
+
+[exfat_label_entry]
+doc = "exFAT volume label directory entry (type 0x83, §7.3)"
+size = 32
+endian = "le"
+fields = [
+  { name = "entry_type",      offset = 0x00, type = "u8", enum = { "0x83" = "label", "0x03" = "no label (unused)" } },
+  { name = "character_count", offset = 0x01, type = "u8", max = 11 },
+  { name = "volume_label",    offset = 0x02, type = "utf16le", size = 22, doc = "Up to 11 UTF-16 code units" },
+  { name = "reserved",        offset = 0x18, type = "bytes", size = 8 },
+]
+
+[exfat_volume_guid_entry]
+doc = "exFAT volume GUID directory entry (type 0xA0, §7.5)"
+size = 32
+endian = "le"
+fields = [
+  { name = "entry_type",            offset = 0x00, type = "u8", expect = 0xA0 },
+  { name = "secondary_count",       offset = 0x01, type = "u8", expect = 0 },
+  { name = "set_checksum",          offset = 0x02, type = "u16", doc = "Entry-set checksum over this entry, bytes 2-3 excluded" },
+  { name = "general_primary_flags", offset = 0x04, type = "bits16", bits = { "0" = "allocation_possible", "1" = "no_fat_chain" }, doc = "Both must be clear" },
+  { name = "volume_guid",           offset = 0x06, type = "guid" },
+  { name = "reserved",              offset = 0x16, type = "bytes", size = 10 },
+]
+

@@ -280,9 +280,28 @@ std::uint32_t exfatBootChecksum(std::span<const std::byte> sectors) {
     return c;
 }
 
-// One boot region (main at sector 0, backup at sector 12) as a tree: the boot sector and
-// the checksum sector that seals it. The checksum is one field as wide as the sector, so a
-// hex editor that refills it writes the repeated value the specification asks for.
+// exFAT §7.2.3 / §6.4: the table checksum (no skips) and the 16-bit entry-set checksum
+// (bytes 2-3 of the primary entry skipped) use the same rotate-and-add recurrence.
+std::uint32_t exfatTableChecksum(std::span<const std::byte> bytes) {
+    std::uint32_t c = 0;
+    for (const auto b : bytes) c = ((c & 1u) ? 0x80000000u : 0u) + (c >> 1) + std::to_integer<std::uint32_t>(b);
+    return c;
+}
+std::uint16_t exfatEntrySetChecksum(std::span<const std::byte> entries) {
+    std::uint16_t c = 0;
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        if (i == 2 || i == 3) continue;
+        c = static_cast<std::uint16_t>(((c & 1u) ? 0x8000u : 0u) + (c >> 1) + std::to_integer<std::uint16_t>(entries[i]));
+    }
+    return c;
+}
+
+constexpr const char* kExfatFlashParametersGuid = "0A0C7E46-3399-4021-90C8-FA6D389C4BA2";
+
+// One boot region (main at sector 0, backup at sector 12) as a tree: the boot sector, the
+// eight extended boot sectors, the OEM parameters and the checksum sector that seals them.
+// The checksum is one field as wide as the sector, so a hex editor that refills it writes
+// the repeated value the specification asks for.
 layout::Node describeExfatBootRegion(std::span<const std::byte> bytes, ByteCount base, std::size_t bps, const char* title,
                                      bool& checksumOk, bool& checksumRepeated) {
     layout::Node region;
@@ -293,6 +312,63 @@ layout::Node describeExfatBootRegion(std::span<const std::byte> bytes, ByteCount
     auto boot = gen::ExfatBootSector(bytes.first(gen::ExfatBootSector::kSize)).describe(base);
     boot.name = "boot sector";
     region.addChild(std::move(boot));
+
+    // Sectors 1-8: boot code of the implementation's choosing, each ending in 0xAA550000.
+    layout::Node extended;
+    extended.name = "extended boot sectors";
+    extended.isStruct = true;
+    extended.absOffset = base + bps;
+    extended.size = 8 * bps;
+    for (std::size_t i = 1; i <= 8; ++i) {
+        layout::Node sector;
+        sector.name = "extended boot sector " + std::to_string(i);
+        sector.isStruct = true;
+        sector.absOffset = base + i * bps;
+        sector.size = bps;
+        layout::Node code;
+        code.name = "boot_code";
+        code.type = layout::FieldType::Bytes;
+        code.absOffset = sector.absOffset;
+        code.size = bps - 4;
+        code.value = "<" + std::to_string(bps - 4) + " bytes>";
+        sector.addChild(std::move(code));
+        layout::Node sig;
+        sig.name = "extended_boot_signature";
+        sig.type = layout::FieldType::U32;
+        sig.absOffset = sector.absOffset + bps - 4;
+        sig.size = 4;
+        const std::uint32_t v = loadLe32(bytes.data() + i * bps + bps - 4);
+        sig.value = std::to_string(v);
+        sig.pretty = toHex(v, 8);
+        sig.doc = "Must be 0xAA550000";
+        if (v != 0xAA550000u) sig.flag(Validity::Error, "expected 0xAA550000");
+        sector.addChild(std::move(sig));
+        extended.addChild(std::move(sector));
+    }
+    region.addChild(std::move(extended));
+
+    // Sector 9: ten OEM parameter slots; the flash parameters record is the one defined so far.
+    layout::Node oem;
+    oem.name = "OEM parameters";
+    oem.isStruct = true;
+    oem.absOffset = base + 9 * bps;
+    oem.size = bps;
+    for (std::size_t i = 0; i < 10 && (i + 1) * 48 <= bps; ++i) {
+        const auto slot = bytes.subspan(9 * bps + i * 48, 48);
+        const Uuid guid = gen::ExfatOemParameter(slot).parametersGuid();
+        if (guid.isNil()) continue;
+        layout::Node n;
+        if (guid.toString() == kExfatFlashParametersGuid) {
+            n = gen::ExfatFlashParameters(slot).describe(oem.absOffset + i * 48);
+            n.name = "flash parameters";
+        } else {
+            n = gen::ExfatOemParameter(slot).describe(oem.absOffset + i * 48);
+            n.name = "OEM parameter " + std::to_string(i + 1);
+        }
+        oem.addChild(std::move(n));
+    }
+    if (oem.children.empty()) oem.doc = "all ten slots unused";
+    region.addChild(std::move(oem));
 
     layout::Node sector;
     sector.name = "boot checksum";
@@ -321,6 +397,131 @@ layout::Node describeExfatBootRegion(std::span<const std::byte> bytes, ByteCount
     sector.addChild(std::move(f));
     region.addChild(std::move(sector));
     return region;
+}
+
+// Both boot regions, each sealed by its checksum sector. A device too short for them
+// (never a real volume) falls back to the bare boot sector.
+void describeExfatBootRegions(const Dev& dev, SimpleFileSystem& fs, const gen::ExfatBootSector& b, ByteCount bps) {
+    const std::size_t bpsz = static_cast<std::size_t>(bps);
+    auto regions = dev->read(0, 24 * bps);
+    if (!regions || regions->size() != 24 * bpsz) {
+        auto tree = b.describe(0);
+        tree.name = "main boot sector";
+        fs.addNode(std::move(tree));
+        return;
+    }
+    std::span<const std::byte> all(*regions);
+    bool mainOk = false, mainRepeated = false, backupOk = false, backupRepeated = false;
+    fs.addNode(describeExfatBootRegion(all.first(12 * bpsz), 0, bpsz, "main boot region", mainOk, mainRepeated));
+    fs.addNode(describeExfatBootRegion(all.subspan(12 * bpsz, 12 * bpsz), 12 * bps, bpsz, "backup boot region", backupOk, backupRepeated));
+    if (!mainOk) fs.diag(Validity::Error, "exfat.boot_checksum", "main boot region checksum (sector 11) does not match its sectors");
+    else if (!mainRepeated) fs.diag(Validity::Warning, "exfat.boot_checksum_partial", "main boot checksum is not repeated through sector 11");
+    if (!backupOk) fs.diag(Validity::Warning, "exfat.backup_boot_checksum", "backup boot region checksum (sector 23) does not match its sectors");
+    else if (!backupRepeated) fs.diag(Validity::Warning, "exfat.backup_boot_checksum_partial", "backup boot checksum is not repeated through sector 23");
+    // The backup copy is what a repair restores from; say when it has drifted. VolumeFlags
+    // and PercentInUse may legitimately differ between the two copies.
+    bool same = true;
+    for (std::size_t i = 0; i < 512 && same; ++i) {
+        if (i == 106 || i == 107 || i == 112) continue;
+        same = all[i] == all[12 * bpsz + i];
+    }
+    if (!same) fs.diag(Validity::Warning, "exfat.backup_boot_mismatch", "backup boot sector (sector 12) differs from the main boot sector");
+    for (std::size_t i = 1; i <= 8; ++i)
+        if (loadLe32(all.data() + i * bpsz + bpsz - 4) != 0xAA550000u) {
+            fs.diag(Validity::Warning, "exfat.extended_boot_signature", "extended boot sector " + std::to_string(i) + " lacks the 0xAA550000 signature");
+            break;
+        }
+}
+
+// The root directory's volume-wide entries: allocation bitmap, up-case table (its checksum
+// verified over the stored table), volume label and volume GUID. First cluster only.
+void describeExfatRootEntries(const Dev& dev, SimpleFileSystem& fs, const gen::ExfatBootSector& b, ByteCount bps, ByteCount cluster) {
+    const std::uint32_t root = b.firstClusterOfRoot();
+    const std::uint32_t clusters = b.clusterCount();
+    if (root < 2 || root - 2 >= clusters) return;
+    const ByteCount heap = ByteCount{b.clusterHeapOffset()} * bps;
+    const ByteCount off = heap + ByteCount{root - 2} * cluster;
+    auto dir = dev->read(off, std::min<ByteCount>(cluster, 64 * KiB));
+    if (!dir) return;
+    layout::Node rootNode;
+    rootNode.name = "root directory";
+    rootNode.isStruct = true;
+    rootNode.absOffset = off;
+    rootNode.size = dir->size();
+    rootNode.doc = "First cluster of the root directory: the entries that describe the volume itself";
+    fs.addRegion(Region{off, static_cast<ByteCount>(dir->size())});
+    auto inHeap = [&](std::uint32_t first, std::uint64_t length) {
+        return first >= 2 && first - 2 < clusters && length <= (ByteCount{clusters - (first - 2)}) * cluster;
+    };
+    // Is the run first..first+n-1 contiguous as the FAT sees it (entries unset, sequential, or EOC last)?
+    auto contiguous = [&](std::uint32_t first, std::uint64_t length) {
+        const std::uint64_t n = (length + cluster - 1) / cluster;
+        auto fat = dev->read(ByteCount{b.fatOffset()} * bps + ByteCount{first} * 4, n * 4);
+        if (!fat) return false;
+        for (std::uint64_t i = 0; i < n; ++i) {
+            const std::uint32_t e = loadLe32(fat->data() + i * 4);
+            const bool last = i + 1 == n;
+            if (e == 0 || (!last && e == first + i + 1) || (last && e == 0xFFFFFFFFu)) continue;
+            return false;
+        }
+        return true;
+    };
+    for (std::size_t e = 0; e + 32 <= dir->size(); e += 32) {
+        const auto entry = std::span<const std::byte>(*dir).subspan(e, 32);
+        const auto type = std::to_integer<std::uint8_t>(entry[0]);
+        if (type == 0x00) break;
+        const ByteCount at = off + e;
+        if (type == 0x81) {
+            auto n = gen::ExfatBitmapEntry(entry).describe(at);
+            n.name = "allocation bitmap entry";
+            gen::ExfatBitmapEntry v(entry);
+            const std::uint64_t expected = (std::uint64_t{clusters} + 7) / 8;
+            if (auto* c = n.child("data_length"); c && v.dataLength() != expected)
+                c->flag(Validity::Warning, "expected " + std::to_string(expected) + " bytes for " + std::to_string(clusters) + " clusters");
+            if (auto* c = n.child("first_cluster"); c && !inHeap(v.firstCluster(), v.dataLength())) c->flag(Validity::Error, "outside the cluster heap");
+            else if (inHeap(v.firstCluster(), v.dataLength())) fs.addRegion(Region{heap + ByteCount{v.firstCluster() - 2} * cluster, v.dataLength()});
+            rootNode.addChild(std::move(n));
+        } else if (type == 0x82) {
+            auto n = gen::ExfatUpcaseEntry(entry).describe(at);
+            n.name = "up-case table entry";
+            gen::ExfatUpcaseEntry v(entry);
+            const bool plausible = inHeap(v.firstCluster(), v.dataLength()) && v.dataLength() >= 2 && v.dataLength() <= 128 * KiB + 2;
+            if (auto* c = n.child("first_cluster"); c && !inHeap(v.firstCluster(), v.dataLength())) c->flag(Validity::Error, "outside the cluster heap");
+            if (auto* c = n.child("table_checksum")) {
+                c->validity = Validity::Ok;
+                c->message.clear();
+                if (plausible && contiguous(v.firstCluster(), v.dataLength())) {
+                    const ByteCount tableAt = heap + ByteCount{v.firstCluster() - 2} * cluster;
+                    fs.addRegion(Region{tableAt, v.dataLength()});
+                    if (auto table = dev->read(tableAt, v.dataLength())) {
+                        const std::uint32_t computed = exfatTableChecksum(*table);
+                        if (computed != v.tableChecksum()) {
+                            c->flag(Validity::Error, "mismatch; computed " + toHex(computed, 8));
+                            fs.diag(Validity::Error, "exfat.upcase_checksum", "up-case table checksum does not match the table");
+                        }
+                    }
+                } else if (plausible) {
+                    c->flag(Validity::Info, "not verified: the table is fragmented");
+                }
+            }
+            rootNode.addChild(std::move(n));
+        } else if (type == 0x83 || type == 0x03) {
+            auto n = gen::ExfatLabelEntry(entry).describe(at);
+            n.name = "volume label entry";
+            rootNode.addChild(std::move(n));
+        } else if (type == 0xA0) {
+            auto n = gen::ExfatVolumeGuidEntry(entry).describe(at);
+            n.name = "volume GUID entry";
+            gen::ExfatVolumeGuidEntry v(entry);
+            if (auto* c = n.child("set_checksum")) {
+                const std::uint16_t computed = exfatEntrySetChecksum(entry);
+                if (computed != v.setChecksum()) c->flag(Validity::Error, "mismatch; computed " + toHex(computed, 4));
+            }
+            if (auto* c = n.child("general_primary_flags"); c && (v.generalPrimaryFlags() & 0x3)) c->flag(Validity::Warning, "must be zero for this entry");
+            rootNode.addChild(std::move(n));
+        }
+    }
+    if (!rootNode.children.empty()) fs.addNode(std::move(rootNode));
 }
 } // namespace
 
@@ -376,31 +577,8 @@ Result detectExFat(Dev dev) {
         fs->setReaderSource(makeExfatReaderSource());
     }
     fs->setTreeName("exFAT filesystem");
-    // Both boot regions, each sealed by its checksum sector. A device too short for them
-    // (never a real volume) falls back to the bare boot sector.
-    const std::size_t bpsz = static_cast<std::size_t>(bps);
-    if (auto regions = dev->read(0, 24 * bps); regions && regions->size() == 24 * bpsz) {
-        std::span<const std::byte> all(*regions);
-        bool mainOk = false, mainRepeated = false, backupOk = false, backupRepeated = false;
-        fs->addNode(describeExfatBootRegion(all.first(12 * bpsz), 0, bpsz, "main boot region", mainOk, mainRepeated));
-        fs->addNode(describeExfatBootRegion(all.subspan(12 * bpsz, 12 * bpsz), 12 * bps, bpsz, "backup boot region", backupOk, backupRepeated));
-        if (!mainOk) fs->diag(Validity::Error, "exfat.boot_checksum", "main boot region checksum (sector 11) does not match its sectors");
-        else if (!mainRepeated) fs->diag(Validity::Warning, "exfat.boot_checksum_partial", "main boot checksum is not repeated through sector 11");
-        if (!backupOk) fs->diag(Validity::Warning, "exfat.backup_boot_checksum", "backup boot region checksum (sector 23) does not match its sectors");
-        else if (!backupRepeated) fs->diag(Validity::Warning, "exfat.backup_boot_checksum_partial", "backup boot checksum is not repeated through sector 23");
-        // The backup copy is what a repair restores from; say when it has drifted. VolumeFlags
-        // and PercentInUse may legitimately differ between the two copies.
-        bool same = true;
-        for (std::size_t i = 0; i < 512 && same; ++i) {
-            if (i == 106 || i == 107 || i == 112) continue;
-            same = all[i] == all[12 * bpsz + i];
-        }
-        if (!same) fs->diag(Validity::Warning, "exfat.backup_boot_mismatch", "backup boot sector (sector 12) differs from the main boot sector");
-    } else {
-        auto tree = b.describe(0);
-        tree.name = "main boot sector";
-        fs->addNode(std::move(tree));
-    }
+    describeExfatBootRegions(dev, *fs, b, bps);
+    describeExfatRootEntries(dev, *fs, b, bps, cluster);
     fs->addRegion(Region{0, 12 * bps});                 // main boot region
     fs->addRegion(Region{12 * bps, 12 * bps});          // backup boot region
     fs->addRegion(Region{ByteCount{b.fatOffset()} * bps, ByteCount{b.fatLength()} * bps * b.numberOfFats()});

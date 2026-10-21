@@ -1231,6 +1231,42 @@ TEST_CASE("exfat: both boot regions are described, their checksums verified, the
         REQUIRE(sig);
         CHECK(sig->value == "43605");
         for (const auto& d : (*fs)->diagnostics()) CHECK(d.code.find("exfat.b") == std::string::npos);
+        const auto* ext = descendant(tree, {"main boot region", "extended boot sectors"});
+        REQUIRE(ext);
+        REQUIRE(ext->children.size() == 8);
+        for (const auto& sec : ext->children) CHECK(sec.child("extended_boot_signature")->validity == stein::layout::Validity::Ok);
+        CHECK(descendant(tree, {"main boot region", "OEM parameters"}) != nullptr);
+        CHECK(descendant(tree, {"backup boot region", "extended boot sectors"}) != nullptr);
+        // The root directory's own entries: bitmap sized for the heap, up-case table with its checksum.
+        const auto* bitmap = descendant(tree, {"root directory", "allocation bitmap entry"});
+        const auto* upcase = descendant(tree, {"root directory", "up-case table entry", "table_checksum"});
+        REQUIRE(bitmap);
+        REQUIRE(upcase);
+        CHECK(bitmap->child("data_length")->validity == stein::layout::Validity::Ok);
+        const bool fullFixture = std::string(fixture).rfind("exfatfs/", 0) == 0;   // fs/exfat.sparse is trimmed to the boot regions and FAT
+        if (fullFixture) {
+            CHECK(upcase->validity == stein::layout::Validity::Ok);
+            if (const auto* label = descendant(tree, {"root directory", "volume label entry"}))
+                CHECK(label->child("volume_label")->value == (*fs)->info().label);
+            // Damage the stored table: the checksum field says what it should be.
+            const ByteCount heap = ByteCount{stein::layout::gen::ExfatBootSector(*boot).clusterHeapOffset()} * sectorBytes;
+            const ByteCount clusterBytes = *(*fs)->info().blockSize;
+            const auto* first = descendant(tree, {"root directory", "up-case table entry", "first_cluster"});
+            REQUIRE(first);
+            const ByteCount tableAt = heap + (std::stoull(first->value) - 2) * clusterBytes;
+            auto orig = dev->read(tableAt, 1);
+            REQUIRE(orig);
+            std::byte flipped = (*orig)[0] ^ std::byte{0xFF};
+            REQUIRE(dev->writeAt(tableAt, std::span<const std::byte>(&flipped, 1)));
+            auto damaged = probe(dev);
+            REQUIRE(damaged);
+            const auto td = (*damaged)->describe();
+            const auto* u2 = descendant(td, {"root directory", "up-case table entry", "table_checksum"});
+            REQUIRE(u2);
+            CHECK(u2->validity == stein::layout::Validity::Error);
+            CHECK(u2->message.find("computed 0x") != std::string::npos);
+            REQUIRE(dev->writeAt(tableAt, std::span<const std::byte>(&(*orig)[0], 1)));
+        }
 
         // Change one boot-sector byte: the main checksum fails with the right value in its
         // message, the backup copy is reported as drifted.
