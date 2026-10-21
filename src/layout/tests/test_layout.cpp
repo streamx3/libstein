@@ -78,7 +78,7 @@ TEST_CASE("generated GptEntry: bits and utf16 name") {
     CHECK(e.partitionName() == "EFI System Partition");
     CHECK(e.attributes() == ((1ull << 0) | (1ull << 63) | (1ull << 10)));
     auto tree = e.describe(1024);
-    CHECK(tree.child("attributes")->pretty == "platform_required|ms_no_automount|unknown:0x0000000000000400");
+    CHECK(tree.child("attributes")->pretty == "platform_required|unknown:0x8000000000000400");
     CHECK(tree.child("partition_name")->value == "EFI System Partition");
     CHECK(tree.child("partition_type_guid")->value == "00000000-0000-0000-0000-000000000000");
     std::string tooLong(40, 'x');

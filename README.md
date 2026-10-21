@@ -43,7 +43,7 @@ ctest --preset debug
 ./build/debug/tools/stein/stein list                      # disks (Linux)
 ./build/debug/tools/stein/stein probe /dev/sdb            # table, partitions, filesystems
 ./build/debug/tools/stein/stein inspect /dev/sdb --doc    # every header field, annotated
-./build/debug/tools/stein/stein repair disk.img --dry-run # GPT: rebuild a lost copy
+./build/debug/tools/stein/stein repair disk.img --dry-run # GPT: rebuild a lost copy; exFAT: boot region checksums and backup
 ./build/debug/tools/stein/stein pt create disk.img gpt     # edits are simulated, shown, then applied
 ./build/debug/tools/stein/stein pt add disk.img --size 512M --type EF00 --name EFI --dry-run
 ./build/debug/tools/stein/stein image create /dev/sdb backup.stein --compress lz4 --used-only --passphrase ...   # encrypted, free space skipped
@@ -102,7 +102,7 @@ to the OS (Linux: FUSE, Windows: WinFsp, macOS: built-in NFS loopback).
 |---|---|---|---|---|---|
 | ext2 / ext3 / ext4 | ✓ | ✓ | ✓ extents, indirect, inline data, htree, symlinks | ✓ | – |
 | FAT12 / 16 / 32 | ✓ | ✓ | ✓ long names | ✓ | – |
-| exFAT | ✓ boot regions (checksums verified), OEM parameters, bitmap / up-case (table checksum) / label / GUID entries | ✓ | ✓ NoFatChain, up-case table | ✓ | – |
+| exFAT | ✓ boot regions (checksums verified, repair restores the damaged copy), OEM parameters, bitmap / up-case (table checksum) / label / GUID entries | ✓ | ✓ NoFatChain, up-case table | ✓ | – |
 | NTFS | ✓ | ✓ | ◐ MFT, attribute lists, sparse runs, reparse links; compressed and encrypted files refused | ✓ | – |
 | HFS+ / HFSX | ✓ | ✓ | ✓ B-trees, overflow extents, hard links, case rules | ✓ | – |
 | HFS (classic, incl. wrapper) | ✓ | – | – | – | – |

@@ -58,6 +58,7 @@ struct FsDiagnostic {
     layout::Validity severity = layout::Validity::Info;
     std::string code;
     std::string message;
+    bool repairable = false;          // repair() can fix it
 };
 
 // What this instance can do right now. L0 modules have only the first three.
@@ -99,6 +100,9 @@ public:
     virtual Expected<std::unique_ptr<Reader>> openReader(const ReaderOptions& options) const;
     // Volumes, snapshots or subvolumes openReader() can be pointed at (APFS containers; empty elsewhere).
     virtual std::vector<SubvolumeInfo> subvolumes() const { return {}; }
+    // Fix the repairable diagnostics in place on `device` (the same bytes this instance was
+    // probed from, opened writable). Metadata only: checksums and backup copies, never data.
+    virtual Expected<void> repair(BlockDevice& device);
 
     const std::shared_ptr<BlockDevice>& device() const { return m_device; }
     layout::Validity health() const;

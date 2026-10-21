@@ -1314,3 +1314,57 @@ TEST_CASE("exfat: both boot regions are described, their checksums verified, the
     }
 }
 
+TEST_CASE("exfat: repair restores the damaged boot region from the sound one") {
+    auto dev = loadSparseFixture("exfatfs/exfat.sparse");
+    REQUIRE(dev);
+    auto pristine = loadSparseFixture("exfatfs/exfat.sparse");
+    const ByteCount bps = 512;
+    auto sameAsPristine = [&](const char* when) {
+        auto a = dev->read(0, 24 * bps), b = pristine->read(0, 24 * bps);
+        REQUIRE((a && b));
+        for (std::size_t i = 0; i < a->size(); ++i)
+            if ((*a)[i] != (*b)[i]) {
+                MESSAGE(when << ": first difference at byte " << i);
+                return false;
+            }
+        return true;
+    };
+    auto repairableCodes = [](const FileSystem& fs) {
+        std::vector<std::string> out;
+        for (const auto& d : fs.diagnostics())
+            if (d.repairable) out.push_back(d.code);
+        return out;
+    };
+    // Main boot sector damaged (checksum fails), backup sound: the main region comes back from the backup.
+    std::byte one{0x81};
+    REQUIRE(dev->writeAt(0x6F, std::span<const std::byte>(&one, 1)));
+    auto broken = probe(dev);
+    REQUIRE((broken && *broken));
+    CHECK(repairableCodes(**broken).size() >= 2);
+    REQUIRE((*broken)->repair(*dev));
+    CHECK(sameAsPristine("main restored from backup"));
+    auto healed = probe(dev);
+    REQUIRE((healed && *healed));
+    CHECK(repairableCodes(**healed).empty());
+    CHECK((*healed)->health() == layout::Validity::Ok);
+
+    // Backup drifted (checksum still sealed by us): it is overwritten from the main region.
+    auto backupSector = dev->read(12 * bps, bps);
+    REQUIRE(backupSector);
+    (*backupSector)[0x6F] = one;
+    REQUIRE(dev->writeAt(12 * bps, *backupSector));
+    auto drifted = probe(dev);
+    REQUIRE((drifted && *drifted));
+    bool mismatch = false;
+    for (const auto& d : (*drifted)->diagnostics()) mismatch = mismatch || d.code == "exfat.backup_boot_mismatch";
+    CHECK(mismatch);
+    REQUIRE((*drifted)->repair(*dev));
+    CHECK(sameAsPristine("backup rewritten from main"));
+
+    // Nothing to repair: repair() is a no-op that succeeds.
+    auto clean = probe(dev);
+    REQUIRE((clean && *clean));
+    REQUIRE((*clean)->repair(*dev));
+    CHECK(sameAsPristine("no-op repair"));
+}
+

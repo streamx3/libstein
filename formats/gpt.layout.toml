@@ -31,6 +31,6 @@ fields = [
   { name = "unique_partition_guid", offset = 0x10, type = "guid", doc = "GUID unique to this partition" },
   { name = "starting_lba",          offset = 0x20, type = "lba", doc = "First LBA of the partition" },
   { name = "ending_lba",            offset = 0x28, type = "lba", doc = "Last LBA of the partition, inclusive" },
-  { name = "attributes",            offset = 0x30, type = "bits64", doc = "Attribute bits; 48-63 are type-specific", bits = { "0" = "platform_required", "1" = "no_block_io_protocol", "2" = "legacy_bios_bootable", "56" = "chromeos_successful", "60" = "ms_read_only", "61" = "ms_shadow_copy", "62" = "ms_hidden", "63" = "ms_no_automount" } },
+  { name = "attributes",            offset = 0x30, type = "bits64", doc = "Attribute bits 0-2 are common; 48-63 belong to the partition type (Microsoft, ChromeOS kernel, Linux/systemd) and are named by it in describe()", bits = { "0" = "platform_required", "1" = "no_block_io_protocol", "2" = "legacy_bios_bootable" } },
   { name = "partition_name",        offset = 0x38, type = "utf16le", size = 72, doc = "Human-readable name, up to 36 UTF-16 code units" },
 ]

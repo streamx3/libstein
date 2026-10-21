@@ -399,6 +399,63 @@ layout::Node describeExfatBootRegion(std::span<const std::byte> bytes, ByteCount
     return region;
 }
 
+// Repair policy for the two boot regions, the one fsck.exfat follows: a region whose
+// checksum holds is sound. Backup damaged or drifted -> copy the main region over it.
+// Main damaged, backup sound -> restore the main region from the backup. Both damaged ->
+// nothing to copy from; recompute each checksum over what is there. Only sectors that
+// change are written; the FAT and the cluster heap are never touched.
+Expected<void> repairExfatBootRegions(BlockDevice& target, ByteCount bps) {
+    const std::size_t bpsz = static_cast<std::size_t>(bps);
+    auto regions = target.read(0, 24 * bps);
+    if (!regions) return fail(regions.error());
+    if (regions->size() != 24 * bpsz) return fail(ErrorCategory::InvalidFormat, "device too short for the exFAT boot regions");
+    std::vector<std::byte> all = std::move(*regions);
+    const std::vector<std::byte> before = all;
+    auto region = [&](std::size_t which) { return std::span<std::byte>(all).subspan(which * 12 * bpsz, 12 * bpsz); };
+    auto checksumHolds = [&](std::span<const std::byte> r) {
+        const std::uint32_t computed = exfatBootChecksum(r.first(11 * bpsz));
+        for (std::size_t i = 0; i + 4 <= bpsz; i += 4)
+            if (loadLe32(r.data() + 11 * bpsz + i) != computed) return false;
+        return true;
+    };
+    auto seal = [&](std::span<std::byte> r) {
+        const std::uint32_t computed = exfatBootChecksum(r.first(11 * bpsz));
+        for (std::size_t i = 0; i + 4 <= bpsz; i += 4) storeLe32(r.data() + 11 * bpsz + i, computed);
+    };
+    auto sameBoot = [&] {
+        for (std::size_t i = 0; i < 512; ++i) {
+            if (i == 106 || i == 107 || i == 112) continue;
+            if (all[i] != all[12 * bpsz + i]) return false;
+        }
+        return true;
+    };
+    // Copy the eleven sealed sectors of one region over the other, keeping the destination's
+    // VolumeFlags and PercentInUse: the specification lets the copies differ there.
+    auto copyRegion = [&](std::size_t from, std::size_t to) {
+        const std::byte keep106 = region(to)[106], keep107 = region(to)[107], keep112 = region(to)[112];
+        std::copy_n(region(from).begin(), 11 * bpsz, region(to).begin());
+        region(to)[106] = keep106;
+        region(to)[107] = keep107;
+        region(to)[112] = keep112;
+        seal(region(to));
+    };
+    const bool mainOk = checksumHolds(region(0)), backupOk = checksumHolds(region(1));
+    if (mainOk) {
+        if (!backupOk || !sameBoot()) copyRegion(0, 1);
+    } else if (backupOk) {
+        copyRegion(1, 0);
+    } else {
+        seal(region(0));
+        seal(region(1));
+    }
+    for (std::size_t sector = 0; sector < 24; ++sector) {
+        const auto from = sector * bpsz;
+        if (std::equal(all.begin() + from, all.begin() + from + bpsz, before.begin() + from)) continue;
+        if (auto w = target.writeAt(sector * bps, std::span<const std::byte>(all).subspan(from, bpsz)); !w) return w;
+    }
+    return target.flush();
+}
+
 // Both boot regions, each sealed by its checksum sector. A device too short for them
 // (never a real volume) falls back to the bare boot sector.
 void describeExfatBootRegions(const Dev& dev, SimpleFileSystem& fs, const gen::ExfatBootSector& b, ByteCount bps) {
@@ -414,10 +471,10 @@ void describeExfatBootRegions(const Dev& dev, SimpleFileSystem& fs, const gen::E
     bool mainOk = false, mainRepeated = false, backupOk = false, backupRepeated = false;
     fs.addNode(describeExfatBootRegion(all.first(12 * bpsz), 0, bpsz, "main boot region", mainOk, mainRepeated));
     fs.addNode(describeExfatBootRegion(all.subspan(12 * bpsz, 12 * bpsz), 12 * bps, bpsz, "backup boot region", backupOk, backupRepeated));
-    if (!mainOk) fs.diag(Validity::Error, "exfat.boot_checksum", "main boot region checksum (sector 11) does not match its sectors");
-    else if (!mainRepeated) fs.diag(Validity::Warning, "exfat.boot_checksum_partial", "main boot checksum is not repeated through sector 11");
-    if (!backupOk) fs.diag(Validity::Warning, "exfat.backup_boot_checksum", "backup boot region checksum (sector 23) does not match its sectors");
-    else if (!backupRepeated) fs.diag(Validity::Warning, "exfat.backup_boot_checksum_partial", "backup boot checksum is not repeated through sector 23");
+    if (!mainOk) fs.diag(Validity::Error, "exfat.boot_checksum", "main boot region checksum (sector 11) does not match its sectors", true);
+    else if (!mainRepeated) fs.diag(Validity::Warning, "exfat.boot_checksum_partial", "main boot checksum is not repeated through sector 11", true);
+    if (!backupOk) fs.diag(Validity::Warning, "exfat.backup_boot_checksum", "backup boot region checksum (sector 23) does not match its sectors", true);
+    else if (!backupRepeated) fs.diag(Validity::Warning, "exfat.backup_boot_checksum_partial", "backup boot checksum is not repeated through sector 23", true);
     // The backup copy is what a repair restores from; say when it has drifted. VolumeFlags
     // and PercentInUse may legitimately differ between the two copies.
     bool same = true;
@@ -425,7 +482,8 @@ void describeExfatBootRegions(const Dev& dev, SimpleFileSystem& fs, const gen::E
         if (i == 106 || i == 107 || i == 112) continue;
         same = all[i] == all[12 * bpsz + i];
     }
-    if (!same) fs.diag(Validity::Warning, "exfat.backup_boot_mismatch", "backup boot sector (sector 12) differs from the main boot sector");
+    if (!same) fs.diag(Validity::Warning, "exfat.backup_boot_mismatch", "backup boot sector (sector 12) differs from the main boot sector", true);
+    fs.setRepair([bps](BlockDevice& target) { return repairExfatBootRegions(target, bps); });
     for (std::size_t i = 1; i <= 8; ++i)
         if (loadLe32(all.data() + i * bpsz + bpsz - 4) != 0xAA550000u) {
             fs.diag(Validity::Warning, "exfat.extended_boot_signature", "extended boot sector " + std::to_string(i) + " lacks the 0xAA550000 signature");

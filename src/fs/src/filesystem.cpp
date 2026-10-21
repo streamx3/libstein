@@ -101,6 +101,10 @@ std::uint32_t FileSystem::capabilities() const {
     return c;
 }
 
+Expected<void> FileSystem::repair(BlockDevice&) {
+    return fail(ErrorCategory::Unsupported, "this filesystem has nothing it knows how to repair");
+}
+
 Expected<AllocationMap> FileSystem::allocationMap() const {
     return fail(ErrorCategory::Unsupported, std::string(displayName(type())) + ": allocation map not supported");
 }

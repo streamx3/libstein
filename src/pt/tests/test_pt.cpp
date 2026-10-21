@@ -521,3 +521,37 @@ TEST_CASE("GPT: each entry array is described from its own bytes") {
     CHECK(backup->message.find("CRC") != std::string::npos);
 }
 
+TEST_CASE("GPT: reserved tail of the header block is checked and repaired; attribute bits named by type") {
+    auto dev = loadSparseFixture("pt/gpt_basic.sparse");
+    REQUIRE(dev);
+    {
+        auto table = GptTable::read(dev);
+        REQUIRE(table);
+        const auto tree = (*table)->describe();
+        const auto* entries = tree.child("primary partition entries");
+        REQUIRE(entries);
+        REQUIRE(entries->children.size() == 3);
+        CHECK(entries->children[0].child("attributes")->pretty == "none");
+        CHECK(entries->children[1].child("attributes")->pretty == "legacy_bios_bootable");   // Linux data, bit 2
+        CHECK(entries->children[2].child("attributes")->pretty == "no_drive_letter");        // Microsoft basic data, bit 63
+        CHECK(tree.child("primary GPT header")->child("reserved_tail")->validity == Validity::Ok);
+        CHECK(tree.child("primary GPT header")->size == 512);
+        CHECK(!hasDiagnostic(**table, "gpt.primary_header_reserved"));
+    }
+    const std::byte junk{0x5A};
+    REQUIRE(dev->writeAt(512 + 200, std::span<const std::byte>(&junk, 1)));
+    auto table = GptTable::read(dev);
+    REQUIRE(table);
+    auto& gpt = **table;
+    CHECK(gpt.health() == Validity::Warning);
+    CHECK(hasDiagnostic(gpt, "gpt.primary_header_reserved"));
+    const auto tree = gpt.describe();
+    CHECK(tree.child("primary GPT header")->child("reserved_tail")->validity == Validity::Warning);
+    CHECK(tree.child("primary GPT header")->child("reserved_tail")->absOffset == 512 + 92);
+    REQUIRE(gpt.repair(*dev, RepairOptions{}));
+    auto again = GptTable::read(dev);
+    REQUIRE(again);
+    CHECK(!hasDiagnostic(**again, "gpt.primary_header_reserved"));
+    CHECK((*again)->health() == Validity::Ok);
+}
+

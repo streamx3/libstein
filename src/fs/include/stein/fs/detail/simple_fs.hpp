@@ -5,6 +5,8 @@
 
 #include "stein/fs/filesystem.hpp"
 
+#include <functional>
+
 namespace stein::fs::detail {
 
 // How a detector provides L1: a small object that knows where the bitmap is.
@@ -42,6 +44,10 @@ public:
     Expected<std::unique_ptr<Reader>> openReader(const ReaderOptions& options) const override;
     using FileSystem::openReader;
     std::vector<SubvolumeInfo> subvolumes() const override { return m_subvolumes; }
+    Expected<void> repair(BlockDevice& device) override {
+        if (!m_repair) return FileSystem::repair(device);
+        return m_repair(device);
+    }
 
     // Construction helpers used by detectors.
     FsInfo& mutableInfo() { return m_info; }
@@ -51,9 +57,10 @@ public:
     void setAllocationSource(std::unique_ptr<AllocationSource> src) { m_alloc = std::move(src); }
     void setReaderSource(std::unique_ptr<ReaderSource> src) { m_reader = std::move(src); }
     void setSubvolumes(std::vector<SubvolumeInfo> v) { m_subvolumes = std::move(v); }
-    void diag(layout::Validity sev, std::string code, std::string message) {
+    void setRepair(std::function<Expected<void>(BlockDevice&)> fn) { m_repair = std::move(fn); }
+    void diag(layout::Validity sev, std::string code, std::string message, bool repairable = false) {
         if (sev >= layout::Validity::Warning) m_tree.flag(sev, message);
-        m_diagnostics.push_back(FsDiagnostic{sev, std::move(code), std::move(message)});
+        m_diagnostics.push_back(FsDiagnostic{sev, std::move(code), std::move(message), repairable});
     }
 
 protected:
@@ -64,6 +71,7 @@ protected:
     std::unique_ptr<AllocationSource> m_alloc;
     std::unique_ptr<ReaderSource> m_reader;
     std::vector<SubvolumeInfo> m_subvolumes;
+    std::function<Expected<void>(BlockDevice&)> m_repair;
 };
 
 // Read `length` bytes at `offset`; NotFound (not Io) when the device is too

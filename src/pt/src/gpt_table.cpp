@@ -196,6 +196,16 @@ Expected<std::unique_ptr<GptTable>> GptTable::read(BlockDevicePtr device) {
     }
 
     // ---- diagnostics -----------------------------------------------------------
+    // UEFI 2.10 §5.3.2: the block holding a header is reserved past header_size and must be zero.
+    auto reservedTailClean = [&](const std::vector<std::byte>& raw, const HeaderState& st) {
+        if (!st.signatureOk || raw.size() < kHeaderSize) return true;
+        const std::uint32_t hs = std::max<std::uint32_t>(kHeaderSize, std::min<std::uint32_t>(gen::GptHeader(raw).headerSize(), ss));
+        return std::all_of(raw.begin() + hs, raw.end(), [](std::byte b) { return b == std::byte{0}; });
+    };
+    if (!reservedTailClean(t->m_primaryHeaderRaw, t->m_primary))
+        t->addDiagnostic(Validity::Warning, "gpt.primary_header_reserved", "primary GPT header block has non-zero bytes after header_size (reserved, must be zero)", Region{ss, ss}, true);
+    if (!reservedTailClean(t->m_backupHeaderRaw, t->m_backup))
+        t->addDiagnostic(Validity::Warning, "gpt.backup_header_reserved", "backup GPT header block has non-zero bytes after header_size (reserved, must be zero)", Region{t->m_backup.lba * ss, ss}, true);
     const Region primaryRegion{ss, static_cast<ByteCount>(ss) * (1 + t->entryArraySectors())};
     const Region backupRegion{t->m_backupEntriesLba * ss, static_cast<ByteCount>(ss) * (1 + t->entryArraySectors())};
     if (!t->m_primary.valid())
@@ -462,6 +472,48 @@ Expected<void> GptTable::repair(BlockDevice& device, const RepairOptions& option
 
 // ----------------------------------------------------------------------------- describe
 
+namespace {
+// Attribute bit names: 0-2 are common to every type (UEFI 2.10 §5.3.3); 48-63 belong to
+// the partition type. Microsoft's basic data bits, ChromeOS kernel priority/tries/successful,
+// and systemd's discoverable-partition flags for Linux types. Anything else is "bit N".
+std::string attributeNames(Role role, std::uint64_t bits) {
+    if (bits == 0) return "none";
+    std::string out;
+    auto add = [&](std::string s) {
+        if (!out.empty()) out += "|";
+        out += std::move(s);
+    };
+    if (bits & (1ull << 0)) add("platform_required");
+    if (bits & (1ull << 1)) add("no_block_io_protocol");
+    if (bits & (1ull << 2)) add("legacy_bios_bootable");
+    std::uint64_t named = 0x7;
+    const std::string_view roleName = toString(role);
+    const bool microsoft = role == Role::MicrosoftReserved || role == Role::WindowsBasicData || role == Role::WindowsRecovery ||
+                           role == Role::WindowsLdmMetadata || role == Role::WindowsLdmData || role == Role::WindowsStorageSpaces;
+    const bool linux = roleName.rfind("Linux", 0) == 0 || roleName.rfind("linux", 0) == 0;
+    if (microsoft) {
+        if (bits & (1ull << 60)) add("read_only");
+        if (bits & (1ull << 61)) add("shadow_copy");
+        if (bits & (1ull << 62)) add("hidden");
+        if (bits & (1ull << 63)) add("no_drive_letter");
+        named |= 0xF000000000000000ull;
+    } else if (role == Role::ChromeOs) {
+        add("priority=" + std::to_string((bits >> 48) & 0xF));
+        add("tries=" + std::to_string((bits >> 52) & 0xF));
+        if (bits & (1ull << 56)) add("successful");
+        named |= 0x01FF000000000000ull;
+    } else if (linux) {
+        if (bits & (1ull << 59)) add("grow_file_system");
+        if (bits & (1ull << 60)) add("read_only");
+        if (bits & (1ull << 63)) add("no_auto");
+        named |= (1ull << 59) | (1ull << 60) | (1ull << 63);
+    }
+    for (int b = 3; b < 64; ++b)
+        if ((bits & (1ull << b)) && !(named & (1ull << b))) add("bit " + std::to_string(b));
+    return out;
+}
+} // namespace
+
 layout::Node GptTable::describe() const {
     const std::uint32_t ss = m_geometry.logicalSectorSize;
     layout::Node root;
@@ -513,6 +565,20 @@ layout::Node GptTable::describe() const {
         if (auto* c = n.child("my_lba"); c && !st.selfLbaOk && st.signatureOk) c->flag(Validity::Error, "does not match the header's location");
         if (auto* c = n.child("alternate_lba"); c && gen::GptHeader(raw).alternateLba() != (st.lba == 1 ? expectedBackupLba(m_geometry.sectors()) : 1))
             c->flag(Validity::Warning, "does not point at the expected location");
+        // The rest of the block: reserved, must be zero.
+        if (raw.size() > kHeaderSize) {
+            const std::uint32_t hs = std::max<std::uint32_t>(kHeaderSize, std::min<std::uint32_t>(gen::GptHeader(raw).headerSize(), static_cast<std::uint32_t>(raw.size())));
+            layout::Node tail;
+            tail.name = "reserved_tail";
+            tail.type = layout::FieldType::Bytes;
+            tail.absOffset = st.lba * ss + hs;
+            tail.size = raw.size() - hs;
+            tail.value = "<" + std::to_string(raw.size() - hs) + " bytes>";
+            tail.doc = "Bytes after header_size up to the end of the block; reserved, must be zero";
+            if (!std::all_of(raw.begin() + hs, raw.end(), [](std::byte b) { return b == std::byte{0}; })) tail.flag(Validity::Warning, "not zero");
+            n.addChild(std::move(tail));
+            n.size = raw.size();
+        }
         if (!st.valid()) n.flag(Validity::Error, st.problem);
         return n;
     };
@@ -537,7 +603,9 @@ layout::Node GptTable::describe() const {
             if (type.isNil()) continue;
             auto e = view.describe(lba * ss + off);
             e.name = "entry " + std::to_string(i + 1);
-            if (auto* t = e.child("partition_type_guid")) t->pretty = types::name(PartitionType::gpt(type));
+            const PartitionType ptype = PartitionType::gpt(type);
+            if (auto* t = e.child("partition_type_guid")) t->pretty = types::name(ptype);
+            if (auto* a = e.child("attributes")) a->pretty = attributeNames(types::role(ptype), view.attributes());
             n.addChild(std::move(e));
         }
         if (st.present && st.signatureOk && !st.entriesCrcOk) n.flag(Validity::Error, "CRC does not match the header's partition_entries_crc32");

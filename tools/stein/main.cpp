@@ -6,13 +6,14 @@
 //   stein table   <image>                 partition table details
 //   stein inspect <image> [--doc]         hexinator-style tree of every metadata structure
 //   stein verify  <image>                 exit 0 if healthy, 1 on warnings, 2 on errors
-//   stein repair  <image> [--dry-run]     fix repairable problems (GPT: rebuild/relocate copies)
+//   stein repair  <image> [--dry-run]     fix repairable problems (GPT: rebuild/relocate copies; filesystems: checksums, backup copies)
 //   stein pt dump <image> <piece.sparse>  save the partition-table metadata alone
 //   stein pt restore <piece.sparse> <image>
 //   stein pt create|add|rm|set|wipe ...   edit the table (simulated on an overlay, applied in one pass)
 //   stein types [gpt|mbr]                 list known partition types
 //
 // <image> is a regular file or (on Linux) a raw block device such as /dev/sdb.
+#include <functional>
 #include "stein/block/file_device.hpp"
 #include "stein/block/sparse_file.hpp"
 #include "stein/container/luks.hpp"
@@ -57,7 +58,7 @@ int usage() {
                "  stein table   <image>                     partition table details\n"
                "  stein inspect <image> [--doc] [--sector-size N]\n"
                "  stein verify  <image>\n"
-               "  stein repair  <image> [--dry-run]\n"
+               "  stein repair  <image> [--dry-run]         table copies, then filesystems that can fix their own metadata (exFAT boot regions)\n"
                "  stein pt dump <image> <piece.sparse>\n"
                "  stein pt restore <piece.sparse> <image>\n"
                "      pieces are encrypted when --passphrase (or $STEIN_PASSPHRASE) is given\n"
@@ -679,22 +680,46 @@ int cmdRepair(const Args& a) {
     if (a.positional.size() < 2) return usage();
     auto dev = openImage(a.positional[1], !a.dryRun, a.sectorSize);
     if (!dev) return die(dev.error());
-    auto t = pt::PartitionTable::read(*dev);
-    if (!t) return die(t.error());
     bool any = false;
-    for (const auto& d : (*t)->diagnostics())
-        if (d.repairable) {
-            any = true;
-            std::printf("would fix: %s\n", d.message.c_str());
+    // The partition table first.
+    auto t = pt::PartitionTable::read(*dev);
+    if (!t && t.error().category() != ErrorCategory::NotFound) return die(t.error());
+    if (t) {
+        bool tableAny = false;
+        for (const auto& d : (*t)->diagnostics())
+            if (d.repairable) {
+                tableAny = any = true;
+                std::printf("would fix: %s\n", d.message.c_str());
+            }
+        if (tableAny && !a.dryRun) {
+            if (auto r = (*t)->repair(**dev, pt::RepairOptions{}); !r) return die(r.error());
+            std::puts("table repaired; new state:");
+            printTable(**t);
         }
-    if (!any) {
-        std::puts("nothing to repair");
-        return 0;
     }
-    if (a.dryRun) return 0;
-    if (auto r = (*t)->repair(**dev, pt::RepairOptions{}); !r) return die(r.error());
-    std::puts("repaired; new state:");
-    printTable(**t);
+    // Then every filesystem that knows how to fix its own metadata.
+    auto tree = probe::probe(*dev);
+    if (!tree) return die(tree.error());
+    std::function<int(const probe::Node&)> walk = [&](const probe::Node& n) -> int {
+        if (n.content) {
+            bool fsAny = false;
+            for (const auto& d : n.content->diagnostics())
+                if (d.repairable) {
+                    fsAny = any = true;
+                    std::printf("would fix (%s at %llu): %s\n", n.content->info().type == fs::FsType::Unknown ? "filesystem" : std::string(fs::toString(n.content->info().type)).c_str(),
+                                static_cast<unsigned long long>(n.region.offset), d.message.c_str());
+                }
+            if (fsAny && !a.dryRun) {
+                if (auto r = n.content->repair(*n.device); !r) return die(r.error());
+                std::printf("%s at %llu repaired\n", std::string(fs::toString(n.content->info().type)).c_str(), static_cast<unsigned long long>(n.region.offset));
+            }
+        }
+        for (const auto& c : n.children)
+            if (int rc = walk(c); rc) return rc;
+        return 0;
+    };
+    if (int rc = walk(*tree); rc) return rc;
+    if (!any) std::puts("nothing to repair");
     return 0;
 }
 
