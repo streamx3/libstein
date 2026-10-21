@@ -76,6 +76,7 @@ private:
     std::vector<std::byte> m_mbrSector;       // LBA 0 as read (bootstrap preserved on write)
     std::vector<std::byte> m_primaryHeaderRaw, m_backupHeaderRaw;   // for describe()
     std::vector<std::byte> m_entriesRaw;                            // the array we loaded
+    std::vector<std::byte> m_primaryEntriesRaw, m_backupEntriesRaw; // each copy as read, for describe()
     bool m_loadedFromBackup = false;
 };
 

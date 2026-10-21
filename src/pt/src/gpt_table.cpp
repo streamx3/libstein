@@ -126,6 +126,10 @@ Expected<std::unique_ptr<GptTable>> GptTable::read(BlockDevicePtr device) {
         }
     }
 
+    // Keep each copy's array as read: describe() shows every copy from its own bytes.
+    t->m_primaryEntriesRaw = primaryEntries;
+    t->m_backupEntriesRaw = backupEntries;
+
     const bool primaryUsable = primaryOk && t->m_primary.entriesCrcOk;
     const bool backupUsable = backupOk && t->m_backup.entriesCrcOk;
     if (!primaryOk && !backupOk && !t->m_hasProtectiveMbr)
@@ -514,24 +518,38 @@ layout::Node GptTable::describe() const {
     };
     root.addChild(describeHeader(m_primaryHeaderRaw, m_primary, "primary GPT header"));
 
-    auto describeEntries = [&](Lba lba, const char* title) {
+    // Each array from its own bytes: every used slot, whatever the other copy says.
+    auto describeEntries = [&](Lba lba, const char* title, const std::vector<std::byte>& raw, const HeaderState& st) {
         layout::Node n;
         n.name = title;
         n.isStruct = true;
         n.absOffset = lba * ss;
         n.size = entryArraySectors() * ss;
-        for (const auto& p : m_partitions) {
-            std::size_t off = static_cast<std::size_t>(p.index - 1) * m_entrySize;
-            if (off + gen::GptEntry::kSize > m_entriesRaw.size()) break;
-            auto e = gen::GptEntry(std::span<const std::byte>(m_entriesRaw).subspan(off, gen::GptEntry::kSize)).describe(lba * ss + off);
-            e.name = "entry " + std::to_string(p.index);
-            if (auto* t = e.child("partition_type_guid")) t->pretty = types::name(p.type);
+        if (raw.empty()) {
+            n.flag(Validity::Error, st.present ? (st.problem.empty() ? "not read" : st.problem) : "header missing; array location unknown");
+            return n;
+        }
+        for (std::uint32_t i = 0; i < m_entryCount; ++i) {
+            const std::size_t off = static_cast<std::size_t>(i) * m_entrySize;
+            if (off + gen::GptEntry::kSize > raw.size()) break;
+            gen::GptEntry view(std::span<const std::byte>(raw).subspan(off, gen::GptEntry::kSize));
+            const Uuid type = view.partitionTypeGuid();
+            if (type.isNil()) continue;
+            auto e = view.describe(lba * ss + off);
+            e.name = "entry " + std::to_string(i + 1);
+            if (auto* t = e.child("partition_type_guid")) t->pretty = types::name(PartitionType::gpt(type));
             n.addChild(std::move(e));
         }
+        if (st.present && st.signatureOk && !st.entriesCrcOk) n.flag(Validity::Error, "CRC does not match the header's partition_entries_crc32");
         return n;
     };
-    root.addChild(describeEntries(m_primaryEntriesLba, "primary partition entries"));
-    root.addChild(describeEntries(m_backupEntriesLba, "backup partition entries"));
+    root.addChild(describeEntries(m_primaryEntriesLba, "primary partition entries", m_primaryEntriesRaw, m_primary));
+    {
+        auto backup = describeEntries(m_backupEntriesLba, "backup partition entries", m_backupEntriesRaw, m_backup);
+        if (!m_primaryEntriesRaw.empty() && !m_backupEntriesRaw.empty() && m_primaryEntriesRaw != m_backupEntriesRaw)
+            backup.flag(Validity::Warning, "differs from the primary array");
+        root.addChild(std::move(backup));
+    }
     root.addChild(describeHeader(m_backupHeaderRaw, m_backup, "backup GPT header"));
 
     for (const auto& d : m_diagnostics)

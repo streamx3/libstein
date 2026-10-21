@@ -493,3 +493,31 @@ TEST_CASE("PartitionTable::createEmpty dispatch") {
     CHECK((*PartitionTable::createEmpty(TableType::Apm, geo))->type() == TableType::Apm);
     CHECK(PartitionTable::createEmpty(TableType::Sun, geo).error().category() == ErrorCategory::Unsupported);
 }
+
+TEST_CASE("GPT: each entry array is described from its own bytes") {
+    auto dev = loadSparseFixture("pt/gpt_basic.sparse");
+    REQUIRE(dev);
+    // Rename partition 2 in the backup array only (backup entries start at LBA 32735).
+    const ByteCount backupEntry2 = ByteCount{32735} * 512 + 128;
+    const char16_t x = u'X';
+    REQUIRE(dev->writeAt(backupEntry2 + 0x38, std::as_bytes(std::span(&x, 1))));
+    auto table = GptTable::read(dev);
+    REQUIRE(table);
+    auto& gpt = **table;
+    CHECK(gpt.partitions()[1].name == "Linux data");       // the primary is the source of truth
+    CHECK(hasDiagnostic(gpt, "gpt.backup_entries"));
+    const auto tree = gpt.describe();
+    const auto* primary = tree.child("primary partition entries");
+    const auto* backup = tree.child("backup partition entries");
+    REQUIRE(primary);
+    REQUIRE(backup);
+    REQUIRE(primary->children.size() == 3);
+    REQUIRE(backup->children.size() == 3);
+    CHECK(primary->children[1].child("partition_name")->value == "Linux data");
+    CHECK(backup->children[1].child("partition_name")->value == "Xinux data");
+    CHECK(backup->children[1].absOffset == backupEntry2);
+    CHECK(primary->validity == Validity::Ok);
+    CHECK(backup->validity == Validity::Error);
+    CHECK(backup->message.find("CRC") != std::string::npos);
+}
+
