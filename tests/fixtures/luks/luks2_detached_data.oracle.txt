@@ -1,0 +1,3 @@
+passphrase=luks test passphrase
+header=luks2_detached_header.sparse
+payload=ext4 small_luks at offset 0 of this image, written through libstein XtsDevice

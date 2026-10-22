@@ -1,0 +1,4 @@
+passphrase=luks test passphrase
+master_key=32ef0f691f9c5987a9bab96d7ab542032d4667abec22c0a6cf1fb37ec8dce7ef
+generated=cryptsetup 2.8.4 on Ubuntu 26.04 aarch64, 2026-10-22, luksFormat --type luks1 --key-size 256 (AES-128 XTS, pbkdf2-sha256 ~17.5M iterations: slow, keep behind STEIN_SLOW_TESTS)
+payload=header only, cut 64 KiB past the payload offset

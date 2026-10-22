@@ -6,12 +6,16 @@
 
 #include <algorithm>
 #include <cstring>
+#include <memory>
+#include <new>
+#include <thread>
 
 #if defined(_WIN32)
 #include <windows.h>
 #include <bcrypt.h>
 #elif defined(__APPLE__)
 #include <stdlib.h>
+#include <sys/sysctl.h>
 #elif defined(__linux__)
 #include <sys/random.h>
 #include <cerrno>
@@ -489,13 +493,43 @@ void le32push(std::vector<std::byte>& v, std::uint32_t x) {
 
 } // namespace
 
+static std::uint64_t physicalMemoryBytes() {
+#if defined(_WIN32)
+    MEMORYSTATUSEX st{};
+    st.dwLength = sizeof st;
+    if (GlobalMemoryStatusEx(&st)) return st.ullTotalPhys;
+    return 0;
+#elif defined(__APPLE__)
+    std::uint64_t mem = 0;
+    std::size_t len = sizeof mem;
+    if (::sysctlbyname("hw.memsize", &mem, &len, nullptr, 0) == 0) return mem;
+    return 0;
+#elif defined(__linux__)
+    const long pages = ::sysconf(_SC_PHYS_PAGES), page = ::sysconf(_SC_PAGESIZE);
+    if (pages > 0 && page > 0) return static_cast<std::uint64_t>(pages) * static_cast<std::uint64_t>(page);
+    return 0;
+#else
+    return 0;
+#endif
+}
+
+std::uint64_t argon2MemoryCapKiB() {
+    constexpr std::uint64_t kHardCapKiB = 4ull * 1024 * 1024;   // 4 GiB: what cryptsetup itself never exceeds
+    const std::uint64_t phys = physicalMemoryBytes();
+    if (phys == 0) return kHardCapKiB;   // unknown: the allocation below is nothrow, so the hard cap alone is safe
+    return std::min(kHardCapKiB, phys / 2 / 1024);
+}
+
 Expected<void> argon2(Argon2Type type, std::span<const std::byte> password, std::span<const std::byte> salt, std::uint32_t passes, std::uint32_t memoryKiB,
-                      std::uint32_t parallelism, std::span<std::uint8_t> out, std::span<const std::byte> secret, std::span<const std::byte> ad) {
+                      std::uint32_t parallelism, std::span<std::uint8_t> out, std::span<const std::byte> secret, std::span<const std::byte> ad,
+                      const Argon2Options& options) {
     if (parallelism == 0 || parallelism > 0xFFFFFF) return fail(ErrorCategory::InvalidArgument, "argon2: bad parallelism");
     if (passes == 0) return fail(ErrorCategory::InvalidArgument, "argon2: passes must be >= 1");
     if (memoryKiB < 8 * parallelism) return fail(ErrorCategory::InvalidArgument, "argon2: memory must be at least 8 KiB per lane");
     if (out.size() < 4) return fail(ErrorCategory::InvalidArgument, "argon2: output too short");
     if (salt.size() < 8) return fail(ErrorCategory::InvalidArgument, "argon2: salt must be at least 8 bytes");
+    if (const std::uint64_t cap = argon2MemoryCapKiB(); memoryKiB > cap)
+        return fail(ErrorCategory::Unsupported, "argon2: " + std::to_string(memoryKiB / 1024) + " MiB of memory requested, above this machine's cap of " + std::to_string(cap / 1024) + " MiB");
     constexpr std::uint32_t kVersion = 0x13;
     const std::uint32_t kTypeId = static_cast<std::uint32_t>(type);
     // H0
@@ -521,7 +555,9 @@ Expected<void> argon2(Argon2Type type, std::span<const std::byte> password, std:
     const std::uint32_t mPrime = 4 * lanes * (memoryKiB / (4 * lanes));
     const std::uint32_t q = mPrime / lanes;          // lane length
     const std::uint32_t segLen = q / 4;
-    std::vector<ArgonBlock> memory(mPrime);
+    // The cap above keeps this within the machine; nothrow so that a header can never turn into std::bad_alloc.
+    std::unique_ptr<ArgonBlock[]> memory(new (std::nothrow) ArgonBlock[mPrime]);
+    if (!memory) return fail(ErrorCategory::Unsupported, "argon2: cannot allocate " + std::to_string(memoryKiB / 1024) + " MiB of memory");
     auto block = [&](std::uint32_t lane, std::uint32_t index) -> ArgonBlock& { return memory[static_cast<std::size_t>(lane) * q + index]; };
 
     // First two blocks of every lane.
@@ -539,70 +575,96 @@ Expected<void> argon2(Argon2Type type, std::span<const std::byte> password, std:
 
     ArgonBlock zero{};
     std::memset(zero.v, 0, sizeof zero.v);
-    for (std::uint32_t pass = 0; pass < passes; ++pass) {
-        for (std::uint32_t slice = 0; slice < 4; ++slice) {
-            for (std::uint32_t lane = 0; lane < lanes; ++lane) {
-                // Argon2i: always data-independent; Argon2d: never; Argon2id: first half of pass 0.
-                const bool independent = type == Argon2Type::I || (type == Argon2Type::Id && pass == 0 && slice < 2);
-                ArgonBlock addr{}, inputBlock{};
-                std::memset(inputBlock.v, 0, sizeof inputBlock.v);
-                inputBlock.v[0] = pass;
-                inputBlock.v[1] = lane;
-                inputBlock.v[2] = slice;
-                inputBlock.v[3] = mPrime;
-                inputBlock.v[4] = passes;
-                inputBlock.v[5] = kTypeId;
-                std::uint32_t start = (pass == 0 && slice == 0) ? 2 : 0;
-                if (independent && start != 0) {
-                    // Generate the first address block (counter 1) even though indices 0,1 are prefilled.
-                    inputBlock.v[6] = 1;
+    // One segment: lane `lane` of slice `slice` in pass `pass`. Within a slice every lane writes only
+    // its own segment and reads only segments of earlier slices (RFC 9106 §3.4), so the lanes of a
+    // slice are independent and may run on separate threads; the slice boundary is the barrier.
+    auto fillSegment = [&](std::uint32_t pass, std::uint32_t slice, std::uint32_t lane) {
+        // Argon2i: always data-independent; Argon2d: never; Argon2id: first half of pass 0.
+        const bool independent = type == Argon2Type::I || (type == Argon2Type::Id && pass == 0 && slice < 2);
+        ArgonBlock addr{}, inputBlock{};
+        std::memset(inputBlock.v, 0, sizeof inputBlock.v);
+        inputBlock.v[0] = pass;
+        inputBlock.v[1] = lane;
+        inputBlock.v[2] = slice;
+        inputBlock.v[3] = mPrime;
+        inputBlock.v[4] = passes;
+        inputBlock.v[5] = kTypeId;
+        std::uint32_t start = (pass == 0 && slice == 0) ? 2 : 0;
+        if (independent && start != 0) {
+            // Generate the first address block (counter 1) even though indices 0,1 are prefilled.
+            inputBlock.v[6] = 1;
+            ArgonBlock tmp;
+            argonG(zero, inputBlock, tmp);
+            argonG(zero, tmp, addr);
+        }
+        for (std::uint32_t index = start; index < segLen; ++index) {
+            std::uint32_t j1, j2;
+            if (independent) {
+                if (index % 128 == 0) {
+                    inputBlock.v[6] = index / 128 + 1;
                     ArgonBlock tmp;
                     argonG(zero, inputBlock, tmp);
                     argonG(zero, tmp, addr);
                 }
-                for (std::uint32_t index = start; index < segLen; ++index) {
-                    std::uint32_t j1, j2;
-                    if (independent) {
-                        if (index % 128 == 0) {
-                            inputBlock.v[6] = index / 128 + 1;
-                            ArgonBlock tmp;
-                            argonG(zero, inputBlock, tmp);
-                            argonG(zero, tmp, addr);
-                        }
-                        const std::uint64_t pr = addr.v[index % 128];
-                        j1 = static_cast<std::uint32_t>(pr);
-                        j2 = static_cast<std::uint32_t>(pr >> 32);
-                    } else {
-                        const std::uint32_t cur = slice * segLen + index;
-                        const std::uint32_t prev = cur == 0 ? q - 1 : cur - 1;
-                        const std::uint64_t pr = block(lane, prev).v[0];
-                        j1 = static_cast<std::uint32_t>(pr);
-                        j2 = static_cast<std::uint32_t>(pr >> 32);
-                    }
-                    const std::uint32_t refLane = (pass == 0 && slice == 0) ? lane : j2 % lanes;
-                    const bool sameLane = refLane == lane;
-                    std::uint64_t refArea;
-                    if (pass == 0) {
-                        if (slice == 0) refArea = index - 1;
-                        else if (sameLane) refArea = static_cast<std::uint64_t>(slice) * segLen + index - 1;
-                        else refArea = static_cast<std::uint64_t>(slice) * segLen - (index == 0 ? 1 : 0);
-                    } else {
-                        if (sameLane) refArea = static_cast<std::uint64_t>(q) - segLen + index - 1;
-                        else refArea = static_cast<std::uint64_t>(q) - segLen - (index == 0 ? 1 : 0);
-                    }
-                    std::uint64_t rel = j1;
-                    rel = (rel * rel) >> 32;
-                    rel = refArea - 1 - ((refArea * rel) >> 32);
-                    const std::uint32_t startPos = pass == 0 ? 0 : (slice == 3 ? 0 : (slice + 1) * segLen);
-                    const std::uint32_t refIndex = static_cast<std::uint32_t>((startPos + rel) % q);
-                    const std::uint32_t cur = slice * segLen + index;
-                    const std::uint32_t prev = cur == 0 ? q - 1 : cur - 1;
-                    ArgonBlock fresh;
-                    argonG(block(lane, prev), block(refLane, refIndex), fresh);
-                    if (pass == 0) block(lane, cur) = fresh;
-                    else argonXor(block(lane, cur), block(lane, cur), fresh);
+                const std::uint64_t pr = addr.v[index % 128];
+                j1 = static_cast<std::uint32_t>(pr);
+                j2 = static_cast<std::uint32_t>(pr >> 32);
+            } else {
+                const std::uint32_t cur = slice * segLen + index;
+                const std::uint32_t prev = cur == 0 ? q - 1 : cur - 1;
+                const std::uint64_t pr = block(lane, prev).v[0];
+                j1 = static_cast<std::uint32_t>(pr);
+                j2 = static_cast<std::uint32_t>(pr >> 32);
+            }
+            const std::uint32_t refLane = (pass == 0 && slice == 0) ? lane : j2 % lanes;
+            const bool sameLane = refLane == lane;
+            std::uint64_t refArea;
+            if (pass == 0) {
+                if (slice == 0) refArea = index - 1;
+                else if (sameLane) refArea = static_cast<std::uint64_t>(slice) * segLen + index - 1;
+                else refArea = static_cast<std::uint64_t>(slice) * segLen - (index == 0 ? 1 : 0);
+            } else {
+                if (sameLane) refArea = static_cast<std::uint64_t>(q) - segLen + index - 1;
+                else refArea = static_cast<std::uint64_t>(q) - segLen - (index == 0 ? 1 : 0);
+            }
+            std::uint64_t rel = j1;
+            rel = (rel * rel) >> 32;
+            rel = refArea - 1 - ((refArea * rel) >> 32);
+            const std::uint32_t startPos = pass == 0 ? 0 : (slice == 3 ? 0 : (slice + 1) * segLen);
+            const std::uint32_t refIndex = static_cast<std::uint32_t>((startPos + rel) % q);
+            const std::uint32_t cur = slice * segLen + index;
+            const std::uint32_t prev = cur == 0 ? q - 1 : cur - 1;
+            ArgonBlock fresh;
+            argonG(block(lane, prev), block(refLane, refIndex), fresh);
+            if (pass == 0) block(lane, cur) = fresh;
+            else argonXor(block(lane, cur), block(lane, cur), fresh);
+        }
+    };
+
+    const std::uint32_t hw = std::max(1u, std::thread::hardware_concurrency());
+    const std::uint32_t threads = std::min(lanes, options.threads ? options.threads : hw);
+    for (std::uint32_t pass = 0; pass < passes; ++pass) {
+        for (std::uint32_t slice = 0; slice < 4; ++slice) {
+            if (options.cancelled && options.cancelled()) return fail(ErrorCategory::Cancelled, "argon2 cancelled");
+            if (threads <= 1) {
+                for (std::uint32_t lane = 0; lane < lanes; ++lane) fillSegment(pass, slice, lane);
+                continue;
+            }
+            // Thread `tid` takes lanes tid, tid + threads, ...; this thread is worker 0.
+            auto work = [&](std::uint32_t tid) {
+                for (std::uint32_t lane = tid; lane < lanes; lane += threads) fillSegment(pass, slice, lane);
+            };
+            std::vector<std::thread> workers;
+            workers.reserve(threads - 1);
+            for (std::uint32_t tid = 1; tid < threads; ++tid) {
+                try {
+                    workers.emplace_back(work, tid);
+                } catch (...) {
+                    work(tid);   // the OS refused a thread: that share runs here, the result is the same
                 }
             }
+            work(0);
+            for (auto& w : workers) w.join();
         }
     }
     // Final block: XOR of the last block of every lane.

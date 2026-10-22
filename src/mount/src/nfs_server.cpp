@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <thread>
@@ -153,6 +154,8 @@ struct NfsServer::Impl {
     std::map<std::uint64_t, std::vector<fs::DirEntry>> dirCache;
     std::uint64_t rootId = 0;
     std::vector<std::byte> readBuf;
+    std::string exportPath = "/";        // what MNT must name (besides "/") and EXPORT lists
+    std::function<void()> onUnmount;     // UMNT/UMNTALL seen: run after the lock is dropped
 
     // ---- attributes
 
@@ -214,11 +217,19 @@ struct NfsServer::Impl {
 
     // ---- MOUNT program
 
-    bool handleMount(std::uint32_t proc, XdrReader& args, XdrWriter& res) {
+    // `unmounted` is set on UMNT/UMNTALL so dispatch() can run the callback without the lock.
+    bool handleMount(std::uint32_t proc, XdrReader& args, XdrWriter& res, bool& unmounted) {
         switch (proc) {
         case 0: return true;   // NULL
         case 1: {              // MNT
-            (void)args.string();
+            // mount_nfs sends the path after "host:" verbatim; the root and the export name are
+            // the same directory, anything else is not ours.
+            std::string path = args.string(1024);
+            while (path.size() > 1 && path.back() == '/') path.pop_back();
+            if (!path.empty() && path != "/" && path != exportPath) {
+                res.u32(kNfs3ErrNoent);   // MNT3ERR_NOENT
+                return true;
+            }
             res.u32(0);        // MNT3_OK
             writeFh(res, rootId);
             res.u32(2);        // auth flavors
@@ -231,10 +242,11 @@ struct NfsServer::Impl {
             return true;
         case 3:   // UMNT
         case 4:   // UMNTALL
+            unmounted = true;
             return true;
-        case 5:   // EXPORT: one entry "/" open to everyone
+        case 5:   // EXPORT: one entry, open to everyone
             res.boolean(true);
-            res.string("/");
+            res.string(exportPath);
             res.boolean(false);   // no groups
             res.boolean(false);   // end of list
             return true;
@@ -485,11 +497,12 @@ struct NfsServer::Impl {
             return std::move(w.buf);
         }
         XdrWriter res;
-        bool known;
+        bool known, unmounted = false;
         {
             std::lock_guard<std::mutex> lock(mutex);
-            known = prog == kProgMount ? handleMount(proc, r, res) : handleNfs(proc, r, res);
+            known = prog == kProgMount ? handleMount(proc, r, res, unmounted) : handleNfs(proc, r, res);
         }
+        if (unmounted && onUnmount) onUnmount();
         if (debug) std::fprintf(stderr, "nfs: %s proc %u -> %s status %u (%zu bytes)\n", prog == kProgMount ? "mount" : "nfs", proc, known ? "ok" : "unavailable", res.buf.size() >= 4 ? loadBe32(res.buf.data()) : 0u, res.buf.size());
         if (!known) {
             w.u32(3);   // PROC_UNAVAIL
@@ -588,6 +601,10 @@ Expected<std::unique_ptr<NfsServer>> NfsServer::start(std::unique_ptr<fs::Reader
     if (!root) return fail(root.error());
     im.rootId = root->id;
     im.reader = std::move(reader);
+    if (options.exportPath.empty() || options.exportPath.front() != '/') return fail(ErrorCategory::InvalidArgument, "NFS export path must be absolute: '" + options.exportPath + "'");
+    im.exportPath = options.exportPath;
+    while (im.exportPath.size() > 1 && im.exportPath.back() == '/') im.exportPath.pop_back();
+    im.onUnmount = options.onUnmount;
     im.listenSock = ::socket(AF_INET, SOCK_STREAM, 0);
     if (im.listenSock == kBadSocket) return fail(ErrorCategory::Io, "socket() failed");
     int one = 1;

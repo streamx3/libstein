@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <map>
 #include <set>
 
 using namespace stein;
@@ -569,6 +571,7 @@ TEST_CASE("GPT: reserved tail of the header block is checked and repaired; attri
 namespace {
 constexpr ByteCount kEntry1 = 0x1BE, kEntry2 = 0x1CE, kEntry3 = 0x1DE, kEntry4 = 0x1EE;   // entry offsets inside a sector
 constexpr ByteCount kEbr1 = 10240 * 512, kEbr2 = 16384 * 512;                           // mbr_basic's EBRs
+constexpr Lba kL5Start = 12288, kL5Sectors = 4096, kL6Start = 18432, kL6Sectors = 8192;  // mbr_basic's logicals
 
 void pokeU8(BlockDevice& d, ByteCount off, std::uint8_t v) {
     const std::byte b{v};
@@ -587,8 +590,17 @@ void pokeEntry(BlockDevice& d, ByteCount off, std::uint8_t status, std::uint8_t 
     pokeU32(d, off + 8, first);
     pokeU32(d, off + 12, count);
 }
+// An EBR as a partitioner leaves it: one logical, no link, the boot signature.
+void pokeEbr(BlockDevice& d, Lba ebr, std::uint8_t type, std::uint32_t dataGap, std::uint32_t count) {
+    pokeEntry(d, ebr * 512 + kEntry1, 0x00, type, dataGap, count);
+    pokeU8(d, ebr * 512 + 0x1FE, 0x55);
+    pokeU8(d, ebr * 512 + 0x1FF, 0xAA);
+}
 std::shared_ptr<MemoryDevice> snapshot(const MemoryDevice& d) {
     return std::make_shared<MemoryDevice>(std::vector<std::byte>(d.bytes().begin(), d.bytes().end()), d.sectorSize());
+}
+bool sameBytes(const MemoryDevice& a, const MemoryDevice& b) {
+    return std::equal(a.bytes().begin(), a.bytes().end(), b.bytes().begin(), b.bytes().end());
 }
 const Diagnostic* findDiagnostic(const PartitionTable& t, std::string_view code) {
     for (const auto& d : t.diagnostics())
@@ -603,6 +615,24 @@ std::size_t logicalCount(const PartitionTable& t) {
     std::size_t n = 0;
     for (const auto& p : t.partitions()) n += p.isLogical;
     return n;
+}
+
+// A minimal ext2 superblock (1 KiB blocks) at the start of a would-be logical partition: enough
+// for the detector (magic, block size, group sizes) and for a size the recovery can trust.
+void plantExt2(BlockDevice& d, Lba firstLba, SectorCount sectors) {
+    const ByteCount sb = firstLba * 512 + 1024;
+    REQUIRE(d.zeroRange(sb, 1024));
+    const auto blocks = static_cast<std::uint32_t>(sectors / 2);
+    pokeU32(d, sb + 0, blocks / 8);    // s_inodes_count
+    pokeU32(d, sb + 4, blocks);        // s_blocks_count
+    pokeU32(d, sb + 20, 1);            // s_first_data_block
+    pokeU32(d, sb + 24, 0);            // s_log_block_size: 1 KiB
+    pokeU32(d, sb + 32, 8192);         // s_blocks_per_group
+    pokeU32(d, sb + 40, 1024);         // s_inodes_per_group
+    pokeU8(d, sb + 56, 0x53);          // s_magic 0xEF53
+    pokeU8(d, sb + 57, 0xEF);
+    pokeU8(d, sb + 58, 1);             // s_state: clean
+    pokeU32(d, sb + 76, 1);            // s_rev_level: dynamic
 }
 
 // A device whose listed sectors fail to read until something is written over them, the way a
@@ -628,6 +658,49 @@ public:
 private:
     std::shared_ptr<MemoryDevice> m_inner;
     std::set<Lba> m_bad;
+};
+
+// A device of any size that stores only the sectors written to it: geometries no vector holds.
+class SparseDevice final : public BlockDevice {
+public:
+    explicit SparseDevice(ByteCount size, std::uint32_t ss = 512)
+        : m_geometry{.sizeBytes = size, .logicalSectorSize = ss, .physicalSectorSize = ss} {}
+    std::string name() const override { return "sparse"; }
+    Geometry geometry() const override { return m_geometry; }
+    bool isReadOnly() const override { return false; }
+    Expected<void> readAt(ByteCount offset, std::span<std::byte> dst) override {
+        if (auto r = checkRange(offset, dst.size()); !r) return r;
+        std::fill(dst.begin(), dst.end(), std::byte{0});
+        forEachSector(offset, dst.size(), [&](Lba lba, ByteCount from, ByteCount to) {
+            auto it = m_sectors.find(lba);
+            if (it == m_sectors.end()) return;
+            std::copy_n(it->second.begin() + static_cast<std::ptrdiff_t>(from - lba * m_geometry.logicalSectorSize), static_cast<std::ptrdiff_t>(to - from),
+                        dst.begin() + static_cast<std::ptrdiff_t>(from - offset));
+        });
+        return {};
+    }
+    Expected<void> writeAt(ByteCount offset, std::span<const std::byte> src) override {
+        if (auto r = checkRange(offset, src.size()); !r) return r;
+        forEachSector(offset, src.size(), [&](Lba lba, ByteCount from, ByteCount to) {
+            auto& sec = m_sectors.try_emplace(lba, std::vector<std::byte>(m_geometry.logicalSectorSize, std::byte{0})).first->second;
+            std::copy_n(src.begin() + static_cast<std::ptrdiff_t>(from - offset), static_cast<std::ptrdiff_t>(to - from),
+                        sec.begin() + static_cast<std::ptrdiff_t>(from - lba * m_geometry.logicalSectorSize));
+        });
+        return {};
+    }
+    Expected<void> flush() override { return {}; }
+    std::size_t storedSectors() const { return m_sectors.size(); }
+
+private:
+    // Calls f(lba, firstByte, endByte) for the part of each sector that [offset, offset+length) touches.
+    template <class F>
+    void forEachSector(ByteCount offset, ByteCount length, F f) const {
+        const ByteCount ss = m_geometry.logicalSectorSize;
+        for (Lba lba = offset / ss, end = (offset + length + ss - 1) / ss; lba < end; ++lba)
+            f(lba, std::max(lba * ss, offset), std::min((lba + 1) * ss, offset + length));
+    }
+    Geometry m_geometry;
+    std::map<Lba, std::vector<std::byte>> m_sectors;
 };
 } // namespace
 
@@ -665,7 +738,7 @@ TEST_CASE("MBR: EBR with a lost boot signature is recovered through its link and
     CHECK((*again)->diagnostics().empty());
 }
 
-TEST_CASE("MBR: a zeroed middle EBR loses its own logical; the orphaned EBRs behind it are recovered") {
+TEST_CASE("MBR: a zeroed middle EBR: its logical is rebuilt from the filesystem behind it, or the chain is left open") {
     auto dev = loadSparseFixture("pt/mbr_basic.sparse");
     REQUIRE(dev);
     {
@@ -681,6 +754,7 @@ TEST_CASE("MBR: a zeroed middle EBR loses its own logical; the orphaned EBRs beh
         CHECK((*table)->find(7)->ebrLba == 26624);
         REQUIRE((*table)->write(*dev));
     }
+    plantExt2(*dev, 28672, 4096);   // L7's filesystem: what vouches for its EBR when the scan finds it
     auto pristine = snapshot(*dev);
     {
         auto table = MbrTable::read(dev);
@@ -688,47 +762,79 @@ TEST_CASE("MBR: a zeroed middle EBR loses its own logical; the orphaned EBRs beh
         CHECK((*table)->health() <= Validity::Info);
         CHECK(logicalCount(**table) == 3);
     }
-    REQUIRE(dev->zeroRange(kEbr2, 512));
-    auto table = MbrTable::read(dev);
-    REQUIRE(table);
-    auto& mbr = **table;
-    CHECK(isRepairable(mbr, "mbr.ebr_chain_broken"));
-    CHECK(isRepairable(mbr, "mbr.logical_lost"));
-    CHECK(logicalCount(mbr) == 1);
-
-    REQUIRE(mbr.repair(*dev, RepairOptions{}));
-    CHECK(mbr.health() <= Validity::Info);
-    // Logical 6 lived only in the zeroed sector and is gone; the old logical 7 is back as 6.
-    REQUIRE(logicalCount(mbr) == 2);
-    const Partition* a = mbr.find(5);
-    const Partition* b = mbr.find(6);
-    REQUIRE(a);
-    REQUIRE(b);
-    CHECK(a->firstLba == 12288);
-    CHECK(b->firstLba == 28672);
-    CHECK(b->lastLba == 32767);
-    CHECK(b->type.mbrId == 0x83);
-    CHECK(b->ebrLba == 26624);
-    // The recovered EBR is untouched, the head EBR keeps its logical and now links straight to it.
-    CHECK(*dev->read(26624 * 512, 512) == *pristine->read(26624 * 512, 512));
-    CHECK(*dev->read(kEbr1 + kEntry1, 16) == *pristine->read(kEbr1 + kEntry1, 16));
-    auto link = dev->read(kEbr1 + kEntry2, 16);
-    REQUIRE(link);
-    CHECK(std::to_integer<int>((*link)[4]) == 0x05);
-    CHECK(layout::gen::MbrEntry(*link).firstLba() == 26624 - 10240);
-    CHECK(layout::gen::MbrEntry(*link).sectorCount() == 32767 - 26624 + 1);
+    REQUIRE(dev->zeroRange(kEbr2, 512));   // L6's only description
+    SUBCASE("nothing recognisable behind the break: the loss is an Error that repair does not paper over") {
+        auto table = MbrTable::read(dev);
+        REQUIRE(table);
+        auto& mbr = **table;
+        CHECK(isRepairable(mbr, "mbr.ebr_chain_broken"));
+        const auto* lost = findDiagnostic(mbr, "mbr.logical_lost");
+        REQUIRE(lost);
+        CHECK(lost->severity == Validity::Error);
+        CHECK(!lost->repairable);
+        CHECK(lost->message.find("cannot be rebuilt") != std::string::npos);
+        CHECK(mbr.health() == Validity::Error);
+        CHECK(logicalCount(mbr) == 1);
+        auto before = snapshot(*dev);
+        auto r = mbr.repair(*dev, RepairOptions{});
+        REQUIRE(!r);
+        CHECK(r.error().category() == ErrorCategory::InvalidFormat);
+        CHECK(sameBytes(*dev, *before));   // nothing written: L6's data is still where the chain can be fixed by hand
+        CHECK(logicalCount(mbr) == 1);     // and the table is still what read() gave
+    }
+    SUBCASE("a filesystem at the usual data start: the logical comes back with the filesystem's size and type") {
+        plantExt2(*dev, kL6Start, kL6Sectors);
+        auto table = MbrTable::read(dev);
+        REQUIRE(table);
+        auto& mbr = **table;
+        const auto* lost = findDiagnostic(mbr, "mbr.logical_lost");
+        REQUIRE(lost);
+        CHECK(lost->severity == Validity::Warning);
+        CHECK(lost->repairable);
+        CHECK(lost->message.find("LBA 18432") != std::string::npos);
+        REQUIRE(mbr.repair(*dev, RepairOptions{}));
+        CHECK(mbr.health() <= Validity::Info);
+        REQUIRE(logicalCount(mbr) == 3);
+        const Partition* a = mbr.find(5);
+        const Partition* b = mbr.find(6);
+        const Partition* c = mbr.find(7);
+        REQUIRE(a);
+        REQUIRE(b);
+        REQUIRE(c);
+        CHECK(a->firstLba == kL5Start);
+        CHECK(b->firstLba == kL6Start);
+        CHECK(b->lastLba == kL6Start + kL6Sectors - 1);
+        CHECK(b->type.mbrId == 0x83);   // from the filesystem; the EBR that said 0x07 is gone
+        CHECK(b->ebrLba == 16384);
+        CHECK(c->firstLba == 28672);
+        CHECK(c->lastLba == 32767);
+        CHECK(c->type.mbrId == 0x83);
+        CHECK(c->ebrLba == 26624);
+        // The head EBR is as sfdisk wrote it, the recovered EBR is untouched, the rebuilt one links on.
+        CHECK(*dev->read(kEbr1, 512) == *pristine->read(kEbr1, 512));
+        CHECK(*dev->read(26624 * 512, 512) == *pristine->read(26624 * 512, 512));
+        auto link = dev->read(kEbr2 + kEntry2, 16);
+        REQUIRE(link);
+        CHECK(layout::gen::MbrEntry(*link).type() == 0x05);
+        CHECK(layout::gen::MbrEntry(*link).firstLba() == 26624 - 10240);
+        CHECK(layout::gen::MbrEntry(*link).sectorCount() == 32767 - 26624 + 1);
+    }
 }
 
-TEST_CASE("MBR: unreadable EBRs: the orphan scan rebuilds the chain, and repair refuses to write an empty one") {
-    SUBCASE("unreadable head EBR, the second EBR is found on the 1 MiB grid") {
+TEST_CASE("MBR: unreadable EBRs: lost logicals come back from their filesystems, orphaned EBRs from the grid, else repair refuses") {
+    SUBCASE("unreadable head EBR: its logical is rebuilt from the filesystem, the second EBR is found on the 1 MiB grid") {
         auto mem = loadSparseFixture("pt/mbr_basic.sparse");
         REQUIRE(mem);
+        plantExt2(*mem, kL5Start, kL5Sectors);
+        plantExt2(*mem, kL6Start, kL6Sectors);
+        auto pristine = snapshot(*mem);
         auto dev = std::make_shared<FaultyDevice>(mem, std::set<Lba>{10240});
         auto table = MbrTable::read(dev);
         REQUIRE(table);
         auto& mbr = **table;
         CHECK(isRepairable(mbr, "mbr.ebr_unreadable"));
         CHECK(isRepairable(mbr, "mbr.logical_lost"));
+        CHECK(findDiagnostic(mbr, "mbr.logical_lost")->message.find("LBA 12288") != std::string::npos);
         CHECK(logicalCount(mbr) == 0);
         CHECK(mbr.partitions().size() == 3);
         const auto tree = mbr.describe();
@@ -737,27 +843,68 @@ TEST_CASE("MBR: unreadable EBRs: the orphan scan rebuilds the chain, and repair 
         REQUIRE(mbr.repair(*dev, RepairOptions{}));
         CHECK(!dev->isBad(10240));   // the head EBR was rewritten
         CHECK(mbr.health() <= Validity::Info);
-        REQUIRE(logicalCount(mbr) == 1);
-        const Partition* l = mbr.find(5);
-        REQUIRE(l);
-        CHECK(l->firstLba == 18432);
-        CHECK(l->sectors() == 8192);
-        CHECK(l->type.mbrId == 0x07);
-        CHECK(l->ebrLba == 10240);   // the chain head moved to the extended partition's first sector
+        REQUIRE(logicalCount(mbr) == 2);
+        const Partition* l5 = mbr.find(5);
+        const Partition* l6 = mbr.find(6);
+        REQUIRE(l5);
+        REQUIRE(l6);
+        CHECK(l5->firstLba == kL5Start);
+        CHECK(l5->sectors() == kL5Sectors);
+        CHECK(l5->type.mbrId == 0x83);
+        CHECK(l5->ebrLba == 10240);
+        CHECK(l6->firstLba == kL6Start);
+        CHECK(l6->sectors() == kL6Sectors);
+        CHECK(l6->type.mbrId == 0x07);
+        CHECK(l6->ebrLba == 16384);
+        // Both EBRs are byte-identical to sfdisk's: the rebuilt logical has the type and span the original had.
+        REQUIRE(mbr.metadataRegions().size() == 3);
+        checkRegionsEqual(*mem, *pristine, mbr.metadataRegions());
     }
-    SUBCASE("unreadable middle EBR with nothing behind it: the chain is closed at the last good EBR") {
+    SUBCASE("unreadable middle EBR") {
         auto mem = loadSparseFixture("pt/mbr_basic.sparse");
         REQUIRE(mem);
-        auto dev = std::make_shared<FaultyDevice>(mem, std::set<Lba>{16384});
-        auto table = MbrTable::read(dev);
-        REQUIRE(table);
-        auto& mbr = **table;
-        CHECK(isRepairable(mbr, "mbr.ebr_unreadable"));
-        CHECK(logicalCount(mbr) == 1);
-        REQUIRE(mbr.repair(*dev, RepairOptions{}));
-        CHECK(mbr.health() <= Validity::Info);
-        CHECK(logicalCount(mbr) == 1);
-        CHECK(std::all_of(mem->bytes().begin() + kEbr1 + kEntry2, mem->bytes().begin() + kEbr1 + kEntry2 + 16, [](std::byte b) { return b == std::byte{0}; }));
+        SUBCASE("nothing behind it: the loss is an Error and repair leaves the chain open") {
+            auto before = snapshot(*mem);
+            auto dev = std::make_shared<FaultyDevice>(mem, std::set<Lba>{16384});
+            auto table = MbrTable::read(dev);
+            REQUIRE(table);
+            auto& mbr = **table;
+            CHECK(isRepairable(mbr, "mbr.ebr_unreadable"));
+            const auto* lost = findDiagnostic(mbr, "mbr.logical_lost");
+            REQUIRE(lost);
+            CHECK(lost->severity == Validity::Error);
+            CHECK(!lost->repairable);
+            CHECK(logicalCount(mbr) == 1);
+            auto r = mbr.repair(*dev, RepairOptions{});
+            REQUIRE(!r);
+            CHECK(r.error().category() == ErrorCategory::InvalidFormat);
+            CHECK(dev->isBad(16384));   // nothing was written
+            CHECK(sameBytes(*mem, *before));
+            CHECK(logicalCount(mbr) == 1);
+        }
+        SUBCASE("a filesystem behind it: the logical is re-entered with the filesystem's span") {
+            plantExt2(*mem, kL6Start, kL6Sectors);
+            auto dev = std::make_shared<FaultyDevice>(mem, std::set<Lba>{16384});
+            auto table = MbrTable::read(dev);
+            REQUIRE(table);
+            auto& mbr = **table;
+            CHECK(isRepairable(mbr, "mbr.logical_lost"));
+            REQUIRE(mbr.repair(*dev, RepairOptions{}));
+            CHECK(!dev->isBad(16384));
+            CHECK(mbr.health() <= Validity::Info);
+            REQUIRE(logicalCount(mbr) == 2);
+            const Partition* l6 = mbr.find(6);
+            REQUIRE(l6);
+            CHECK(l6->firstLba == kL6Start);
+            CHECK(l6->lastLba == kL6Start + kL6Sectors - 1);
+            CHECK(l6->type.mbrId == 0x83);
+            CHECK(l6->ebrLba == 16384);
+            // The head EBR's link still points at 16384 with the original span.
+            auto link = mem->read(kEbr1 + kEntry2, 16);
+            REQUIRE(link);
+            CHECK(layout::gen::MbrEntry(*link).firstLba() == 16384 - 10240);
+            CHECK(layout::gen::MbrEntry(*link).sectorCount() == 26623 - 16384 + 1);
+        }
     }
     SUBCASE("unreadable head EBR and nothing recoverable: repair fails without writing") {
         auto mem = loadSparseFixture("pt/mbr_basic.sparse");
@@ -773,6 +920,195 @@ TEST_CASE("MBR: unreadable EBRs: the orphan scan rebuilds the chain, and repair 
         CHECK(r.error().category() == ErrorCategory::InvalidFormat);
         CHECK(dev->isBad(10240));    // untouched
         CHECK(isRepairable(mbr, "mbr.ebr_unreadable"));
+    }
+}
+
+TEST_CASE("MBR: a stale EBR is not resurrected: a grid candidate needs a filesystem of the entry's size behind it") {
+    auto pristine = loadSparseFixture("pt/mbr_basic.sparse");
+    REQUIRE(pristine);
+    plantExt2(*pristine, kL6Start, kL6Sectors);   // the logical whose EBR gets lost is intact
+    SUBCASE("a leftover EBR inside the lost logical's data") {
+        auto dev = snapshot(*pristine);
+        REQUIRE(dev->zeroRange(kEbr2, 512));
+        // An earlier layout's EBR, 1 MiB-aligned, in the middle of L6: it describes a 1 MiB logical at 22528.
+        pokeEbr(*dev, 20480, 0x83, 2048, 2048);
+        auto table = MbrTable::read(dev);
+        REQUIRE(table);
+        auto& mbr = **table;
+        CHECK(isRepairable(mbr, "mbr.logical_lost"));
+        REQUIRE(mbr.repair(*dev, RepairOptions{}));
+        CHECK(mbr.health() <= Validity::Info);
+        REQUIRE(logicalCount(mbr) == 2);
+        const Partition* l6 = mbr.find(6);
+        REQUIRE(l6);
+        CHECK(l6->firstLba == kL6Start);
+        CHECK(l6->lastLba == kL6Start + kL6Sectors - 1);
+        for (const auto& p : mbr.partitions()) CHECK(p.firstLba != 22528);
+        // The stale sector is L6's data now and was left alone.
+        CHECK(layout::gen::MbrEntry(*dev->read(20480 * 512 + kEntry1, 16)).type() == 0x83);
+    }
+    SUBCASE("a leftover EBR in the free space behind the logicals, describing 28672 + 4096") {
+        auto dev = snapshot(*pristine);
+        REQUIRE(dev->zeroRange(kEbr2, 512));
+        pokeEbr(*dev, 26624, 0x83, 2048, 4096);
+        SUBCASE("nothing at its data start: ignored") {
+            auto table = MbrTable::read(dev);
+            REQUIRE(table);
+            auto& mbr = **table;
+            REQUIRE(mbr.repair(*dev, RepairOptions{}));
+            CHECK(logicalCount(mbr) == 2);
+            CHECK(!mbr.find(7));
+        }
+        SUBCASE("a filesystem of the entry's size: believed") {
+            plantExt2(*dev, 28672, 4096);
+            auto table = MbrTable::read(dev);
+            REQUIRE(table);
+            auto& mbr = **table;
+            REQUIRE(mbr.repair(*dev, RepairOptions{}));
+            REQUIRE(logicalCount(mbr) == 3);
+            const Partition* l7 = mbr.find(7);
+            REQUIRE(l7);
+            CHECK(l7->firstLba == 28672);
+            CHECK(l7->lastLba == 32767);
+            CHECK(l7->ebrLba == 26624);
+        }
+        SUBCASE("a filesystem larger than the entry: another layout's, ignored") {
+            plantExt2(*dev, 28672, 8192);
+            auto table = MbrTable::read(dev);
+            REQUIRE(table);
+            auto& mbr = **table;
+            REQUIRE(mbr.repair(*dev, RepairOptions{}));
+            CHECK(logicalCount(mbr) == 2);
+            CHECK(!mbr.find(7));
+        }
+        SUBCASE("a filesystem more than an alignment unit smaller than the entry: likewise") {
+            plantExt2(*dev, 28672, 1024);
+            auto table = MbrTable::read(dev);
+            REQUIRE(table);
+            auto& mbr = **table;
+            REQUIRE(mbr.repair(*dev, RepairOptions{}));
+            CHECK(logicalCount(mbr) == 2);
+            CHECK(!mbr.find(7));
+        }
+    }
+}
+
+TEST_CASE("MBR: the orphan scan on a 2 TiB extended partition is bounded by its budget, not by the track count") {
+    // 2.5 TiB: the extended partition takes the whole MBR-addressable range. L6's EBR is lost and
+    // its filesystem brings it back; the scan must not visit the container's 68 million track
+    // points one by one, whether they lie in free space or inside the data of a logical still in
+    // the table (the committed code took 12 s of CPU for the latter).
+    const SectorCount l6Sectors = 2097152;   // 1 GiB
+    auto exercise = [&](Lba l5Last, Lba l6First) {
+        auto dev = std::make_shared<SparseDevice>(ByteCount{5} * TiB / 2);
+        auto table = MbrTable::createEmpty(dev->geometry());
+        Partition ext;
+        ext.firstLba = 2048;
+        ext.lastLba = 0xFFFFFFFFull;
+        ext.type = PartitionType::mbr(0x0F);
+        REQUIRE(table->addPartition(ext));
+        Partition l5;
+        l5.isLogical = true;
+        l5.firstLba = 4096;
+        l5.lastLba = l5Last;
+        l5.type = PartitionType::mbr(0x83);
+        REQUIRE(table->addPartition(l5));
+        Partition l6 = l5;
+        l6.firstLba = l6First;
+        l6.lastLba = l6First + l6Sectors - 1;
+        REQUIRE(table->addPartition(l6));
+        REQUIRE(table->find(6)->ebrLba);
+        const Lba l6Ebr = *table->find(6)->ebrLba;
+        CHECK(l6Ebr == l6First - MbrTable::kDefaultEbrGap);
+        REQUIRE(table->write(*dev));
+        plantExt2(*dev, 4096, l5Last - 4096 + 1);
+        plantExt2(*dev, l6First, l6Sectors);
+        REQUIRE(dev->zeroRange(l6Ebr * 512, 512));   // L6's EBR gone
+        auto broken = MbrTable::read(dev);
+        REQUIRE(broken);
+        auto& mbr = **broken;
+        CHECK(isRepairable(mbr, "mbr.logical_lost"));
+        CHECK(logicalCount(mbr) == 1);
+        const auto t0 = std::chrono::steady_clock::now();
+        REQUIRE(mbr.repair(*dev, RepairOptions{}));
+        const auto elapsed = std::chrono::steady_clock::now() - t0;
+        MESSAGE("repair of a 2 TiB extended partition took ", std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(), " ms");
+        CHECK(elapsed < std::chrono::seconds(5));
+        CHECK(mbr.health() <= Validity::Info);
+        REQUIRE(logicalCount(mbr) == 2);
+        const Partition* r6 = mbr.find(6);
+        REQUIRE(r6);
+        CHECK(r6->firstLba == l6First);
+        CHECK(r6->lastLba == l6First + l6Sectors - 1);
+        CHECK(r6->ebrLba == l6Ebr);
+        REQUIRE(mbr.find(5));
+        CHECK(mbr.find(5)->lastLba == l5Last);
+    };
+    SUBCASE("the lost logical with 2 TiB of free space behind it") { exercise(6143, 10240); }
+    SUBCASE("a known logical covering almost the whole container, the lost one behind it") {
+        const Lba l5Last = 0xFFFFFFFFull - 2 * l6Sectors;
+        exercise(l5Last, l5Last + 1 + MbrTable::kDefaultEbrGap);
+    }
+}
+
+TEST_CASE("MBR: a wiped head EBR is told apart from an empty extended partition by what lies behind it") {
+    auto pristine = loadSparseFixture("pt/mbr_basic.sparse");
+    REQUIRE(pristine);
+    SUBCASE("filesystems behind it: the loss is reported and repair restores sfdisk's chain byte for byte") {
+        auto dev = snapshot(*pristine);
+        plantExt2(*dev, kL5Start, kL5Sectors);
+        plantExt2(*dev, kL6Start, kL6Sectors);
+        auto planted = snapshot(*dev);
+        REQUIRE(dev->zeroRange(kEbr1, 512));
+        auto table = MbrTable::read(dev);
+        REQUIRE(table);
+        auto& mbr = **table;
+        CHECK(mbr.health() == Validity::Error);
+        CHECK(isRepairable(mbr, "mbr.ebr_chain_broken"));
+        CHECK(isRepairable(mbr, "mbr.logical_lost"));
+        CHECK(logicalCount(mbr) == 0);
+        const auto tree = mbr.describe();
+        REQUIRE(tree.child("EBR @ LBA 10240"));
+        CHECK(tree.child("EBR @ LBA 10240")->validity == Validity::Error);
+        REQUIRE(mbr.repair(*dev, RepairOptions{}));
+        CHECK(mbr.health() <= Validity::Info);
+        REQUIRE(logicalCount(mbr) == 2);
+        REQUIRE(mbr.find(5));
+        REQUIRE(mbr.find(6));
+        CHECK(mbr.find(5)->firstLba == kL5Start);
+        CHECK(mbr.find(6)->firstLba == kL6Start);
+        CHECK(mbr.find(6)->type.mbrId == 0x07);
+        REQUIRE(mbr.metadataRegions().size() == 3);
+        checkRegionsEqual(*dev, *planted, mbr.metadataRegions());
+    }
+    SUBCASE("only an EBR behind it and nothing at the first data start: reported, but repair will not guess") {
+        auto dev = snapshot(*pristine);
+        REQUIRE(dev->zeroRange(kEbr1, 512));
+        auto table = MbrTable::read(dev);
+        REQUIRE(table);
+        auto& mbr = **table;
+        CHECK(isRepairable(mbr, "mbr.ebr_chain_broken"));
+        const auto* lost = findDiagnostic(mbr, "mbr.logical_lost");
+        REQUIRE(lost);
+        CHECK(lost->severity == Validity::Error);
+        CHECK(!lost->repairable);
+        auto before = snapshot(*dev);
+        auto r = mbr.repair(*dev, RepairOptions{});
+        REQUIRE(!r);
+        CHECK(r.error().category() == ErrorCategory::InvalidFormat);
+        CHECK(sameBytes(*dev, *before));
+    }
+    SUBCASE("nothing behind it: a fresh extended partition, no diagnostics") {
+        auto dev = snapshot(*pristine);
+        REQUIRE(dev->zeroRange(kEbr1, 512));
+        REQUIRE(dev->zeroRange(kEbr2, 512));
+        auto table = MbrTable::read(dev);
+        REQUIRE(table);
+        auto& mbr = **table;
+        CHECK(mbr.diagnostics().empty());
+        CHECK(logicalCount(mbr) == 0);
+        CHECK(mbr.repair(*dev, RepairOptions{}));
+        CHECK(mbr.diagnostics().empty());
     }
 }
 
@@ -809,8 +1145,10 @@ TEST_CASE("MBR: looping, mis-typed and out-of-range EBR links are diagnosed and 
         CHECK(mbr.health() <= Validity::Info);
         checkRegionsEqual(*dev, *pristine, mbr.metadataRegions());
     }
-    SUBCASE("link pointing past the extended partition: the lost EBR is found by the scan") {
+    SUBCASE("link pointing past the extended partition: the lost EBR is found by the scan and vouched for by its filesystem") {
         auto dev = snapshot(*pristine);
+        plantExt2(*dev, kL6Start, kL6Sectors);
+        auto planted = snapshot(*dev);
         pokeU32(*dev, kEbr1 + kEntry2 + 8, 0x00FF0000);
         auto table = MbrTable::read(dev);
         REQUIRE(table);
@@ -822,7 +1160,7 @@ TEST_CASE("MBR: looping, mis-typed and out-of-range EBR links are diagnosed and 
         CHECK(mbr.health() <= Validity::Info);
         CHECK(logicalCount(mbr) == 2);
         REQUIRE(mbr.metadataRegions().size() == 3);
-        checkRegionsEqual(*dev, *pristine, mbr.metadataRegions());
+        checkRegionsEqual(*dev, *planted, mbr.metadataRegions());
     }
 }
 
@@ -863,6 +1201,30 @@ TEST_CASE("MBR: a status byte other than 0x00/0x80 is a warning; sectors that ar
     auto mixed = snapshot(*pristine);
     pokeEntry(*mixed, kEntry4, 0x33, 0x07, 0x7FFFFFFF, 100);
     CHECK(MbrTable::read(mixed).error().category() == ErrorCategory::NotFound);
+}
+
+TEST_CASE("MBR: whole-disk filesystems and optical images are never taken for an MBR") {
+    for (const char* f : {"pt/fat_whole.sparse", "fs/bcachefs.sparse", "fs/btrfs.sparse", "fs/erofs.sparse", "fs/exfat.sparse",
+                          "fs/ext2.sparse", "fs/ext3.sparse", "fs/ext4.sparse", "fs/ext4_dirty.sparse", "fs/f2fs.sparse",
+                          "fs/fat12.sparse", "fs/fat16.sparse", "fs/fat32.sparse", "fs/hfs.sparse", "fs/hfsplus.sparse",
+                          "fs/hfsx.sparse", "fs/iso9660.sparse", "fs/jfs.sparse", "fs/luks1.sparse", "fs/luks2.sparse",
+                          "fs/lvm_pv.sparse", "fs/md_member.sparse", "fs/minix.sparse", "fs/nilfs2.sparse", "fs/ntfs.sparse",
+                          "fs/ocfs2.sparse", "fs/reiserfs.sparse", "fs/squashfs.sparse", "fs/swap.sparse", "fs/udf.sparse",
+                          "fs/xfs.sparse", "isofs/iso_joliet.sparse", "isofs/iso_plain.sparse", "isofs/iso_rr.sparse"}) {
+        INFO(f);
+        // The fixture's sectors on its real geometry; a vector of the full size (300 MiB for xfs)
+        // costs a second per fixture in a debug build.
+        auto contents = SparseFile::read(std::string(STEIN_FIXTURE_DIR) + "/" + f);
+        REQUIRE(contents);
+        auto dev = std::make_shared<SparseDevice>(contents->totalSize, contents->sectorSize);
+        REQUIRE(SparseFile::apply(*contents, *dev));
+        auto mbr = MbrTable::read(dev);
+        CHECK(!mbr);
+        if (!mbr) CHECK(mbr.error().category() == ErrorCategory::NotFound);
+        auto any = PartitionTable::read(dev);
+        REQUIRE(any);
+        CHECK((*any)->type() == TableType::None);
+    }
 }
 
 TEST_CASE("MBR: CHS sector 0 and stale slots are reported per entry; repair reproduces sfdisk's sector") {
@@ -1082,4 +1444,34 @@ TEST_CASE("GPT: hybrid MBR entries must mirror GPT partitions; repair leaves LBA
     CHECK(*dev->read(0, 512) == lba0);
     CHECK(!findDiagnostic(gpt, "gpt.backup_header_reserved"));
     CHECK(findDiagnostic(gpt, "gpt.hybrid_entry_mismatch"));
+}
+
+TEST_CASE("GPT: the protective entry's span is right on 4Kn disks and beyond 2 TiB") {
+    auto fourK = loadSparseFixture("pt/gpt_4k.sparse");
+    REQUIRE(fourK);
+    auto t4 = GptTable::read(fourK);
+    REQUIRE(t4);
+    CHECK((*t4)->hasProtectiveMbr());
+    CHECK(!hasDiagnostic(**t4, "gpt.pmbr_size_mismatch"));
+    CHECK((*t4)->health() <= Validity::Info);
+
+    // 3 TiB: more sectors than the 32-bit count can hold, so the entry says 0xFFFFFFFF and that is right.
+    auto big = std::make_shared<SparseDevice>(ByteCount{3} * TiB);
+    auto table = GptTable::createEmpty(big->geometry());
+    REQUIRE(table->write(*big));
+    auto entry = big->read(kEntry1, 16);
+    REQUIRE(entry);
+    CHECK(layout::gen::MbrEntry(*entry).type() == 0xEE);
+    CHECK(layout::gen::MbrEntry(*entry).firstLba() == 1);
+    CHECK(layout::gen::MbrEntry(*entry).sectorCount() == 0xFFFFFFFFu);
+    auto back = GptTable::read(big);
+    REQUIRE(back);
+    CHECK((*back)->hasProtectiveMbr());
+    CHECK(!hasDiagnostic(**back, "gpt.pmbr_size_mismatch"));
+    CHECK((*back)->health() == Validity::Ok);
+    // Read as a plain MBR, the same sector is a table with one protective entry that fits the device.
+    auto asMbr = MbrTable::read(big);
+    REQUIRE(asMbr);
+    CHECK(findDiagnostic(**asMbr, "mbr.protective_entry"));
+    CHECK(!findDiagnostic(**asMbr, "mbr.out_of_range"));
 }

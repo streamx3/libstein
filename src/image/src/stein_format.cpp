@@ -12,6 +12,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <mutex>
 #include <random>
 
 namespace stein::image {
@@ -732,6 +733,7 @@ ImageDevice::ImageDevice(std::shared_ptr<SteinReader> reader) : m_reader(std::mo
 
 Expected<void> ImageDevice::readAt(ByteCount offset, std::span<std::byte> dst) {
     if (auto r = checkRange(offset, dst.size()); !r) return r;
+    std::lock_guard lock(m_mutex);   // one cached chunk, shared by every thread reading the image
     const ByteCount cs = m_reader->header().chunkSize;
     std::size_t done = 0;
     while (done < dst.size()) {

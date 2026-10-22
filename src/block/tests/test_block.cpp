@@ -2,6 +2,7 @@
 #include "stein_test.hpp"
 
 #include "stein/block/file_device.hpp"
+#include "stein/block/cached_device.hpp"
 #include "stein/block/concat_device.hpp"
 #include "stein/block/memory_device.hpp"
 #include "stein/block/overlay_device.hpp"
@@ -10,8 +11,11 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
+#include <thread>
 
 using namespace stein;
 using stein::test::bytesOf;
@@ -295,6 +299,384 @@ TEST_CASE("SparseFile: encrypted pieces round-trip, refuse without or with a wro
     REQUIRE(SparseFile::write(dir / "plain.sparse", *piece));
     CHECK_FALSE(SparseFile::isEncrypted(dir / "plain.sparse"));
     CHECK(SparseFile::read(dir / "plain.sparse")->runs.size() == 2);
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
+namespace {
+
+// A device whose byte at i is a function of i, so any read can be checked without a reference copy.
+std::byte pattern(ByteCount i) { return std::byte((i * 131 + (i >> 8) * 7 + 3) & 0xff); }
+std::shared_ptr<MemoryDevice> patternDevice(ByteCount size) {
+    auto dev = std::make_shared<MemoryDevice>(size, 512);
+    auto b = dev->bytes();
+    for (ByteCount i = 0; i < size; ++i) b[i] = pattern(i);
+    return dev;
+}
+bool matches(std::span<const std::byte> got, ByteCount offset) {
+    for (std::size_t i = 0; i < got.size(); ++i)
+        if (got[i] != pattern(offset + i)) return false;
+    return true;
+}
+
+// MemoryDevice is not thread-safe; the real inner devices (FileDevice, a decrypting payload) take a
+// lock, so the concurrency test wraps it in one and counts the reads that reach it.
+class LockedDevice final : public BlockDevice {
+public:
+    explicit LockedDevice(std::shared_ptr<MemoryDevice> inner) : m_inner(std::move(inner)) {}
+    std::string name() const override { return "locked"; }
+    Geometry geometry() const override { return m_inner->geometry(); }
+    bool isReadOnly() const override { return false; }
+    Expected<void> readAt(ByteCount offset, std::span<std::byte> dst) override {
+        std::lock_guard lock(m_mutex);
+        ++reads;
+        return m_inner->readAt(offset, dst);
+    }
+    Expected<void> writeAt(ByteCount offset, std::span<const std::byte> src) override {
+        std::lock_guard lock(m_mutex);
+        return m_inner->writeAt(offset, src);
+    }
+    Expected<void> flush() override { return {}; }
+    std::uint64_t reads = 0;
+
+private:
+    std::shared_ptr<MemoryDevice> m_inner;
+    std::mutex m_mutex;
+};
+
+} // namespace
+
+TEST_CASE("CachedDevice: hits and misses, LRU eviction within the budget, partial reads across chunks, forwarding") {
+    auto inner = patternDevice(64 * KiB);
+    auto cache = CachedDevice::create(inner, {4096, 16 * KiB});   // room for four chunks
+    CHECK(cache->options().chunkSize == 4096);
+    CHECK(cache->options().budget == 16 * KiB);
+    CHECK(cache->name() == inner->name());
+    CHECK(cache->size() == 64 * KiB);
+    CHECK(cache->sectorSize() == 512);
+    CHECK(cache->parent() == inner);
+    CHECK(cache->extentsOnParent() == std::vector<Region>{Region{0, 64 * KiB}});
+    CHECK_FALSE(cache->isReadOnly());
+    CHECK(cache->flush());
+    auto s = cache->stats();
+    CHECK(s.hits == 0);
+    CHECK(s.misses == 0);
+    CHECK(s.chunks == 0);
+
+    // The first read of a chunk misses and fills the whole chunk; the next read inside it hits.
+    auto r = cache->read(100, 50);
+    REQUIRE(r);
+    CHECK(matches(*r, 100));
+    s = cache->stats();
+    CHECK(s.misses == 1);
+    CHECK(s.hits == 0);
+    CHECK(s.chunks == 1);
+    CHECK(s.cachedBytes == 4096);
+    r = cache->read(4000, 90);
+    REQUIRE(r);
+    CHECK(matches(*r, 4000));
+    s = cache->stats();
+    CHECK(s.misses == 1);
+    CHECK(s.hits == 1);
+    // Chunks 1, 2, 3 fill the budget.
+    for (ByteCount c = 1; c <= 3; ++c) {
+        r = cache->read(c * 4096 + 1, 10);
+        REQUIRE(r);
+        CHECK(matches(*r, c * 4096 + 1));
+    }
+    s = cache->stats();
+    CHECK(s.misses == 4);
+    CHECK(s.chunks == 4);
+    CHECK(s.cachedBytes == 16 * KiB);
+    CHECK(s.evictions == 0);
+    // Chunk 4 evicts the least recently used one, chunk 0 ...
+    r = cache->read(4 * 4096, 4096);
+    REQUIRE(r);
+    CHECK(matches(*r, 4 * 4096));
+    s = cache->stats();
+    CHECK(s.chunks == 4);
+    CHECK(s.cachedBytes == 16 * KiB);
+    CHECK(s.evictions == 1);
+    // ... so chunk 0 misses again and pushes out chunk 1 (now the oldest); chunk 2 is still there
+    // and its hit moves it to the front; chunk 1 misses and pushes out chunk 3.
+    REQUIRE(cache->read(0, 1));
+    REQUIRE(cache->read(8192, 1));
+    REQUIRE(cache->read(4096, 1));
+    s = cache->stats();
+    CHECK(s.misses == 7);
+    CHECK(s.hits == 2);
+    CHECK(s.evictions == 3);
+    CHECK(s.chunks == 4);
+
+    // A read spanning chunk boundaries is one lookup per chunk and byte-exact.
+    r = cache->read(4096 - 10, 20);
+    REQUIRE(r);
+    CHECK(matches(*r, 4096 - 10));
+    const auto before = cache->stats();
+    r = cache->read(4000, 9000);   // chunks 0 to 3
+    REQUIRE(r);
+    CHECK(matches(*r, 4000));
+    s = cache->stats();
+    CHECK(s.hits + s.misses == before.hits + before.misses + 4);
+    // Whole-device read through the small cache: correct, and the cache never exceeds the budget.
+    r = cache->read(0, 64 * KiB);
+    REQUIRE(r);
+    CHECK(matches(*r, 0));
+    s = cache->stats();
+    CHECK(s.cachedBytes <= 16 * KiB);
+    CHECK(s.chunks == 4);
+    CHECK(cache->read(64 * KiB - 1, 2).error().category() == ErrorCategory::OutOfRange);
+    CHECK(cache->read(64 * KiB, 0));
+}
+
+TEST_CASE("CachedDevice: writes pass through and drop the chunks they touch; discard and zeroRange too; invalidate() for changes behind its back") {
+    auto inner = patternDevice(32 * KiB);
+    auto cache = CachedDevice::create(inner, {4096, 64 * KiB});
+    REQUIRE(cache->read(0, 32 * KiB));   // everything cached
+    CHECK(cache->stats().chunks == 8);
+    REQUIRE(cache->writeAt(4096 - 2, bytesOf("WXYZ")));   // straddles chunks 0 and 1
+    auto s = cache->stats();
+    CHECK(s.chunks == 6);
+    CHECK(s.cachedBytes == 6 * 4096);
+    CHECK(s.evictions == 0);
+    CHECK(inner->bytes()[4094] == std::byte{'W'});
+    CHECK(inner->bytes()[4097] == std::byte{'Z'});
+    auto r = cache->read(4096 - 2, 4);
+    REQUIRE(r);
+    CHECK(std::string(reinterpret_cast<const char*>(r->data()), 4) == "WXYZ");
+    CHECK(cache->stats().misses == 8 + 2);
+    CHECK(cache->stats().chunks == 8);
+    // An untouched chunk is still served from the cache and still right.
+    r = cache->read(8192, 16);
+    REQUIRE(r);
+    CHECK(matches(*r, 8192));
+    CHECK(cache->stats().hits == 1);
+    // zeroRange and discard go to the inner device and drop their chunks.
+    REQUIRE(cache->zeroRange(8192, 100));
+    CHECK(cache->stats().chunks == 7);
+    r = cache->read(8192, 101);
+    REQUIRE(r);
+    CHECK(r->at(99) == std::byte{0});
+    CHECK(r->at(100) == pattern(8292));
+    REQUIRE(cache->discard(16384, 4096));
+    CHECK(cache->read(16384, 1)->at(0) == std::byte{0});
+    // A change that bypasses the cache (chunk 5 is still held from the first read) is not seen until invalidate().
+    inner->bytes()[24000] = std::byte{0xEE};
+    CHECK(cache->read(24000, 1)->at(0) == pattern(24000));
+    cache->invalidate();
+    CHECK(cache->stats().chunks == 0);
+    CHECK(cache->read(24000, 1)->at(0) == std::byte{0xEE});
+    // Read-only inner: the cache is read-only and refuses writes before touching anything.
+    inner->setReadOnly(true);
+    CHECK(cache->isReadOnly());
+    REQUIRE(cache->read(0, 4096));
+    CHECK(cache->writeAt(0, bytesOf("x")).error().category() == ErrorCategory::Permission);
+    CHECK(cache->writeAt(40 * KiB, bytesOf("x")).error().category() == ErrorCategory::OutOfRange);
+    CHECK(cache->read(0, 1)->at(0) == pattern(0));
+}
+
+TEST_CASE("CachedDevice: a size that is not a multiple of the chunk size, and a budget below one chunk") {
+    auto inner = patternDevice(10000);
+    auto cache = CachedDevice::create(inner, {4096, 0});
+    CHECK(cache->options().budget == 4096);   // raised to one chunk
+    auto r = cache->read(9000, 1000);
+    REQUIRE(r);
+    CHECK(matches(*r, 9000));
+    auto s = cache->stats();
+    CHECK(s.chunks == 1);
+    CHECK(s.cachedBytes == 10000 - 8192);   // the ragged last chunk
+    CHECK(cache->read(9999, 1));
+    CHECK(cache->read(9999, 2).error().category() == ErrorCategory::OutOfRange);
+    CHECK(cache->read(10000, 0));
+    // The whole device through a one-chunk cache: every chunk evicts the previous one, bytes exact.
+    r = cache->read(0, 10000);
+    REQUIRE(r);
+    CHECK(matches(*r, 0));
+    s = cache->stats();
+    CHECK(s.chunks == 1);
+    CHECK(s.misses == 4);
+    CHECK(s.evictions == 3);
+    CHECK(s.cachedBytes == 10000 - 8192);
+    // A zero chunk size takes the default.
+    CHECK(CachedDevice::create(inner, {0, 0})->options().chunkSize == 256 * KiB);
+    CHECK(CachedDevice::create(inner)->options().budget == 64 * MiB);
+}
+
+TEST_CASE("CachedDevice: concurrent readers and a writer see consistent bytes while chunks churn") {
+    auto memory = patternDevice(1 * MiB);
+    auto inner = std::make_shared<LockedDevice>(memory);
+    auto cache = CachedDevice::create(inner, {8 * KiB, 64 * KiB});   // eight chunks: constant eviction
+    std::atomic<int> failures{0};
+    constexpr int kReads = 3000;
+    auto reader = [&](std::uint64_t seed) {
+        std::uint64_t s = seed;
+        std::vector<std::byte> buf;
+        for (int i = 0; i < kReads; ++i) {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            const ByteCount len = 1 + s % 20000;
+            const ByteCount off = (s >> 20) % (1 * MiB - len);
+            buf.resize(static_cast<std::size_t>(len));
+            if (!cache->readAt(off, buf) || !matches(buf, off)) ++failures;
+        }
+    };
+    // The writer rewrites ranges with the bytes they already hold, so the pattern stays true for
+    // every reader while the invalidation path runs against them.
+    auto writer = [&] {
+        std::vector<std::byte> v(3000);
+        for (int i = 0; i < 1000; ++i) {
+            const ByteCount off = (i * 7919ull) % (1 * MiB - v.size());
+            for (std::size_t j = 0; j < v.size(); ++j) v[j] = pattern(off + j);
+            if (!cache->writeAt(off, v)) ++failures;
+        }
+    };
+    std::vector<std::thread> threads;
+    for (int t = 0; t < 4; ++t) threads.emplace_back(reader, 0x1234567ull + static_cast<std::uint64_t>(t));
+    threads.emplace_back(writer);
+    for (auto& t : threads) t.join();
+    CHECK(failures == 0);
+    auto s = cache->stats();
+    CHECK(s.hits + s.misses >= 4 * kReads);
+    CHECK(s.hits > 0);
+    CHECK(s.cachedBytes <= 64 * KiB);
+    CHECK(s.chunks <= 8);
+    CHECK(inner->reads == s.misses);   // every inner read is a counted miss
+    // After the churn a single-threaded pass is still exact.
+    auto r = cache->read(0, 1 * MiB);
+    REQUIRE(r);
+    CHECK(matches(*r, 0));
+}
+
+TEST_CASE("RunListDevice: a piece as a device that holds only its runs; zeros in the gaps, read-only, overlaps resolve like apply()") {
+    // A table piece from a 2 TiB disk: three small runs, nothing else allocated.
+    SparseFile::Contents c;
+    c.totalSize = 2 * TiB;
+    c.sectorSize = 4096;
+    std::vector<std::byte> mbr(512, std::byte{0x55});
+    std::vector<std::byte> hdr(4096);
+    for (std::size_t i = 0; i < hdr.size(); ++i) hdr[i] = std::byte(i & 0xff);
+    c.runs.push_back({0, mbr});
+    c.runs.push_back({1 * MiB, hdr});
+    c.runs.push_back({2 * TiB - 4096, hdr});   // the backup header at the very end
+    auto dev = RunListDevice::create(c, "disk.sparse");
+    REQUIRE(dev);
+    CHECK((*dev)->name() == "disk.sparse");
+    CHECK((*dev)->size() == 2 * TiB);
+    CHECK((*dev)->sectorSize() == 4096);
+    CHECK((*dev)->isReadOnly());
+    CHECK((*dev)->storedBytes() == 512 + 2 * 4096);
+    CHECK((*dev)->runs().size() == 3);
+    CHECK((*dev)->flush());
+    // Inside a run: the run's bytes.
+    auto r = (*dev)->read(1 * MiB + 100, 16);
+    REQUIRE(r);
+    for (std::size_t i = 0; i < 16; ++i) CHECK(r->at(i) == std::byte((100 + i) & 0xff));
+    // Across a run's end: bytes, then zeros.
+    r = (*dev)->read(500, 24);
+    REQUIRE(r);
+    CHECK(r->at(11) == std::byte{0x55});
+    CHECK(r->at(12) == std::byte{0});
+    CHECK(r->at(23) == std::byte{0});
+    // A gap, far from any run, and a read spanning a gap between two runs.
+    r = (*dev)->read(1 * GiB, 8192);
+    REQUIRE(r);
+    CHECK(std::all_of(r->begin(), r->end(), [](std::byte b) { return b == std::byte{0}; }));
+    r = (*dev)->read(0, 1 * MiB + 4096);
+    REQUIRE(r);
+    CHECK(r->at(511) == std::byte{0x55});
+    CHECK(r->at(512) == std::byte{0});
+    CHECK(r->at(1 * MiB - 1) == std::byte{0});
+    CHECK(r->at(1 * MiB) == std::byte{0});
+    CHECK(r->at(1 * MiB + 4095) == std::byte{0xff});
+    // The last sector, the end, and past the end.
+    r = (*dev)->readSectors(2 * TiB / 4096 - 1, 1);
+    REQUIRE(r);
+    CHECK(r->at(0) == std::byte{0});
+    CHECK(r->at(4095) == std::byte{0xff});
+    CHECK((*dev)->read(2 * TiB, 0));
+    CHECK((*dev)->read(2 * TiB - 1, 2).error().category() == ErrorCategory::OutOfRange);
+    CHECK((*dev)->read(3 * TiB, 1).error().category() == ErrorCategory::OutOfRange);
+    // Writes of every kind are refused before anything happens.
+    CHECK((*dev)->writeAt(0, bytesOf("x")).error().category() == ErrorCategory::Permission);
+    CHECK((*dev)->zeroRange(0, 512).error().category() == ErrorCategory::Permission);
+    CHECK((*dev)->discard(0, 512).error().category() == ErrorCategory::Permission);
+    CHECK((*dev)->read(0, 1)->at(0) == std::byte{0x55});
+
+    // Overlapping runs: the later run in the piece wins, as when apply() writes them in order.
+    SparseFile::Contents o;
+    o.totalSize = 4096;
+    o.runs.push_back({0, std::vector<std::byte>(1000, std::byte{'X'})});
+    o.runs.push_back({400, std::vector<std::byte>(100, std::byte{'Y'})});     // inside X
+    o.runs.push_back({900, std::vector<std::byte>(300, std::byte{'Z'})});     // over X's tail
+    o.runs.push_back({1100, std::vector<std::byte>(50, std::byte{'W'})});     // inside Z
+    o.runs.push_back({2000, {}});                                              // empty: dropped
+    auto odev = RunListDevice::create(o);
+    REQUIRE(odev);
+    auto mem = std::make_shared<MemoryDevice>(o.totalSize, o.sectorSize);
+    REQUIRE(SparseFile::apply(o, *mem));
+    auto whole = (*odev)->read(0, o.totalSize);
+    REQUIRE(whole);
+    CHECK(*whole == std::vector<std::byte>(mem->bytes().begin(), mem->bytes().end()));
+    CHECK(whole->at(399) == std::byte{'X'});
+    CHECK(whole->at(400) == std::byte{'Y'});
+    CHECK(whole->at(500) == std::byte{'X'});
+    CHECK(whole->at(999) == std::byte{'Z'});
+    CHECK(whole->at(1100) == std::byte{'W'});
+    CHECK(whole->at(1150) == std::byte{'Z'});
+    CHECK(whole->at(1200) == std::byte{0});
+    CHECK((*odev)->storedBytes() == 1200);
+    for (std::size_t i = 1; i < (*odev)->runs().size(); ++i)
+        CHECK((*odev)->runs()[i - 1].offset + (*odev)->runs()[i - 1].bytes.size() <= (*odev)->runs()[i].offset);
+    // Every short read agrees with the memory copy too.
+    for (ByteCount off = 0; off < o.totalSize; off += 37) {
+        const ByteCount len = std::min<ByteCount>(53, o.totalSize - off);
+        auto a = (*odev)->read(off, len);
+        auto b = mem->read(off, len);
+        REQUIRE(a);
+        REQUIRE(b);
+        CHECK(*a == *b);
+    }
+
+    // Runs that do not fit, and a bad sector size.
+    SparseFile::Contents bad;
+    bad.totalSize = 1024;
+    bad.runs.push_back({1000, std::vector<std::byte>(100)});
+    CHECK(RunListDevice::create(bad).error().category() == ErrorCategory::OutOfRange);
+    bad.runs.clear();
+    bad.sectorSize = 0;
+    CHECK(RunListDevice::create(bad).error().category() == ErrorCategory::InvalidArgument);
+}
+
+TEST_CASE("SparseFile::openAsDevice: a fixture piece reads byte for byte like its in-memory copy, encrypted pieces included") {
+    const std::string fixture = std::string(STEIN_FIXTURE_DIR) + "/pt/gpt_basic.sparse";
+    auto piece = SparseFile::read(fixture);
+    REQUIRE(piece);
+    auto mem = SparseFile::loadIntoMemory(fixture);
+    REQUIRE(mem);
+    auto dev = SparseFile::openAsDevice(fixture);
+    REQUIRE(dev);
+    CHECK((*dev)->name() == "gpt_basic.sparse");
+    CHECK((*dev)->size() == piece->totalSize);
+    CHECK((*dev)->sectorSize() == piece->sectorSize);
+    CHECK((*dev)->isReadOnly());
+    auto all = (*dev)->read(0, (*dev)->size());
+    REQUIRE(all);
+    CHECK(*all == std::vector<std::byte>((*mem)->bytes().begin(), (*mem)->bytes().end()));
+    // The same piece encrypted: the passphrase is required and then the bytes are the same.
+    auto dir = std::filesystem::temp_directory_path() / "stein_test_runlist";
+    std::filesystem::create_directories(dir);
+    const auto path = dir / "table.piece";
+    REQUIRE(SparseFile::write(path, *piece, "pw", KdfParams::pbkdf2()));
+    CHECK(SparseFile::openAsDevice(path).error().category() == ErrorCategory::Permission);
+    CHECK(SparseFile::openAsDevice(path, "wrong").error().category() == ErrorCategory::Integrity);
+    auto enc = SparseFile::openAsDevice(path, "pw");
+    REQUIRE(enc);
+    CHECK((*enc)->name() == "table.piece");
+    auto encAll = (*enc)->read(0, (*enc)->size());
+    REQUIRE(encAll);
+    CHECK(*encAll == *all);
+    CHECK(SparseFile::openAsDevice(dir / "missing.sparse").error().category() == ErrorCategory::NotFound);
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
 }

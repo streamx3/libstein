@@ -1,0 +1,4 @@
+passphrase=luks test passphrase
+master_key=56c67043a9a72926d1470cd466afb4dcbeb253780067426ba965e83b5dbb9afb4bf5a1a2a6afec69e09beb0afdba72f87e4393c852a9817bd3f1891baf1b0caa
+generated=cryptsetup 2.8.4 on Ubuntu 26.04 aarch64, 2026-10-22, luksFormat --type luks2 --luks2-keyslots-size 1024k (cryptsetup defaults: argon2id t~10 m=1GiB p=4, aes-xts-plain64 512-bit, 4096-byte sectors), luksAddKey slot 1 'second slot passphrase', token 0 luks2-keyring 'stein-test' on slot 1
+payload=ext4 'small_luks' (1.5 MiB, no journal) written through libstein XtsDevice; files in ext4_small.oracle.txt

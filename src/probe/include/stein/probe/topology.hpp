@@ -11,6 +11,9 @@
 #include "stein/layout/node.hpp"
 #include "stein/pt/partition_table.hpp"
 
+#include <cstdint>
+#include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -27,6 +30,22 @@ enum class NodeKind : std::uint8_t {
     Volume,      // a logical volume assembled from a volume manager (LVM2)
 };
 
+// Notes carry a stable `code` for callers that act on them and a `message` for people. Besides the
+// codes the partition table and filesystem probes forward from their diagnostics, the probe adds:
+//   probe.io, probe.partition_bounds, probe.fs_larger_than_region  (Warning/Error: the walk itself)
+//   luks.header       Warning  the LUKS header cannot be read or parsed (both LUKS2 copies damaged, ...)
+//   luks.unsupported  Info     the container cannot be opened in-process; the message is
+//                              "cannot open in-process: " + LuksInfo::unsupportedWhy (dm-integrity,
+//                              reencryption in progress, a cipher or KDF we lack, no usable slot...).
+//                              Emitted on every probe, passphrases or not, so a UI can hide its Unlock
+//                              action up front: the node is NOT unlockable and gets no Decrypted child.
+//   luks.unlock       Warning  a passphrase attempt failed for a reason other than being wrong
+//                              (I/O, damaged key material); a wrong passphrase leaves no note.
+//   luks.locked       Info     passphrases were supplied and none opens the container (the cached
+//                              master key, if any, did not match either). Absent when nothing was
+//                              tried or the probe was cancelled.
+//   tcrypt.unlock, tcrypt.payload, lvm.metadata, lvm.segment, lvm.missing_pv, lvm.open
+// Notes never carry key material or passphrases.
 struct Note {
     layout::Validity severity;
     std::string code;
@@ -58,6 +77,21 @@ struct Options {
     // Decrypted child holding whatever the plaintext carries. Argon2 slots make
     // each attempt cost real time, so pass only what the user typed.
     std::vector<std::string> passphrases;
+    // Master keys of containers unlocked earlier in the session, by LUKS UUID (LuksInfo::uuid,
+    // the one `blkid` prints). Tried before any passphrase, so a re-probe (hot-plug, Refresh, a
+    // repair, a Hex write) reuses the key instead of paying the KDF again. A key that does not
+    // match the header digest is skipped silently and the passphrases are tried.
+    std::map<std::string, std::vector<std::uint8_t>> masterKeys;
+    // Called once for every container a *passphrase* opened (not a cached key), with its UUID and
+    // master key, so the caller can put it in masterKeys for the next probe. Runs on the probing
+    // thread, before the plaintext is descended into. The probe keeps no copy; the receiver owns
+    // the key and its zeroing. Never written to Notes or logs.
+    std::function<void(const std::string& uuid, const std::vector<std::uint8_t>& masterKey)> onUnlocked;
+    // Polled between Argon2 slices, between key slots and between passphrases: once it returns
+    // true the container is left as found (no Decrypted child, no luks.locked note, since nothing
+    // was refuted) and probe() still returns the tree it has. Cheap work (headers, filesystems)
+    // is not interrupted; only the key derivations and the VeraCrypt trials are.
+    std::function<bool()> cancelled;
     // VeraCrypt/TrueCrypt volumes have no signature: with passphrases given, a region
     // nothing else claims is tried by header decryption (costly: up to 500k PBKDF2
     // iterations per passphrase and header location). pim: VeraCrypt iterations multiplier.

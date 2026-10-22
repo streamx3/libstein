@@ -13,6 +13,12 @@
 #include "stein/fs/fat_reader.hpp"
 #include "stein/fs/filesystem.hpp"
 #include "stein/fs/udf_reader.hpp"
+// The LUKS-payload case below needs stein::container, which test_fs links only when its
+// CMake DEPS name it; until then the case compiles out and the PayloadView case stands in.
+#if __has_include("stein/container/luks.hpp")
+#include "stein/container/luks.hpp"
+#define STEIN_TEST_FS_HAS_LUKS 1
+#endif
 
 #include <algorithm>
 #include <filesystem>
@@ -1443,6 +1449,42 @@ bool sameBytes(const MemoryDevice& a, const MemoryDevice& b, const char* when) {
         }
     return true;
 }
+// An Info diagnostic is information, never a fault to fix: it must not show a Repair button or
+// make `stein repair` write anything.
+void checkNoRepairableInfo(const FileSystem& fs) {
+    for (const auto& d : fs.diagnostics()) CHECK_MESSAGE(!(d.severity == layout::Validity::Info && d.repairable), d.code);
+}
+// The shape of a decrypting view (container::detail::XtsDevice): a window at an offset on its
+// parent that is not a SliceDevice, with a sector size of its own. Bytes pass through so the
+// volume inside is probed for real.
+class PayloadView final : public BlockDevice {
+public:
+    PayloadView(std::shared_ptr<BlockDevice> parent, Region region, std::uint32_t sectorSize) : m_parent(std::move(parent)), m_region(region) {
+        m_geometry = m_parent->geometry();
+        m_geometry.sizeBytes = region.length;
+        m_geometry.logicalSectorSize = sectorSize;
+        if (m_geometry.physicalSectorSize < sectorSize) m_geometry.physicalSectorSize = sectorSize;
+    }
+    std::string name() const override { return m_parent->name() + " (payload)"; }
+    Geometry geometry() const override { return m_geometry; }
+    bool isReadOnly() const override { return m_parent->isReadOnly(); }
+    Expected<void> readAt(ByteCount offset, std::span<std::byte> dst) override {
+        if (auto r = checkRange(offset, dst.size()); !r) return r;
+        return m_parent->readAt(m_region.offset + offset, dst);
+    }
+    Expected<void> writeAt(ByteCount offset, std::span<const std::byte> src) override {
+        if (auto r = checkRange(offset, src.size()); !r) return r;
+        return m_parent->writeAt(m_region.offset + offset, src);
+    }
+    Expected<void> flush() override { return m_parent->flush(); }
+    std::shared_ptr<BlockDevice> parent() const override { return m_parent; }
+    std::vector<Region> extentsOnParent() const override { return {m_region}; }
+
+private:
+    std::shared_ptr<BlockDevice> m_parent;
+    Region m_region;
+    Geometry m_geometry;
+};
 } // namespace
 
 TEST_CASE("FAT: the boot sector is described whole on FAT12/16/32 (BPB, extended BPB, boot code, signature); pristine fixtures raise nothing") {
@@ -1586,7 +1628,7 @@ TEST_CASE("FAT: FAT12/16/32 cluster-count thresholds (4085 / 65525) are one func
     }
 }
 
-TEST_CASE("FAT32: backup boot sector and backup FSInfo drift are repairable; repair restores the pristine bytes") {
+TEST_CASE("FAT32: backup boot sector drift and an FSInfo copy with wrong signatures are repaired from the intact copy; a backup FSInfo that merely lags is only reported") {
     auto dev = loadSparseFixture("fs/fat32.sparse");
     auto pristine = loadSparseFixture("fs/fat32.sparse");
     REQUIRE((dev && pristine));
@@ -1607,26 +1649,88 @@ TEST_CASE("FAT32: backup boot sector and backup FSInfo drift are repairable; rep
     REQUIRE((healed && *healed));
     CHECK_MESSAGE((*healed)->diagnostics().empty(), diagCodes(**healed));
 
-    // A stale free count in the backup FSInfo: the live one is what counts, the copy is synced.
+    // A stale free count in the backup FSInfo is how every FAT32 that has been written to looks
+    // (the driver updates the live copy and lets the backup lag): information, not a fault, and
+    // repair() leaves sector 7 alone.
     patchLe32(*dev, 7 * 512 + 0x1E8, 4242);
     auto stale = probe(dev);
     REQUIRE((stale && *stale));
     d = diagOf(**stale, "fat.backup_fsinfo_mismatch");
     REQUIRE(d);
-    CHECK(d->repairable);
+    CHECK_FALSE(d->repairable);
     CHECK(d->severity == layout::Validity::Info);
     CHECK(*(*stale)->info().usedBytes == 512);
     CHECK((*stale)->describe().child("backup FSInfo sector")->child("free_count")->value == "4242");
+    checkNoRepairableInfo(**stale);
     REQUIRE((*stale)->repair(*dev));
+    CHECK(readLe32(*dev, 7 * 512 + 0x1E8) == 4242);
+    // The same lag from the live side: 21 clusters allocated since the backup was written.
+    patchLe32(*dev, 7 * 512 + 0x1E8, 129021);
+    patchLe32(*dev, 512 + 0x1E8, 129000);
+    auto written = probe(dev);
+    REQUIRE((written && *written));
+    d = diagOf(**written, "fat.backup_fsinfo_mismatch");
+    REQUIRE(d);
+    CHECK_FALSE(d->repairable);
+    CHECK(*(*written)->info().usedBytes == 22 * 512);
+    REQUIRE((*written)->repair(*dev));
+    CHECK(readLe32(*dev, 7 * 512 + 0x1E8) == 129021);
+    REQUIRE(dev->writeAt(0, pristine->bytes()));
+
+    // A backup FSInfo whose signature is wrong is a broken copy; the live one restores it.
+    patchLe32(*dev, 7 * 512, 0);
+    auto badBackup = probe(dev);
+    REQUIRE((badBackup && *badBackup));
+    d = diagOf(**badBackup, "fat.backup_fsinfo_mismatch");
+    REQUIRE(d);
+    CHECK(d->repairable);
+    CHECK(d->severity == layout::Validity::Warning);
+    CHECK(d->message.find("lead signature wrong") != std::string::npos);
+    CHECK(diagOf(**badBackup, "fat.fsinfo_bad") == nullptr);
+    CHECK(*(*badBackup)->info().usedBytes == 512);
+    REQUIRE((*badBackup)->repair(*dev));
     CHECK(sameBytes(*dev, *pristine, "backup FSInfo rewritten"));
 
-    // Both at once, then nothing: repair() on a clean volume is a no-op that succeeds.
+    // The other way round: the live FSInfo's signature is wrong and the backup is intact. The
+    // hint is not trusted, and the repair restores the sector from its backup.
+    patchLe32(*dev, 512 + 0x1E4, 0);
+    auto badLive = probe(dev);
+    REQUIRE((badLive && *badLive));
+    d = diagOf(**badLive, "fat.fsinfo_bad");
+    REQUIRE(d);
+    CHECK(d->repairable);
+    CHECK(d->severity == layout::Validity::Warning);
+    CHECK(d->message.find("struct signature wrong") != std::string::npos);
+    CHECK(d->message.find("restores it from the backup FSInfo sector (sector 7)") != std::string::npos);
+    CHECK(diagOf(**badLive, "fat.backup_fsinfo_mismatch") == nullptr);
+    CHECK_FALSE((*badLive)->info().usedBytes.has_value());
+    REQUIRE((*badLive)->repair(*dev));
+    CHECK(sameBytes(*dev, *pristine, "FSInfo restored from its backup"));
+
+    // Both copies with wrong signatures: nothing to restore from, nothing written.
+    patchLe32(*dev, 512, 0);
+    patchLe32(*dev, 7 * 512 + 0x1FC, 0);
+    auto bothBad = probe(dev);
+    REQUIRE((bothBad && *bothBad));
+    d = diagOf(**bothBad, "fat.fsinfo_bad");
+    REQUIRE(d);
+    CHECK_FALSE(d->repairable);
+    CHECK(diagOf(**bothBad, "fat.backup_fsinfo_mismatch") == nullptr);
+    checkNoRepairableInfo(**bothBad);
+    REQUIRE((*bothBad)->repair(*dev));
+    CHECK(readLe32(*dev, 512) == 0);
+    CHECK(readLe32(*dev, 7 * 512 + 0x1FC) == 0);
+    REQUIRE(dev->writeAt(0, pristine->bytes()));
+
+    // Backup boot sector and backup FSInfo broken at once, then nothing: repair() on a clean
+    // volume is a no-op that succeeds.
     patchBytes(*dev, 6 * 512 + 0x1FE, {0x00, 0x00});
     patchLe32(*dev, 7 * 512, 0);
     auto both = probe(dev);
     REQUIRE((both && *both));
     CHECK(diagOf(**both, "fat.backup_boot_mismatch"));
-    CHECK(diagOf(**both, "fat.backup_fsinfo_mismatch"));
+    REQUIRE(diagOf(**both, "fat.backup_fsinfo_mismatch"));
+    CHECK(diagOf(**both, "fat.backup_fsinfo_mismatch")->repairable);
     CHECK((*both)->describe().child("backup boot sector")->child("boot_signature")->validity == layout::Validity::Error);
     REQUIRE((*both)->repair(*dev));
     CHECK(sameBytes(*dev, *pristine, "both copies rewritten"));
@@ -1636,22 +1740,34 @@ TEST_CASE("FAT32: backup boot sector and backup FSInfo drift are repairable; rep
     CHECK(sameBytes(*dev, *pristine, "no-op repair"));
 }
 
-TEST_CASE("FAT32: mirrored FAT copies are compared and repaired from the active one; ext_flags picks the live FAT when mirroring is off") {
+TEST_CASE("FAT32: mirrored FAT copies are compared; a differing copy is rewritten only when its head is the broken one; ext_flags picks the live FAT when mirroring is off") {
     auto dev = loadSparseFixture("fs/fat32.sparse");
     auto pristine = loadSparseFixture("fs/fat32.sparse");
     REQUIRE((dev && pristine));
     const ByteCount fat0 = 32 * 512, fat1 = (32 + 1009) * 512;
-    // One entry of FAT 1 changed.
+    // One entry of FAT 1 changed: both heads are intact, so nothing says which copy is right.
     patchLe32(*dev, fat1 + 8, 0x0ABCDEF0);
     auto differ = probe(dev);
     REQUIRE((differ && *differ));
     const auto* d = diagOf(**differ, "fat.fat_copies_differ");
     REQUIRE(d);
-    CHECK(d->repairable);
+    CHECK_FALSE(d->repairable);
     CHECK(d->severity == layout::Validity::Warning);
     CHECK(d->message.find("FAT 1 differs from FAT 0") != std::string::npos);
     CHECK(d->message.find("FAT byte 8") != std::string::npos);
+    CHECK(d->message.find("neither is rewritten") != std::string::npos);
+    checkNoRepairableInfo(**differ);
     REQUIRE((*differ)->repair(*dev));
+    CHECK(readLe32(*dev, fat1 + 8) == 0x0ABCDEF0);
+    // FAT 1's head wrecked as well: now it is the broken copy and FAT 0 restores it whole.
+    patchBytes(*dev, fat1, {0, 0, 0, 0, 0, 0, 0, 0});
+    auto broken = probe(dev);
+    REQUIRE((broken && *broken));
+    d = diagOf(**broken, "fat.fat_copies_differ");
+    REQUIRE(d);
+    CHECK(d->repairable);
+    CHECK(d->message.find("rewrites it from FAT 0") != std::string::npos);
+    REQUIRE((*broken)->repair(*dev));
     CHECK(sameBytes(*dev, *pristine, "FAT 1 rewritten from FAT 0"));
     auto healed = probe(dev);
     REQUIRE((healed && *healed));
@@ -1720,6 +1836,117 @@ TEST_CASE("FAT32: mirrored FAT copies are compared and repaired from the active 
     REQUIRE(reader2);
     auto big2 = fs::resolvePath(**reader2, "big.bin");
     CHECK((!big2 || (*reader2)->stat(*big2)->allocatedBytes < 150 * 1024));
+}
+
+TEST_CASE("FAT: a FAT copy whose head is broken is restored from the intact one, whichever is active; two intact heads that differ are reported, not rewritten") {
+    struct Case {
+        const char* fixture;
+        ByteCount fat0, fat1;
+    };
+    // fs/fat16.sparse: 4 reserved sectors, 64 per FAT. fs/fat32.sparse: 32 reserved, 1009 per FAT.
+    const Case cases[] = {{"fs/fat16.sparse", 4 * 512, 68 * 512}, {"fs/fat32.sparse", 32 * 512, (32 + 1009) * 512}};
+    for (const auto& c : cases) {
+        INFO("fixture ", c.fixture);
+        auto pristine = loadSparseFixture(c.fixture);
+        REQUIRE(pristine);
+        // FAT 0, the active copy, loses its first sector while FAT 1 is intact. The repair used to
+        // copy the active FAT over the others and so destroyed the good copy.
+        {
+            auto dev = loadSparseFixture(c.fixture);
+            REQUIRE(dev->zeroRange(c.fat0, 512));
+            auto fs = probe(dev);
+            REQUIRE((fs && *fs));
+            CHECK(diagOf(**fs, "fat.media_mismatch") != nullptr);
+            const auto* d = diagOf(**fs, "fat.fat_copies_differ");
+            REQUIRE(d);
+            CHECK(d->repairable);
+            CHECK(d->severity == layout::Validity::Warning);
+            CHECK(d->message.find("FAT 1 differs from FAT 0") != std::string::npos);
+            CHECK(d->message.find("FAT 0 does not start with the media byte") != std::string::npos);
+            CHECK(d->message.find("rewrites it from FAT 1") != std::string::npos);
+            checkNoRepairableInfo(**fs);
+            REQUIRE((*fs)->repair(*dev));
+            CHECK(sameBytes(*dev, *pristine, "FAT 0 restored from FAT 1"));
+            auto healed = probe(dev);
+            REQUIRE((healed && *healed));
+            CHECK_MESSAGE((*healed)->diagnostics().empty(), diagCodes(**healed));
+        }
+        // FAT 1 loses its first sector: the active copy is the intact one and restores it.
+        {
+            auto dev = loadSparseFixture(c.fixture);
+            REQUIRE(dev->zeroRange(c.fat1, 512));
+            auto fs = probe(dev);
+            REQUIRE((fs && *fs));
+            CHECK(diagOf(**fs, "fat.media_mismatch") == nullptr);
+            const auto* d = diagOf(**fs, "fat.fat_copies_differ");
+            REQUIRE(d);
+            CHECK(d->repairable);
+            CHECK(d->message.find("FAT 1 does not start with the media byte") != std::string::npos);
+            CHECK(d->message.find("rewrites it from FAT 0") != std::string::npos);
+            REQUIRE((*fs)->repair(*dev));
+            CHECK(sameBytes(*dev, *pristine, "FAT 1 restored from FAT 0"));
+            auto healed = probe(dev);
+            REQUIRE((healed && *healed));
+            CHECK_MESSAGE((*healed)->diagnostics().empty(), diagCodes(**healed));
+        }
+        // Both heads intact, an entry further in differs: nothing to decide by, nothing rewritten.
+        {
+            auto dev = loadSparseFixture(c.fixture);
+            patchBytes(*dev, c.fat1 + 64, {0x12, 0x34});
+            auto fs = probe(dev);
+            REQUIRE((fs && *fs));
+            const auto* d = diagOf(**fs, "fat.fat_copies_differ");
+            REQUIRE(d);
+            CHECK_FALSE(d->repairable);
+            CHECK(d->severity == layout::Validity::Warning);
+            CHECK(d->message.find("FAT byte 64") != std::string::npos);
+            CHECK(d->message.find("neither is rewritten") != std::string::npos);
+            checkNoRepairableInfo(**fs);
+            const std::vector<std::byte> before(dev->bytes().begin(), dev->bytes().end());
+            REQUIRE((*fs)->repair(*dev));
+            CHECK(std::equal(before.begin(), before.end(), dev->bytes().begin()));
+        }
+        // Both heads broken, each in its own way: nothing to restore from, nothing written.
+        {
+            auto dev = loadSparseFixture(c.fixture);
+            REQUIRE(dev->zeroRange(c.fat0, 512));
+            patchBytes(*dev, c.fat1, {0x11, 0x22, 0x33, 0x44});
+            auto fs = probe(dev);
+            REQUIRE((fs && *fs));
+            const auto* d = diagOf(**fs, "fat.fat_copies_differ");
+            REQUIRE(d);
+            CHECK_FALSE(d->repairable);
+            CHECK(d->severity == layout::Validity::Error);
+            CHECK(d->message.find("nothing to restore from") != std::string::npos);
+            checkNoRepairableInfo(**fs);
+            const std::vector<std::byte> before(dev->bytes().begin(), dev->bytes().end());
+            REQUIRE((*fs)->repair(*dev));
+            CHECK(std::equal(before.begin(), before.end(), dev->bytes().begin()));
+        }
+    }
+}
+
+TEST_CASE("FAT: the boot sector state flag exists only with the extended BPB; a DOS 3.x boot sector has boot code there") {
+    auto dev = loadSparseFixture("fs/fat12.sparse");
+    patchBytes(*dev, 38, {0x00});   // no extended boot signature
+    patchBytes(*dev, 37, {0x01});   // the byte that would be the state flag
+    auto fs = probe(dev);
+    REQUIRE((fs && *fs));
+    CHECK((*fs)->type() == FsType::Fat12);
+    CHECK((*fs)->info().clean == true);
+    CHECK(diagOf(**fs, "fat.dirty") == nullptr);
+    CHECK((*fs)->info().label == "STEIN_FAT12");   // the root directory's; the boot sector's label and serial are not read either
+    CHECK((*fs)->info().uuid.empty());
+    CHECK((*fs)->info().extra.empty());
+    CHECK_MESSAGE((*fs)->diagnostics().empty(), diagCodes(**fs));
+    // With the signature back the same bit means dirty.
+    patchBytes(*dev, 38, {0x29});
+    auto dirty = probe(dev);
+    REQUIRE((dirty && *dirty));
+    CHECK((*dirty)->info().clean == false);
+    REQUIRE(diagOf(**dirty, "fat.dirty"));
+    CHECK(diagOf(**dirty, "fat.dirty")->message.find("boot sector state flag") != std::string::npos);
+    CHECK_FALSE((*dirty)->info().uuid.empty());   // the serial is read again
 }
 
 TEST_CASE("FAT: FAT[0] media byte, FAT[1] clean-shutdown and hard-error bits, boot sector state flag: one clean answer") {
@@ -1988,7 +2215,158 @@ TEST_CASE("FAT: hidden_sectors is checked against the partition's start LBA when
     auto plain = probe(whole);
     REQUIRE((plain && *plain));
     CHECK(diagOf(**plain, "fat.hidden_sectors_mismatch") == nullptr);
+
+    // An MBR logical partition: DOS and Windows write the distance from its EBR, Linux the disk
+    // LBA. Both pass once the sector that far back proves to be the EBR describing this partition.
+    {
+        auto disk2 = std::make_shared<MemoryDevice>(8 * MiB, 512);
+        REQUIRE(disk2->writeAt(3 * MiB, whole->bytes()));
+        // EBR at LBA 4096: entry 1 places a FAT12 partition 2048 sectors on, 8192 sectors long.
+        const ByteCount ebr = 2 * MiB;
+        patchBytes(*disk2, ebr + 446, {0x00, 0, 0, 0, 0x01, 0, 0, 0});
+        patchLe32(*disk2, ebr + 446 + 8, 2048);
+        patchLe32(*disk2, ebr + 446 + 12, 8192);
+        patchBytes(*disk2, ebr + 510, {0x55, 0xAA});
+        auto logical = SliceDevice::create(disk2, Region{3 * MiB, 4 * MiB});
+        REQUIRE(logical);
+        patchLe32(**logical, 28, 2048);   // EBR-relative
+        auto viaEbr = probe(*logical);
+        REQUIRE((viaEbr && *viaEbr));
+        CHECK_MESSAGE((*viaEbr)->diagnostics().empty(), diagCodes(**viaEbr));
+        patchLe32(**logical, 28, 6144);   // disk-relative
+        auto viaDisk = probe(*logical);
+        REQUIRE((viaDisk && *viaDisk));
+        CHECK_MESSAGE((*viaDisk)->diagnostics().empty(), diagCodes(**viaDisk));
+        patchLe32(**logical, 28, 63);   // a distance no EBR accounts for
+        auto wrong = probe(*logical);
+        REQUIRE((wrong && *wrong));
+        REQUIRE(diagOf(**wrong, "fat.hidden_sectors_mismatch"));
+        CHECK(diagOf(**wrong, "fat.hidden_sectors_mismatch")->message.find("LBA 6144") != std::string::npos);
+        // The EBR entry must describe this very partition: another size does not vouch for it.
+        patchLe32(**logical, 28, 2048);
+        patchLe32(*disk2, ebr + 446 + 12, 4096);
+        auto other = probe(*logical);
+        REQUIRE((other && *other));
+        CHECK(diagOf(**other, "fat.hidden_sectors_mismatch") != nullptr);
+        checkNoRepairableInfo(**other);
+    }
+    // A decrypting view (LUKS, VeraCrypt) also sits at an offset on its parent, but that offset
+    // is a payload start the formatter never saw: not a partition window, nothing to compare.
+    {
+        auto disk3 = std::make_shared<MemoryDevice>(5 * MiB, 512);
+        REQUIRE(disk3->writeAt(1 * MiB, whole->bytes()));
+        auto payload = std::make_shared<PayloadView>(disk3, Region{1 * MiB, 4 * MiB}, 512);
+        auto fs3 = probe(payload);
+        REQUIRE((fs3 && *fs3));
+        CHECK((*fs3)->info().label == "STEIN_FAT12");
+        CHECK_MESSAGE((*fs3)->diagnostics().empty(), diagCodes(**fs3));
+        // The same payload with 4096-byte sectors (LUKS2 --sector-size 4096).
+        auto fs4k = probe(std::make_shared<PayloadView>(disk3, Region{1 * MiB, 4 * MiB}, 4096));
+        REQUIRE((fs4k && *fs4k));
+        CHECK_MESSAGE((*fs4k)->diagnostics().empty(), diagCodes(**fs4k));
+        // Through a read-only wrapper: a plain decorator, whole view of its parent, same bytes.
+        auto fsRo = probe(std::make_shared<ReadOnlyDevice>(payload));
+        REQUIRE((fsRo && *fsRo));
+        CHECK_MESSAGE((*fsRo)->diagnostics().empty(), diagCodes(**fsRo));
+        // A payload that views a partition whole (detached header) but re-sectors it: the sector
+        // size change ends the walk before the partition's offset is reached.
+        auto partDisk = std::make_shared<MemoryDevice>(5 * MiB, 512);
+        REQUIRE(partDisk->writeAt(1 * MiB, whole->bytes()));
+        auto part2 = SliceDevice::create(partDisk, Region{1 * MiB, 4 * MiB});
+        REQUIRE(part2);
+        auto fsWhole4k = probe(std::make_shared<PayloadView>(*part2, Region{0, 4 * MiB}, 4096));
+        REQUIRE((fsWhole4k && *fsWhole4k));
+        CHECK(diagOf(**fsWhole4k, "fat.hidden_sectors_mismatch") == nullptr);
+        // The partition's slice itself still reports: hidden_sectors 0, LBA 2048.
+        auto fsPart2 = probe(*part2);
+        REQUIRE((fsPart2 && *fsPart2));
+        CHECK(diagOf(**fsPart2, "fat.hidden_sectors_mismatch") != nullptr);
+    }
 }
+
+#ifdef STEIN_TEST_FS_HAS_LUKS
+// The real thing: the FAT12 fixture inside a LUKS payload, written through libstein's own
+// encrypting view (the way the app's test_luks builds its ext4 case). The fixture's header and
+// key slot are reused; its payload is replaced by the volume.
+TEST_CASE("FAT: a volume inside a LUKS payload is not measured against the payload offset (LUKS2 argon2id/512 and pbkdf2/4096)") {
+    for (const char* fixture : {"luks/luks2.sparse", "luks/luks2_pbkdf2.sparse"}) {
+        INFO("fixture ", fixture);
+        auto luksFixture = loadSparseFixture(fixture);
+        auto fat = loadSparseFixture("fs/fat12.sparse");
+        REQUIRE((luksFixture && fat));
+        auto header = container::Luks::open(luksFixture);
+        REQUIRE(header);
+        const ByteCount off = header->info().payloadOffset;
+        auto dev = std::make_shared<MemoryDevice>(off + fat->size(), 512);
+        std::vector<std::byte> head(static_cast<std::size_t>(off));
+        REQUIRE(luksFixture->readAt(0, head));
+        REQUIRE(dev->writeAt(0, head));
+        auto luks = container::Luks::open(dev);
+        REQUIRE(luks);
+        REQUIRE(luks->info().payloadSize == fat->size());
+        auto payload = luks->openPayload(std::string("luks test passphrase"), false);
+        REQUIRE(payload);
+        CHECK((*payload)->sectorSize() == luks->info().sectorSize);
+        REQUIRE((*payload)->writeAt(0, fat->bytes()));
+        REQUIRE((*payload)->flush());
+        auto fs = probe(*payload);
+        REQUIRE((fs && *fs));
+        CHECK((*fs)->type() == FsType::Fat12);
+        CHECK((*fs)->info().label == "STEIN_FAT12");
+        CHECK(diagOf(**fs, "fat.hidden_sectors_mismatch") == nullptr);
+        CHECK_MESSAGE((*fs)->diagnostics().empty(), diagCodes(**fs));
+        // Read-only, as the probe opens payloads.
+        auto ro = luks->openPayload(std::string("luks test passphrase"), true);
+        REQUIRE(ro);
+        auto fsRo = probe(*ro);
+        REQUIRE((fsRo && *fsRo));
+        CHECK_MESSAGE((*fsRo)->diagnostics().empty(), diagCodes(**fsRo));
+    }
+}
+
+// A detached header (cryptsetup --header) puts the payload at byte 0 of the data device, here a
+// partition: the decrypting view is then a whole view of the partition slice at the same sector
+// size, the exact shape of a plain decorator, and only its bytes tell the two apart. The LUKS1
+// header's payload_offset is a plain field (no checksum seals the header), so the fixture's is set
+// to 0 to make such a header; the data device gets the fixture's key slot and the volume.
+TEST_CASE("FAT: a detached-header LUKS payload on a partition is a transforming view, not the partition window") {
+    auto header = loadSparseFixture("luks/luks1.sparse");
+    auto fat = loadSparseFixture("fs/fat12.sparse");
+    REQUIRE((header && fat));
+    patchBytes(*header, 0x68, {0, 0, 0, 0});   // payload_offset (big-endian, in sectors) = 0
+    auto disk = std::make_shared<MemoryDevice>(6 * MiB, 512);
+    auto part = SliceDevice::create(disk, Region{1 * MiB, fat->size()});
+    REQUIRE(part);
+    auto luks = container::Luks::open(header, *part);
+    REQUIRE(luks);
+    CHECK(luks->info().payloadOffset == 0);
+    REQUIRE(luks->info().payloadSize == fat->size());
+    auto payload = luks->openPayload(std::string("luks test passphrase"), false);
+    REQUIRE(payload);
+    CHECK((*payload)->sectorSize() == (*part)->sectorSize());
+    CHECK((*payload)->size() == (*part)->size());
+    REQUIRE((*payload)->writeAt(0, fat->bytes()));
+    REQUIRE((*payload)->flush());
+    auto fs = probe(*payload);
+    REQUIRE((fs && *fs));
+    CHECK((*fs)->type() == FsType::Fat12);
+    CHECK((*fs)->info().label == "STEIN_FAT12");
+    CHECK(diagOf(**fs, "fat.hidden_sectors_mismatch") == nullptr);
+    CHECK_MESSAGE((*fs)->diagnostics().empty(), diagCodes(**fs));
+    // Read-only (behind the payload's read cache), as the probe opens payloads.
+    auto ro = luks->openPayload(std::string("luks test passphrase"), true);
+    REQUIRE(ro);
+    auto fsRo = probe(*ro);
+    REQUIRE((fsRo && *fsRo));
+    CHECK_MESSAGE((*fsRo)->diagnostics().empty(), diagCodes(**fsRo));
+    // The partition itself is still a window: the same volume written there in the clear reports.
+    REQUIRE((*part)->writeAt(0, fat->bytes()));
+    auto clear = probe(*part);
+    REQUIRE((clear && *clear));
+    REQUIRE(diagOf(**clear, "fat.hidden_sectors_mismatch"));
+    CHECK(diagOf(**clear, "fat.hidden_sectors_mismatch")->message.find("LBA 2048") != std::string::npos);
+}
+#endif
 
 TEST_CASE("exfat: geometry sanity, truncation, exact used space from the bitmap, TexFAT's second FAT") {
     // Used space: the bitmap's set bits, not percent_in_use, on every fixture (all under 8 MiB).

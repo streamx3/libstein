@@ -42,10 +42,47 @@ public:
 
     // Load into a fresh in-memory device (fixtures).
     static Expected<std::shared_ptr<MemoryDevice>> loadIntoMemory(const std::filesystem::path& path);
+    // The piece as a read-only device of its full geometry that holds only the runs (RunListDevice
+    // below): what a CLI or viewer opens a dumped table piece as, since loadIntoMemory() would
+    // allocate the whole disk the piece was taken from.
+    static Expected<std::shared_ptr<BlockDevice>> openAsDevice(const std::filesystem::path& path, const std::string& passphrase = {});
     // Capture the given regions of `device` (e.g. PartitionTable::metadataRegions()).
     static Expected<Contents> capture(BlockDevice& device, const std::vector<Region>& regions);
     // Write every run back onto `device`. Fails before writing anything if a run does not fit.
     static Expected<void> apply(const Contents& contents, BlockDevice& device);
+};
+
+// A piece's byte runs as a read-only BlockDevice with the piece's own size and sector size: a
+// read inside a run returns the run's bytes, a read anywhere else returns zeros, and writes are
+// refused. Nothing is allocated for the gaps, so a table piece dumped from a 2 TB disk (a few
+// tens of KiB of runs that describe 2 TiB) costs what it stores, where a MemoryDevice of the
+// described size would try to allocate the 2 TiB. Overlapping runs resolve the way
+// SparseFile::apply() writes them: the later run in the piece wins.
+class RunListDevice final : public BlockDevice {
+public:
+    // OutOfRange when a run reaches past totalSize; InvalidArgument for a zero sector size.
+    static Expected<std::shared_ptr<RunListDevice>> create(SparseFile::Contents contents, std::string name = "piece");
+
+    std::string name() const override { return m_name; }
+    Geometry geometry() const override { return m_geometry; }
+    bool isReadOnly() const override { return true; }
+    Expected<void> readAt(ByteCount offset, std::span<std::byte> dst) override;
+    Expected<void> writeAt(ByteCount offset, std::span<const std::byte> src) override;
+    Expected<void> flush() override { return {}; }
+    Expected<void> discard(ByteCount offset, ByteCount length) override;
+    Expected<void> zeroRange(ByteCount offset, ByteCount length) override;
+
+    // The runs as served: sorted by offset, overlaps trimmed, empty runs dropped.
+    const std::vector<SparseFile::Run>& runs() const { return m_runs; }
+    // Bytes the runs hold, as opposed to size(): what the piece actually stores.
+    ByteCount storedBytes() const { return m_storedBytes; }
+
+private:
+    RunListDevice() = default;
+    std::vector<SparseFile::Run> m_runs;
+    Geometry m_geometry;
+    std::string m_name;
+    ByteCount m_storedBytes = 0;
 };
 
 } // namespace stein

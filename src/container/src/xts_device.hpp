@@ -6,7 +6,9 @@
 #include "stein/block/block_device.hpp"
 #include "stein/core/cipher.hpp"
 
+#include <algorithm>
 #include <cstring>
+#include <mutex>
 #include <string>
 
 namespace stein::container::detail {
@@ -31,14 +33,35 @@ public:
     Expected<void> readAt(ByteCount offset, std::span<std::byte> dst) override {
         if (auto r = checkRange(offset, dst.size()); !r) return r;
         if (dst.empty()) return {};
-        // Whole sectors covering the request, then copy the window out.
-        const ByteCount first = offset / m_sectorSize;
-        const ByteCount last = (offset + dst.size() - 1) / m_sectorSize;
-        const ByteCount span = (last - first + 1) * m_sectorSize;
-        std::vector<std::byte> cipher(span), plain(span);
-        if (auto r = m_parent->readAt(m_region.offset + first * m_sectorSize, cipher); !r) return r;
-        if (auto d = m_xts.decryptSectors(first + m_ivTweak, m_sectorSize, cipher, plain); !d) return d;
-        std::memcpy(dst.data(), plain.data() + (offset - first * m_sectorSize), dst.size());
+        // Whole sectors covering the request, at most kChunk bytes at a time through two scratch
+        // buffers kept on the device: a 128 MiB read must not allocate 256 MiB, and the lock is
+        // taken per chunk so the UI thread and the NFS server thread, which read through the same
+        // device, interleave instead of one waiting for the other's whole request.
+        const ByteCount chunkSectors = std::max<ByteCount>(1, kChunk / m_sectorSize);
+        const ByteCount end = offset + dst.size();
+        ByteCount sector = offset / m_sectorSize;
+        const ByteCount lastSector = (end - 1) / m_sectorSize;
+        while (sector <= lastSector) {
+            const ByteCount n = std::min<ByteCount>(chunkSectors, lastSector - sector + 1);
+            const ByteCount chunkStart = sector * m_sectorSize, chunkBytes = n * m_sectorSize;
+            // The part of this chunk the caller asked for (the first and last chunk may be partial).
+            const ByteCount from = std::max(chunkStart, offset), to = std::min(chunkStart + chunkBytes, end);
+            const std::span<std::byte> window = dst.subspan(static_cast<std::size_t>(from - offset), static_cast<std::size_t>(to - from));
+            std::lock_guard lock(m_scratchMutex);
+            if (m_cipher.size() < chunkBytes) m_cipher.resize(static_cast<std::size_t>(chunkBytes));
+            const std::span<std::byte> cipher(m_cipher.data(), static_cast<std::size_t>(chunkBytes));
+            if (auto r = m_parent->readAt(m_region.offset + chunkStart, cipher); !r) return r;
+            if (window.size() == chunkBytes) {
+                // Sector-aligned on both ends: decrypt straight into the caller's buffer.
+                if (auto d = m_xts.decryptSectors(sector + m_ivTweak, m_sectorSize, cipher, window); !d) return d;
+            } else {
+                if (m_plain.size() < chunkBytes) m_plain.resize(static_cast<std::size_t>(chunkBytes));
+                const std::span<std::byte> plain(m_plain.data(), static_cast<std::size_t>(chunkBytes));
+                if (auto d = m_xts.decryptSectors(sector + m_ivTweak, m_sectorSize, cipher, plain); !d) return d;
+                std::memcpy(window.data(), plain.data() + (from - chunkStart), window.size());
+            }
+            sector += n;
+        }
         return {};
     }
     Expected<void> writeAt(ByteCount offset, std::span<const std::byte> src) override {
@@ -58,6 +81,8 @@ public:
     }
 
 private:
+    static constexpr ByteCount kChunk = 1 * MiB;   // a multiple of every LUKS sector size (512 to 4096)
+
     std::shared_ptr<BlockDevice> m_parent;
     Region m_region;
     std::uint32_t m_sectorSize;
@@ -66,6 +91,9 @@ private:
     bool m_readOnly;
     std::string m_label;
     Geometry m_geometry;
+    // Scratch for readAt: ciphertext and, for partial chunks, plaintext; each grows to kChunk at most.
+    std::mutex m_scratchMutex;
+    std::vector<std::byte> m_cipher, m_plain;
 };
 
 

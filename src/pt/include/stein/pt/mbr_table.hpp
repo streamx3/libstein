@@ -23,8 +23,10 @@ public:
     layout::Node describe() const override;
     Expected<void> write(BlockDevice& device) const override;
     // Rewrites the EBR chain from the logicals held, after looking behind a broken link for
-    // EBR sectors the walk could no longer reach. Refuses to replace a chain it could not read
-    // with an empty one.
+    // EBR sectors the walk could no longer reach (believed only when a filesystem sits where
+    // they say) and for the filesystem of the logical the lost EBR itself described. Refuses
+    // to replace a chain it could not read with an empty one, and to close the chain over a
+    // logical it cannot rebuild.
     Expected<void> repair(BlockDevice& device, const RepairOptions& options) override;
     Expected<void> addPartition(const Partition& partition) override;
     Expected<void> removePartition(std::uint32_t index) override;
@@ -37,7 +39,8 @@ public:
     const Partition* extendedPartition() const;
     // Sectors between an EBR and its logical partition's data when we place EBRs ourselves.
     static constexpr Lba kDefaultEbrGap = 2048;
-    // Upper bound on what the orphaned-EBR scan of repair() reads.
+    // Upper bound on what the orphaned-EBR scan of repair() reads, split evenly between its
+    // two passes (the 1 MiB grid and the track grid behind the break).
     static constexpr ByteCount kRecoveryScanBudget = 64 * MiB;
 
 private:
@@ -50,15 +53,21 @@ private:
         Unsigned,     // an EBR without the 0xAA55 signature
         Outside,      // a link pointing outside the extended partition or the device
         Loop,         // a link back to a visited EBR, or more than 128 links
+        Wiped,        // first EBR sector is all zero but EBRs or filesystems lie behind it
     };
     bool chainBroken() const { return m_chainEnd >= ChainEnd::Unreadable; }
+    // What the scan behind a broken chain turned up.
+    struct Recovery {
+        std::vector<Partition> logicals;
+        bool lostAtBreak = false;   // the EBR at the break described a logical nothing could rebuild
+    };
 
     MbrTable() = default;
     void addDiagnostic(layout::Validity sev, std::string code, std::string message, std::optional<Region> region = {},
                        bool repairable = false);
     void validate();
     std::vector<std::byte> serializeEntry(const Partition& p, Lba relativeTo) const;
-    std::vector<Partition> recoverLogicals(BlockDevice& device, const Partition& ext) const;
+    Recovery recoverLogicals(BlockDevice& device, const Partition& ext) const;
 
     Geometry m_geometry;
     std::uint32_t m_diskSignature = 0;

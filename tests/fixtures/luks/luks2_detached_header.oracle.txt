@@ -1,0 +1,4 @@
+passphrase=luks test passphrase
+master_key=904868e585ffe80c9f32e61570b058abd48e7cc6c40b1c702555e94ca243119cce762f2cc06b99b003daf5d743387271b7e460f190870c391f544e75a0709527
+generated=cryptsetup 2.8.4 on Ubuntu 26.04 aarch64, 2026-10-22, luksFormat --type luks2 --header <hdr> --luks2-keyslots-size 1024k (detached: payload at offset 0 of the data image)
+payload=see luks2_detached_data.sparse

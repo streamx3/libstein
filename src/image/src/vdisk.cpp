@@ -21,6 +21,7 @@
 #include <cstring>
 #include <fstream>
 #include <functional>
+#include <mutex>
 
 namespace stein::image {
 
@@ -75,6 +76,9 @@ public:
 
     Expected<void> readAt(ByteCount offset, std::span<std::byte> dst) override {
         if (auto r = checkRange(offset, dst.size()); !r) return r;
+        // One cached unit and the format's own lookup tables behind m_map/m_decompress are shared
+        // by every thread reading the container (the app's browser and a mount at once).
+        std::lock_guard lock(m_mutex);
         std::size_t done = 0;
         while (done < dst.size()) {
             const ByteCount pos = offset + done;
@@ -116,6 +120,7 @@ private:
     Geometry m_geometry;
     std::vector<std::byte> m_cache;
     std::uint64_t m_cachedUnit = ~0ull;
+    std::mutex m_mutex;
 };
 
 class ZeroDevice final : public BlockDevice {

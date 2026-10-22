@@ -7,6 +7,7 @@ stein_add_module(block
     src/sparse_file.cpp
     src/overlay_device.cpp
     src/concat_device.cpp
+    src/cached_device.cpp
   PUBLIC_DEPS stein::core)
 
 stein_add_test(test_block

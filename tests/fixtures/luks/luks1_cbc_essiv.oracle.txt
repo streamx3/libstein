@@ -1,0 +1,4 @@
+passphrase=luks test passphrase
+master_key=0543bfaae793493b67ec96dfc840ab2135ba824a888a0e382b4fa940bc22029a
+generated=cryptsetup 2.8.4 on Ubuntu 26.04 aarch64, 2026-10-22, luksFormat --type luks1 --cipher aes-cbc-essiv:sha256 --key-size 256
+payload=none: libstein refuses cbc-essiv; header only

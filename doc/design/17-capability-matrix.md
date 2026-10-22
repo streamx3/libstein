@@ -11,7 +11,7 @@ L0 detect/geometry/label/uuid · L1 used-block map · L2 offline metadata edit
 | FS | L0 | L1 | L2 label/uuid | L2 resize | L2 check | L2 create | L3 | L4 |
 |---|---|---|---|---|---|---|---|---|
 | ext2/3/4 | **done** | **done** (allocation map; used-only imaging) | v1 | v2 (x in v1) | v2 (x in v1) | v1 | **done** (reader: extents, indirect, inline, htree, symlinks) | v2 |
-| FAT12/16/32 | **done** (boot sector described whole; BPB/FSInfo sanity, FAT[0]/FAT[1] media and clean/hard-error bits, hidden_sectors vs partition start; FAT32 backup boot/FSInfo and mirrored FAT copies compared, `repair()` rewrites them from the live ones) | **done** (allocation map from the active FAT per ext_flags; used-only imaging) | v1 | v2 (FAT32 only, cluster-count rules) | v1 (FreeBSD fsck_msdosfs port) | v1 | **done** (reader: LFN, chains, active FAT) | v1 |
+| FAT12/16/32 | **done** (boot sector described whole; BPB/FSInfo sanity, FAT[0]/FAT[1] media and clean/hard-error bits, hidden_sectors vs partition start; FAT32 backup boot/FSInfo and mirrored FAT copies compared, `repair()` rewrites the backup boot sector from the live one, an FSInfo copy with wrong signatures from the intact one and a FAT copy whose head fails fsck.fat's media-byte / end-of-chain test from the sound copy; a backup FSInfo that merely lags is Info, not repairable) | **done** (allocation map from the active FAT per ext_flags; used-only imaging) | v1 | v2 (FAT32 only, cluster-count rules) | v1 (FreeBSD fsck_msdosfs port) | v1 | **done** (reader: LFN, chains, active FAT) | v1 |
 | exFAT | **done** (boot regions with checksums and backup, `repair()` restores or reseals them; geometry/truncation checks; used space counted from bitmaps up to 8 MiB; TexFAT second FAT compared, not repaired) | **done** (allocation map from the live bitmap per volume_flags; used-only imaging) | v1 | v2 | v2 | v1 | **done** (reader: NoFatChain, up-case table, live FAT per volume_flags) | v1 |
 | NTFS | **done** | **done** (allocation map; used-only imaging) | v1 | v3 (x in v1) | – (x) | v2 (x in v1) | **done** (reader: MFT, INDX, reparse links) | v3 |
 | HFS+ / HFSX | **done** | **done** (allocation map; used-only imaging) | v1 | v3 | – | v2 | **done** (reader: B-trees, overflow extents, hard links, HFSX case) | v3 |
@@ -34,7 +34,7 @@ L0 detect/geometry/label/uuid · L1 used-block map · L2 offline metadata edit
 | Table | read | diagnostics | write/edit | repair | notes |
 |---|---|---|---|---|---|
 | GPT (+ protective/hybrid MBR) | **done** | **done** (CRCs, header pairs, overlaps, out-of-bounds, backup location, PMBR extent, hybrid entries mirrored by GPT entries) | **done** | **done** (rebuild either copy, fix CRCs, relocate backup, fix PMBR; a hybrid MBR is left alone) | own code from UEFI 2.10 §5; byte-identical with sgdisk; v4 GUIDs from `crypto::randomBytes` |
-| MBR + EBR | **done** | **done** (overlap, chain loops/breaks, lost logicals, links outside the extended partition, logical outside extended, protective leftovers, status/CHS/stale entries) | **done** | **done** (rewrite EBR chain, orphaned-EBR recovery on the 1 MiB and 63-sector grids within 64 MiB of reads, normalise entries; refuses to empty a chain it could not read) | own code; byte-identical with sfdisk |
+| MBR + EBR | **done** | **done** (overlap, chain loops/breaks, lost logicals, links outside the extended partition, logical outside extended, protective leftovers, status/CHS/stale entries) | **done** | **done** (rewrite EBR chain; orphaned-EBR recovery on the 1 MiB grid and, right behind the break, the 63-sector grid within 64 MiB of reads, a hit believed only with a recognised filesystem of the entry's size behind it; a lost logical rebuilt from the filesystem behind its EBR, else the chain is not closed over it; a wiped head EBR told from an empty container by what lies behind it; normalise entries; refuses to empty a chain it could not read) | own code; byte-identical with sfdisk |
 | APM (+ DDM block0) | v1 | v1 | v2 | v2 | FreeBSD `g_part_apm.c`; required explicitly by R4 |
 | BSD disklabel (+ nested in MBR) | v1 | v1 | v2 | – | FreeBSD `g_part_bsd.c` |
 | Windows LDM (dynamic disks) | v1 | v1 | – | – | FreeBSD `g_part_ldm.c`; volumes via `stein_volume` |
@@ -45,8 +45,8 @@ L0 detect/geometry/label/uuid · L1 used-block map · L2 offline metadata edit
 
 | Thing | detect | open/read | write/create | notes |
 |---|---|---|---|---|
-| LUKS1 | **done** | v1 | v2 (format, keyslots) | PBKDF2, AF-splitter, aes-xts-plain64 first; other cipher specs v2 |
-| LUKS2 | **done** | v1 (argon2id/pbkdf2, xts; integrity → refuse) | v2 | JSON metadata, two header copies |
+| LUKS1 | **done** | **done** (PBKDF2 over sha1/sha256/sha512/ripemd160/whirlpool, AF-splitter, aes/serpent/twofish/camellia xts-plain64, detached header) | v2 (format, keyslots) | cbc-essiv, plain64be and `capi:` refused by name; `Luks::open(header, data)` for `--header` / `luksHeaderBackup` |
+| LUKS2 | **done** | **done** (argon2i/argon2id on lane threads with a memory cap and a cancel hook, pbkdf2; slots by priority, tokens read, unusable slots skipped with a reason; both header copies with checksum and seqid; 512/4096-byte sectors; detached header; dm-integrity, reencryption or mandatory requirements, several or non-crypt segments and unknown flags → refused with the reason) | v2 | JSON numbers parsed defensively; read-only payloads behind `CachedDevice`; the probe keeps an unlocked-key cache by UUID (`probe::Options::masterKeys` / `onUnlocked` / `cancelled`) |
 | TrueCrypt/VeraCrypt | **done** (by trial decrypt with a passphrase) | **done** (every cipher and cascade of VeraCrypt 1.26 and TrueCrypt 7 in XTS; PBKDF2 over all six PRFs with PIM; normal, hidden, backup headers) | v3 | system-encryption volumes v3 |
 | BitLocker | v1 | v2 (password / recovery key / BEK; AES-CBC+Elephant, AES-XTS) | – | libbde docs as spec |
 | FileVault2 / CoreStorage | v1 | v3 | – | |
@@ -75,7 +75,7 @@ L0 detect/geometry/label/uuid · L1 used-block map · L2 offline metadata edit
 | Backend | read-only mount | writable mount | notes |
 |---|---|---|---|
 | Linux libfuse3 | **done** (`stein mount`, any `fs::Reader`: partitions inside images, LUKS, LVM) | v2 (needs fs writers) | optional at configure time (`pkg-config fuse3`) |
-| macOS NFS loopback | **done** (own NFSv3 server on 127.0.0.1 + `mount_nfs`; `stein attach` hands a decoded disk to macOS's own drivers via hdiutil) | v2 | no kext, no dependency; FSKit later for packaged apps |
+| macOS NFS loopback | **done** (own NFSv3 server on 127.0.0.1 + `mount_nfs`, export named after the volume via `NfsServerOptions::exportPath`, `Mount::run()` returns on an external unmount through a getfsstat poll and the client's UMNT; `stein attach` hands a decoded disk to macOS's own drivers via hdiutil) | v2 | no kext, no dependency; FSKit later for packaged apps |
 | Windows WinFsp | **done** (same libfuse3-API source over WinFsp's fuse3 layer, delay-loaded; drive letter or absent directory as mount point; CI mounts and reads the ext4 fixture through it) | v2 | WinFsp is optional at configure time and at run time (clear `Unsupported` when not installed); Dokany not pursued |
 
 ## Operations (stein_ops, M1)

@@ -1,0 +1,27 @@
+LUKS header information for luks1-256.img
+
+Version:       	1
+Cipher name:   	aes
+Cipher mode:   	xts-plain64
+Hash spec:     	sha256
+Payload offset:	4096
+MK bits:       	256
+MK digest:     	8d 7a aa e3 53 38 72 01 9b 8b 93 9b 64 49 37 55 84 a9 a4 dc 
+MK salt:       	2c 94 75 c8 15 02 33 6e 50 38 e1 c9 be 42 39 ff 
+               	50 d6 b0 5f b1 7c 17 27 20 46 e6 07 48 7e 33 a5 
+MK iterations: 	1092266
+UUID:          	f414f6e3-4639-4fb1-a5cb-3ddacdfd1d10
+
+Key Slot 0: ENABLED
+	Iterations:         	17549388
+	Salt:               	a4 46 92 b1 c3 66 b3 dd be e3 2c 8a a6 f7 fc a9 
+	                      	c4 8e e5 5f 92 89 cb a0 9d b3 81 7a 34 ae 38 7e 
+	Key material offset:	8
+	AF stripes:            	4000
+Key Slot 1: DISABLED
+Key Slot 2: DISABLED
+Key Slot 3: DISABLED
+Key Slot 4: DISABLED
+Key Slot 5: DISABLED
+Key Slot 6: DISABLED
+Key Slot 7: DISABLED

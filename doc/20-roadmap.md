@@ -35,18 +35,22 @@ Delivered (see `reports/2026-10-06-progress.md` for detail):
   macOS (arm64) and Windows (MSVC).
 
 Still open from the original M1 list: BSD disklabel / LDM parsing, hot-plug
-events, SMART, `stein_container`/`stein_volume` beyond detection (LUKS and
-LVM are detected, not opened), FUSE browsing of images.
+events, SMART. (`stein_container`/`stein_volume` beyond detection and FUSE
+browsing of images have landed since: LUKS1/2, VeraCrypt and LVM open
+in-process, and `stein mount` serves any reader on all three OSes.)
 
 ## M2 — dr_stein v2 (the one-button app) + FAT/exFAT r/w + LUKS/LVM open
 
 Started: `stein_app` profiles/scenarios, used-block imaging for ext4/NTFS/
-FAT/exFAT/HFS+ and encrypted images landed early (see M1). Remaining
+FAT/exFAT/HFS+ and encrypted images landed early (see M1). LUKS1/2 unlock
+in-process landed 2026-10-23 (both header copies, detached header, every
+usable slot by priority, Argon2 on lane threads with a cancel hook, an
+unlocked-key cache in the probe; `design/17-capability-matrix.md`), as did
+LVM linear/striped LV mapping. Remaining
 deliverable: a minimal native UI per OS (or one
 first, chosen by the owner) that does Backup / Restore / Verify with a locked
 device selector; `.stein` images with used-block-only mode for ext4/NTFS/FAT/
-exFAT/HFS+/XFS/btrfs (L1 maps); LUKS1/2 unlock in-process; LVM linear/striped
-LV mapping; `stein_mount` with FatFs-backed FAT/exFAT r/w on Linux (libfuse),
+exFAT/HFS+/XFS/btrfs (L1 maps); `stein_mount` with FatFs-backed FAT/exFAT r/w on Linux (libfuse),
 Windows (Dokany), macOS (macFUSE or NFS loopback); ext4/NTFS/ISO9660 read
 (L3) through the same mount path; privileged helper RPC.
 

@@ -1,0 +1,4 @@
+passphrase=luks test passphrase
+master_key=992743120ac203483ca6fb72a57c5b7dca1d3b937c6a60362e1f6335fae2f720bdfd80038cfe62269085a6f84a476d2b46bd10e4c9528af5e049d965d68602a8
+generated=cryptsetup 2.8.4 on Ubuntu 26.04 aarch64, 2026-10-22, luksFormat --type luks2 --cipher serpent-xts-plain64 --luks2-keyslots-size 1024k
+payload=ext4 'small_luks' as in luks2_real

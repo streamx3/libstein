@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -236,7 +237,8 @@ private:
     friend class ImageDevice;
 };
 
-// Read-only BlockDevice over a SteinReader with a small chunk cache.
+// Read-only BlockDevice over a SteinReader with a small chunk cache. readAt() is serialised:
+// the app browses an image from the UI thread while a mount serves it from its own threads.
 class ImageDevice final : public BlockDevice {
 public:
     explicit ImageDevice(std::shared_ptr<SteinReader> reader);
@@ -255,6 +257,7 @@ private:
     Geometry m_geometry;
     std::uint64_t m_cachedIndex = ~0ull;
     std::vector<std::byte> m_cache;
+    std::mutex m_mutex;   // guards the cache and the reader's file positions
 };
 
 } // namespace stein::image

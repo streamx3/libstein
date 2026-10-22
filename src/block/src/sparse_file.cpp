@@ -6,6 +6,7 @@
 
 #include "stein/core/endian.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 
@@ -135,6 +136,107 @@ Expected<void> SparseFile::apply(const Contents& c, BlockDevice& device) {
     for (const auto& r : c.runs)
         if (auto w = device.writeAt(r.offset, r.bytes); !w) return w;
     return device.flush();
+}
+
+Expected<std::shared_ptr<BlockDevice>> SparseFile::openAsDevice(const std::filesystem::path& path, const std::string& passphrase) {
+    auto c = read(path, passphrase);
+    if (!c) return fail(c.error());
+    auto dev = RunListDevice::create(std::move(*c), path.filename().string());
+    if (!dev) return fail(dev.error());
+    return std::shared_ptr<BlockDevice>(std::move(*dev));
+}
+
+// ---- RunListDevice -----------------------------------------------------------------------------
+
+namespace {
+
+ByteCount runEnd(const SparseFile::Run& r) { return r.offset + r.bytes.size(); }
+
+// Makes the runs disjoint with apply()'s semantics: every run, taken in piece order, overwrites
+// the parts of earlier runs it covers. Quadratic, but only reached when a piece overlaps itself,
+// which capture() never produces.
+std::vector<SparseFile::Run> trimOverlaps(std::vector<SparseFile::Run> runs) {
+    std::vector<SparseFile::Run> out;
+    for (auto& r : runs) {
+        std::vector<SparseFile::Run> kept;
+        for (auto& e : out) {
+            if (runEnd(e) <= r.offset || runEnd(r) <= e.offset) {
+                kept.push_back(std::move(e));
+                continue;
+            }
+            if (e.offset < r.offset)
+                kept.push_back(SparseFile::Run{e.offset, {e.bytes.begin(), e.bytes.begin() + static_cast<std::ptrdiff_t>(r.offset - e.offset)}});
+            if (runEnd(e) > runEnd(r))
+                kept.push_back(SparseFile::Run{runEnd(r), {e.bytes.begin() + static_cast<std::ptrdiff_t>(runEnd(r) - e.offset), e.bytes.end()}});
+        }
+        kept.push_back(std::move(r));
+        out = std::move(kept);
+    }
+    return out;
+}
+
+} // namespace
+
+Expected<std::shared_ptr<RunListDevice>> RunListDevice::create(SparseFile::Contents contents, std::string name) {
+    if (contents.sectorSize == 0) return fail(ErrorCategory::InvalidArgument, name + ": piece has a zero sector size");
+    auto dev = std::shared_ptr<RunListDevice>(new RunListDevice());
+    dev->m_name = std::move(name);
+    dev->m_geometry.sizeBytes = contents.totalSize;
+    dev->m_geometry.logicalSectorSize = contents.sectorSize;
+    dev->m_geometry.physicalSectorSize = contents.sectorSize;
+    for (auto& r : contents.runs) {
+        if (r.bytes.empty()) continue;
+        if (r.offset > contents.totalSize || r.bytes.size() > contents.totalSize - r.offset)
+            return fail(ErrorCategory::OutOfRange, dev->m_name + ": run at " + std::to_string(r.offset) + "+" + std::to_string(r.bytes.size()) +
+                                                       " reaches past the piece's size " + std::to_string(contents.totalSize));
+        dev->m_runs.push_back(std::move(r));
+    }
+    // Sorted by offset, the runs that touch a read are a contiguous range; that only holds when they
+    // are disjoint, so overlaps are trimmed first. stable_sort keeps piece order for equal offsets,
+    // which trimOverlaps() relies on.
+    bool overlapping = false;
+    {
+        auto byOffset = dev->m_runs;
+        std::stable_sort(byOffset.begin(), byOffset.end(), [](const SparseFile::Run& a, const SparseFile::Run& b) { return a.offset < b.offset; });
+        for (std::size_t i = 1; i < byOffset.size() && !overlapping; ++i) overlapping = runEnd(byOffset[i - 1]) > byOffset[i].offset;
+        if (!overlapping) dev->m_runs = std::move(byOffset);
+    }
+    if (overlapping) {
+        dev->m_runs = trimOverlaps(std::move(dev->m_runs));
+        std::sort(dev->m_runs.begin(), dev->m_runs.end(), [](const SparseFile::Run& a, const SparseFile::Run& b) { return a.offset < b.offset; });
+    }
+    for (const auto& r : dev->m_runs) dev->m_storedBytes += r.bytes.size();
+    return dev;
+}
+
+Expected<void> RunListDevice::readAt(ByteCount offset, std::span<std::byte> dst) {
+    if (auto r = checkRange(offset, dst.size()); !r) return r;
+    std::fill(dst.begin(), dst.end(), std::byte{0});
+    if (dst.empty()) return {};
+    const ByteCount end = offset + dst.size();
+    // The run starting last at or before `offset` may reach into the read; everything after it up
+    // to `end` is a candidate too. Runs are disjoint, so nothing earlier can.
+    auto it = std::upper_bound(m_runs.begin(), m_runs.end(), offset, [](ByteCount o, const SparseFile::Run& r) { return o < r.offset; });
+    if (it != m_runs.begin()) --it;
+    for (; it != m_runs.end() && it->offset < end; ++it) {
+        if (runEnd(*it) <= offset) continue;
+        const ByteCount from = std::max(offset, it->offset), to = std::min(end, runEnd(*it));
+        std::copy_n(it->bytes.begin() + static_cast<std::ptrdiff_t>(from - it->offset), static_cast<std::ptrdiff_t>(to - from),
+                    dst.begin() + static_cast<std::ptrdiff_t>(from - offset));
+    }
+    return {};
+}
+
+Expected<void> RunListDevice::writeAt(ByteCount, std::span<const std::byte>) {
+    return fail(ErrorCategory::Permission, m_name + " is a sparse piece (byte runs, not a disk) and opens read-only");
+}
+
+Expected<void> RunListDevice::discard(ByteCount, ByteCount) {
+    return fail(ErrorCategory::Permission, m_name + " is a sparse piece (byte runs, not a disk) and opens read-only");
+}
+
+Expected<void> RunListDevice::zeroRange(ByteCount, ByteCount) {
+    return fail(ErrorCategory::Permission, m_name + " is a sparse piece (byte runs, not a disk) and opens read-only");
 }
 
 } // namespace stein

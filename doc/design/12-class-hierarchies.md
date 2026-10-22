@@ -12,14 +12,16 @@ BlockDevice (abstract)
 ├── MemoryDevice            tests, simulation
 ├── FileDevice              regular file via injected FileIo (portable)
 ├── SliceDevice             [offset, length) window on a parent; used for Partition, nested tables
-├── CachedDevice            LRU sector cache decorator
+├── RunListDevice           a .sparse piece's runs as a read-only device of the piece's full size, zeros elsewhere
+├── OverlayDevice           copy-on-write overlay for simulated edits (stein_ops)
+├── CachedDevice            bounded LRU read cache of fixed-size chunks (256 KiB chunks, 64 MiB by default) above a decrypting payload; write-through, invalidating
 ├── ReadOnlyDevice          decorator that fails writes (safe default for probing)
 ├── ConcatDevice            N devices back-to-back (split images, LVM linear)
 ├── StripedDevice           RAID0 / LVM striped
 ├── MirrorDevice            RAID1 read (first good copy)
 ├── platform::PlatformDisk  Linux /dev/sdX | macOS /dev/rdiskN | Windows \\.\PhysicalDriveN
 ├── image::ImageDevice      backed by an ImageFormat::Reader
-├── container::DecryptedDevice   XTS/CBC transform over a parent (LUKS, VeraCrypt, BitLocker)
+├── container::detail::XtsDevice XTS view over a parent, one tweak per sector (LUKS, VeraCrypt); 1 MiB chunks through per-device scratch under a mutex
 └── volume::LogicalVolumeDevice  LVM LV / md array mapping over PVs/members
 ```
 
@@ -167,10 +169,9 @@ Common `FileSystem` machinery (base-class helpers, not virtual):
 ## 4. Containers (`stein_container`)
 
 ```
-Container (abstract)  — "something that yields a BlockDevice after a key"
-├── Luks1Container     binary header, 8 key slots, AF-splitter, PBKDF2, cipher spec strings ("aes-xts-plain64")
-├── Luks2Container     binary header + JSON metadata (two copies with seqid), argon2id/pbkdf2, keyslots/segments/digests/tokens, label/subsystem, 4 KiB sectors option, dm-integrity awareness (detect only; refuse to open when integrity is set, v1)
-├── VeraCryptContainer TrueCrypt/VeraCrypt header @0 (+ hidden @65536, + backup at end − 128 KiB), PKCS5-based header decryption trial over all cipher/hash combos and PIM, cascades (AES-Twofish-Serpent…), XTS; system-encryption and partition modes
+(no common base class yet)  — "something that yields a BlockDevice after a key"
+├── Luks               one class for both versions (`Luks::open(device)`; `Luks::open(header, data)` for a detached header). LUKS1: binary header, 8 key slots, AF-splitter, PBKDF2, cipher spec strings ("aes-xts-plain64"). LUKS2: binary header + JSON metadata (two copies with checksum and seqid), argon2i/argon2id/pbkdf2, keyslots/segments/digests/tokens with priority, label/subsystem, 4 KiB sectors; dm-integrity, reencryption and mandatory requirements refused with the reason (`LuksInfo::unsupportedWhy`)
+├── Tcrypt             TrueCrypt/VeraCrypt header @0 (+ hidden @65536, + backup at end − 128 KiB), PKCS5-based header decryption trial over all cipher/hash combos and PIM, cascades (AES-Twofish-Serpent…), XTS; system-encryption and partition modes
 ├── BitLockerContainer FVE metadata (3 copies), detect + volume label; unlock (recovery password / FVEK) later
 ├── PlainContainer     dm-crypt "plain": user-supplied cipher/hash/offset; useful for legacy & tests
 └── CoreStorageContainer / FileVault2 (detect; unlock later)
@@ -178,7 +179,8 @@ Container (abstract)  — "something that yields a BlockDevice after a key"
 
 `Container::Unlocker` takes a `Credential` variant (passphrase, keyfile(s),
 recovery key, raw key) and returns a `std::shared_ptr<BlockDevice>`
-(`DecryptedDevice`). Key material is held in a `SecureBuffer` (locked,
+(today `Luks::unlock` / `openPayload`: a `detail::XtsDevice`, wrapped in
+`CachedDevice` when read-only). Key material is held in a `SecureBuffer` (locked,
 zeroed on free). Everything is in-process; no device-mapper required. On
 Linux an *optional* platform path can hand the same volume to dm-crypt for
 native mounting.

@@ -2,10 +2,20 @@
 #include "stein_fixture.hpp"
 #include "stein_test.hpp"
 
+#include "stein/block/cached_device.hpp"
 #include "stein/block/slice_device.hpp"
+#include "stein/container/luks.hpp"
+#include "stein/core/endian.hpp"
+#include "stein/core/hash.hpp"
+#include "stein/core/json.hpp"
+#include "stein/layout/gen/luks.hpp"
 
 #include <algorithm>
+#include <cstring>
+#include <fstream>
+#include <functional>
 #include <map>
+#include <optional>
 #include "stein/probe/topology.hpp"
 
 using namespace stein;
@@ -172,4 +182,306 @@ TEST_CASE("probe: an LVM physical volume lists its logical volumes and probes th
     auto flat = probe::probe(pv0, o);
     REQUIRE(flat);
     CHECK(flat->children.empty());
+}
+
+// ---------------------------------------------------------------------------------------------
+// LUKS helpers: the oracle file beside each fixture (passphrase, master key, payload offset), and
+// LUKS2 header surgery for a variant no fixture has (no cryptsetup here): the JSON of each copy is
+// rewritten and its checksum recomputed the way cryptsetup does it, csum_alg over the 4096-byte
+// binary header with the csum field zeroed, then the whole JSON area, padding included.
+namespace {
+std::map<std::string, std::string> oracle(const std::string& name) {
+    std::map<std::string, std::string> m;
+    std::ifstream in(std::string(STEIN_FIXTURE_DIR) + "/luks/" + name + ".oracle.txt");
+    std::string line;
+    while (std::getline(in, line))
+        if (auto eq = line.find('='); eq != std::string::npos) m[line.substr(0, eq)] = line.substr(eq + 1);
+    return m;
+}
+std::vector<std::uint8_t> fromHex(const std::string& hex) {
+    std::vector<std::uint8_t> out;
+    for (std::size_t i = 0; i + 1 < hex.size(); i += 2) out.push_back(static_cast<std::uint8_t>(std::stoul(hex.substr(i, 2), nullptr, 16)));
+    return out;
+}
+using Luks2Hdr = layout::gen::Luks2Hdr;
+constexpr ByteCount kLuks2Binary = 4096;
+std::uint64_t luks2HeaderSize(MemoryDevice& dev, ByteCount at) {
+    auto bin = dev.read(at, kLuks2Binary);
+    REQUIRE(bin);
+    return loadBe64(bin->data() + Luks2Hdr::kHdrSizeOffset);
+}
+// The JSON text of one header copy: the NUL-terminated string at the start of its area.
+std::string luks2Json(MemoryDevice& dev, ByteCount at) {
+    const std::uint64_t hdrSize = luks2HeaderSize(dev, at);
+    auto area = dev.read(at + kLuks2Binary, hdrSize - kLuks2Binary);
+    REQUIRE(area);
+    std::string text(reinterpret_cast<const char*>(area->data()), area->size());
+    return text.substr(0, text.find('\0'));
+}
+void rewriteLuks2Copy(MemoryDevice& dev, ByteCount at, const std::function<void(json::Value&)>& mutate) {
+    auto bin = dev.read(at, kLuks2Binary);
+    REQUIRE(bin);
+    const std::uint64_t hdrSize = loadBe64(bin->data() + Luks2Hdr::kHdrSizeOffset);
+    auto j = json::Value::parse(luks2Json(dev, at));
+    REQUIRE(j);
+    mutate(*j);
+    const std::string text = j->dump();
+    std::vector<std::byte> area(hdrSize - kLuks2Binary, std::byte{0});
+    REQUIRE(text.size() < area.size());
+    std::memcpy(area.data(), text.data(), text.size());
+    std::fill_n(bin->begin() + Luks2Hdr::kCsumOffset, Luks2Hdr::kCsumSize, std::byte{0});
+    auto hasher = Hasher::create(HashAlgorithm::Sha256);   // the fixtures' csum_alg
+    hasher->update(*bin);
+    hasher->update(area);
+    const auto digest = hasher->finish();
+    std::memcpy(bin->data() + Luks2Hdr::kCsumOffset, digest.data(), digest.size());
+    REQUIRE(dev.writeAt(at, *bin));
+    REQUIRE(dev.writeAt(at + kLuks2Binary, area));
+}
+// Both copies, consistently (what cryptsetup does on every metadata write).
+void rewriteLuks2Json(MemoryDevice& dev, const std::function<void(json::Value&)>& mutate) {
+    const std::uint64_t hdrSize = luks2HeaderSize(dev, 0);
+    rewriteLuks2Copy(dev, 0, mutate);
+    rewriteLuks2Copy(dev, hdrSize, mutate);
+}
+// root[section][id][key] = value, with json::Value's copy-out/copy-in access.
+void setNested(json::Value& root, const std::string& section, const std::string& id, const std::string& key, json::Value value) {
+    json::Value inner = root.get(section).get(id);
+    inner.set(key, std::move(value));
+    json::Value outer = root.get(section);
+    outer.set(id, std::move(inner));
+    root.set(section, std::move(outer));
+}
+const probe::Note* findNote(const probe::Node& n, std::string_view code) {
+    for (const auto& note : n.notes)
+        if (note.code == code) return &note;
+    return nullptr;
+}
+bool hasNote(const probe::Node& n, std::string_view code) { return findNote(n, code) != nullptr; }
+constexpr const char* kLuksPassphrase = "luks test passphrase";
+} // namespace
+
+TEST_CASE("probe: a cached master key opens a LUKS container with no passphrase (LUKS2 and LUKS1); a foreign key is ignored, a stale one falls back to the passphrases") {
+    for (const std::string name : {"luks2", "luks1"}) {
+        CAPTURE(name);
+        auto disk = loadSparseFixture("luks/" + name + ".sparse");
+        REQUIRE(disk);
+        const auto o = oracle(name);
+        auto luks = container::Luks::open(disk);
+        REQUIRE(luks);
+        const std::string uuid = luks->info().uuid;
+        CHECK_FALSE(uuid.empty());
+        const auto key = fromHex(o.at("master_key"));
+        REQUIRE(key.size() == 64);
+
+        probe::Options opts;
+        opts.masterKeys[uuid] = key;
+        int unlocked = 0;
+        opts.onUnlocked = [&](const std::string&, const std::vector<std::uint8_t>&) { ++unlocked; };
+        int polls = 0;
+        opts.cancelled = [&] { ++polls; return false; };
+        auto tree = probe::probe(disk, opts);
+        REQUIRE(tree);
+        REQUIRE(tree->children.size() == 1);
+        const auto& d = tree->children[0];
+        CHECK(d.kind == probe::NodeKind::Decrypted);
+        REQUIRE(d.content);
+        CHECK(d.content->type() == fs::FsType::Ext2);
+        CHECK(d.content->info().label == o.at("label"));
+        CHECK(d.region.offset == std::stoull(o.at("payload_offset")));
+        CHECK(unlocked == 0);   // the key came from the cache, not from a passphrase
+        CHECK(polls == 0);      // no key derivation ran, so there was nothing to cancel
+        CHECK_FALSE(hasNote(*tree, "luks.locked"));
+
+        // A key filed under another UUID is not tried; with no passphrase the container stays locked
+        // and, nothing having been tried, says nothing.
+        probe::Options foreign;
+        foreign.masterKeys["00000000-0000-0000-0000-000000000000"] = key;
+        auto locked = probe::probe(disk, foreign);
+        REQUIRE(locked);
+        CHECK(locked->children.empty());
+        CHECK_FALSE(hasNote(*locked, "luks.locked"));
+        CHECK_FALSE(hasNote(*locked, "luks.unlock"));
+
+        // A stale key (another volume's, or one of the wrong size) is skipped without a note; the
+        // passphrase takes over and its unlock is reported.
+        const auto other = fromHex(oracle(name == "luks2" ? "luks1" : "luks2").at("master_key"));
+        for (const auto& stale : {other, std::vector<std::uint8_t>(32, 0x5a)}) {
+            probe::Options fallback;
+            fallback.masterKeys[uuid] = stale;
+            fallback.passphrases = {kLuksPassphrase};
+            int reported = 0;
+            fallback.onUnlocked = [&](const std::string& u, const std::vector<std::uint8_t>& k) {
+                ++reported;
+                CHECK(u == uuid);
+                CHECK(k == key);
+            };
+            auto t2 = probe::probe(disk, fallback);
+            REQUIRE(t2);
+            REQUIRE(t2->children.size() == 1);
+            CHECK(t2->children[0].content);
+            CHECK(reported == 1);
+            CHECK_FALSE(hasNote(*t2, "luks.unlock"));
+            CHECK_FALSE(hasNote(*t2, "luks.locked"));
+        }
+    }
+}
+
+TEST_CASE("probe: onUnlocked reports the UUID and the fixture's master key once per passphrase unlock; the payload is cached above the decryption; no secret reaches a note") {
+    auto disk = loadSparseFixture("luks/luks2.sparse");
+    REQUIRE(disk);
+    const auto o = oracle("luks2");
+    probe::Options opts;
+    opts.passphrases = {"wrong one", kLuksPassphrase, "never reached"};
+    std::vector<std::pair<std::string, std::vector<std::uint8_t>>> reports;
+    opts.onUnlocked = [&](const std::string& uuid, const std::vector<std::uint8_t>& key) { reports.emplace_back(uuid, key); };
+    auto tree = probe::probe(disk, opts);
+    REQUIRE(tree);
+    REQUIRE(tree->children.size() == 1);
+    REQUIRE(reports.size() == 1);
+    auto luks = container::Luks::open(disk);
+    REQUIRE(luks);
+    CHECK(reports[0].first == luks->info().uuid);
+    REQUIRE(tree->content);
+    CHECK(reports[0].first == tree->content->info().uuid);   // the UUID the filesystem probe shows for the row
+    CHECK(reports[0].second == fromHex(o.at("master_key")));
+    // What was reported is what the probe takes back: a second probe with the key alone opens it.
+    probe::Options again;
+    again.masterKeys[reports[0].first] = reports[0].second;
+    auto t2 = probe::probe(disk, again);
+    REQUIRE(t2);
+    REQUIRE(t2->children.size() == 1);
+    REQUIRE(t2->children[0].content);
+    CHECK(t2->children[0].content->info().label == "inside_luks");
+
+    // Read-only payload: a CachedDevice over the XTS decryption, already warm from the probe's reads;
+    // the superblock the probe read comes back as a hit without another decryption.
+    auto* cached = dynamic_cast<CachedDevice*>(tree->children[0].device.get());
+    REQUIRE(cached);
+    const auto before = cached->stats();
+    CHECK(before.misses > 0);
+    auto superblock = tree->children[0].device->read(1024, 1024);
+    REQUIRE(superblock);
+    CHECK(cached->stats().hits > before.hits);
+    CHECK(cached->stats().misses == before.misses);
+    CHECK(tree->children[0].device->isReadOnly());
+
+    // No note anywhere in the tree carries the passphrase or any part of the key.
+    std::function<void(const probe::Node&)> scan = [&](const probe::Node& n) {
+        for (const auto& note : n.notes) {
+            CHECK(note.message.find(kLuksPassphrase) == std::string::npos);
+            CHECK(note.message.find(o.at("master_key").substr(0, 16)) == std::string::npos);
+        }
+        for (const auto& c : n.children) scan(c);
+    };
+    scan(*tree);
+    CHECK(probe::toText(*tree).find(o.at("master_key").substr(0, 16)) == std::string::npos);
+}
+
+TEST_CASE("probe: a cancelled job leaves the container locked with no note and no error, and the hook reaches the Argon2 slices") {
+    auto disk = loadSparseFixture("luks/luks2.sparse");
+    REQUIRE(disk);
+    probe::Options opts;
+    opts.passphrases = {kLuksPassphrase};
+    int polls = 0, unlocked = 0;
+    opts.onUnlocked = [&](const std::string&, const std::vector<std::uint8_t>&) { ++unlocked; };
+
+    // Cancelled from the start: the cheap work (header, content type) is done, the KDF never runs,
+    // and nothing is said about the passphrase since it was not refuted.
+    opts.cancelled = [&] { ++polls; return true; };
+    auto tree = probe::probe(disk, opts);
+    REQUIRE(tree);
+    REQUIRE(tree->content);
+    CHECK(tree->content->type() == fs::FsType::Luks2);
+    CHECK(tree->children.empty());
+    CHECK_FALSE(hasNote(*tree, "luks.locked"));
+    CHECK_FALSE(hasNote(*tree, "luks.unlock"));
+    CHECK(polls == 1);
+    CHECK(unlocked == 0);
+
+    // Cancelled on the third poll: the probe's own, unlock()'s before the slot, then Argon2's before
+    // its first slice. Had the KDF not polled, the slot would have opened and a child appeared.
+    polls = 0;
+    opts.cancelled = [&] { return ++polls >= 3; };
+    tree = probe::probe(disk, opts);
+    REQUIRE(tree);
+    CHECK(tree->children.empty());
+    CHECK_FALSE(hasNote(*tree, "luks.locked"));
+    CHECK_FALSE(hasNote(*tree, "luks.unlock"));
+    CHECK(polls >= 3);
+    CHECK(unlocked == 0);
+
+    // Never cancelled: the same options open it, and the hook was polled before each of the
+    // fixture's 16 Argon2 slices (t=4 passes of 4 slices) on top of the probe's and unlock()'s polls.
+    polls = 0;
+    opts.cancelled = [&] { ++polls; return false; };
+    tree = probe::probe(disk, opts);
+    REQUIRE(tree);
+    REQUIRE(tree->children.size() == 1);
+    CHECK(tree->children[0].content);
+    CHECK(polls >= 2 + 16);
+    CHECK(unlocked == 1);
+}
+
+TEST_CASE("probe: a container we cannot open (dm-integrity) gets luks.unsupported with the reason and no Decrypted child, passphrases or not; a damaged header is luks.header") {
+    auto disk = loadSparseFixture("luks/luks2.sparse");
+    REQUIRE(disk);
+    rewriteLuks2Json(*disk, [](json::Value& j) {
+        json::Value integrity = json::Value::object();
+        integrity.set("type", "hmac(sha256)");
+        integrity.set("journal_encryption", "none");
+        integrity.set("journal_integrity", "none");
+        setNested(j, "segments", "0", "integrity", integrity);
+    });
+    auto luks = container::Luks::open(disk);
+    REQUIRE(luks);
+    REQUIRE_FALSE(luks->info().supported);
+
+    // No passphrase: the verdict is there anyway, so a UI can hide its Unlock action up front.
+    probe::Options none;
+    auto tree = probe::probe(disk, none);
+    REQUIRE(tree);
+    REQUIRE(tree->content);
+    CHECK(tree->content->type() == fs::FsType::Luks2);
+    const auto* note = findNote(*tree, "luks.unsupported");
+    REQUIRE(note);
+    CHECK(note->severity == layout::Validity::Info);
+    CHECK(note->message == "cannot open in-process: " + luks->info().unsupportedWhy);
+    CHECK(note->message.find("dm-integrity") != std::string::npos);
+    CHECK(tree->children.empty());
+    CHECK(tree->health() < layout::Validity::Warning);   // not a fault of the disk: Info, no [WARN] in the rendering
+    CHECK(probe::toText(*tree).find("[WARN]") == std::string::npos);
+
+    // The right passphrase and the right cached key change nothing: no child, no KDF, and no
+    // luks.locked, since the container is not locked but unsupported.
+    probe::Options all;
+    all.passphrases = {kLuksPassphrase};
+    all.masterKeys[luks->info().uuid] = fromHex(oracle("luks2").at("master_key"));
+    int polls = 0, unlocked = 0;
+    all.cancelled = [&] { ++polls; return false; };
+    all.onUnlocked = [&](const std::string&, const std::vector<std::uint8_t>&) { ++unlocked; };
+    auto t2 = probe::probe(disk, all);
+    REQUIRE(t2);
+    CHECK(t2->children.empty());
+    CHECK(findNote(*t2, "luks.unsupported"));
+    CHECK_FALSE(hasNote(*t2, "luks.locked"));
+    CHECK_FALSE(hasNote(*t2, "luks.unlock"));
+    CHECK(polls == 0);
+    CHECK(unlocked == 0);
+
+    // Both header copies with a broken checksum: not unsupported but unreadable, a Warning.
+    auto damaged = loadSparseFixture("luks/luks2.sparse");
+    REQUIRE(damaged);
+    const std::uint64_t hdrSize = luks2HeaderSize(*damaged, 0);
+    for (ByteCount at : {ByteCount{0}, ByteCount{hdrSize}}) damaged->bytes()[at + kLuks2Binary + 64] ^= std::byte{0x01};
+    probe::Options withPass;
+    withPass.passphrases = {kLuksPassphrase};
+    auto t3 = probe::probe(damaged, withPass);
+    REQUIRE(t3);
+    CHECK(t3->children.empty());
+    const auto* hdr = findNote(*t3, "luks.header");
+    REQUIRE(hdr);
+    CHECK(hdr->severity == layout::Validity::Warning);
+    CHECK_FALSE(hasNote(*t3, "luks.unsupported"));
+    CHECK_FALSE(hasNote(*t3, "luks.locked"));
 }

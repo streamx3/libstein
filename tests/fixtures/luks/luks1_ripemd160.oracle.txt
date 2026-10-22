@@ -1,0 +1,4 @@
+passphrase=luks test passphrase
+master_key=7ffb480d73b622d9daee2ebd92ab012a21c9eafecd5742347beeec94bb2167c747b4e9a1077dfc4689f7ef3630d9421e59f5d3eb8753aa026851998d38a67485
+generated=cryptsetup 2.8.4 on Ubuntu 26.04 aarch64, 2026-10-22, luksFormat --type luks1 --hash ripemd160
+payload=header only, cut 64 KiB past the payload offset

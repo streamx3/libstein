@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "detectors.hpp"
+#include "stein/block/slice_device.hpp"
 #include "stein/core/endian.hpp"
 #include "stein/core/strings.hpp"
 #include "stein/layout/gen/exfat.hpp"
@@ -7,7 +8,9 @@
 #include "stein/fs/fat_reader.hpp"
 #include "stein/layout/gen/fat.hpp"
 
+#include <algorithm>
 #include <bit>
+#include <optional>
 
 namespace stein::fs::detail {
 
@@ -91,23 +94,73 @@ ByteCount fatBytesNeeded(int bits, std::uint64_t clusters) {
     return entries * static_cast<std::uint64_t>(bits / 8);
 }
 
-// The partition's start LBA when `dev` is a slice of a larger device, looked through wrappers
-// that only view their parent whole (extent {0, parent size}). Nothing for a whole device.
-std::optional<std::uint64_t> partitionStartLba(const BlockDevice& dev) {
-    const BlockDevice* d = &dev;
+// The partition window `dev` sits in when it is a slice of a larger device: the parent and the
+// start LBA on it. Plain decorators (ReadOnlyDevice, caches) are looked through: a whole view of
+// the parent at the same sector size whose bytes are the parent's. Only a SliceDevice counts as a
+// partition window: a decrypting view (LUKS, VeraCrypt) also sits at an offset on its parent, but
+// that offset is the payload start, which the formatter never saw, so the walk ends there. With a
+// detached header the payload starts at byte 0 of its data device and the view has the decorator's
+// shape; only the bytes tell (ciphertext at the parent's sector 0, the boot sector here), which is
+// why one sector is compared per hop. Nothing for a whole device.
+struct PartitionWindow {
+    std::shared_ptr<BlockDevice> parent;
+    std::uint64_t startLba = 0;
+};
+std::optional<PartitionWindow> partitionWindow(BlockDevice& dev) {
+    BlockDevice* d = &dev;
     std::shared_ptr<BlockDevice> keep;
     for (int hops = 0; hops < 8; ++hops) {
         const auto ext = d->extentsOnParent();
         auto parent = d->parent();
         if (ext.size() != 1 || !parent) return std::nullopt;
-        if (ext.front().offset == 0 && ext.front().length == parent->size()) {
+        if (ext.front().offset == 0 && ext.front().length == parent->size() && parent->sectorSize() == d->sectorSize()) {
+            auto mine = d->read(0, 512), theirs = parent->read(0, 512);
+            if (!mine || !theirs || *mine != *theirs) return std::nullopt;   // transforms its parent's bytes
             keep = parent;
             d = keep.get();
             continue;
         }
-        return ext.front().offset / dev.sectorSize();
+        if (!dynamic_cast<const SliceDevice*>(d)) return std::nullopt;
+        return PartitionWindow{parent, ext.front().offset / parent->sectorSize()};
     }
     return std::nullopt;
+}
+
+// On an MBR logical partition DOS and Windows write hidden_sectors relative to the EBR that
+// describes the partition (the gap between the two, 63 or 2048 sectors), Linux mkfs.fat relative
+// to the disk. The EBR-relative value is accepted when the sector that far before the partition
+// is an EBR whose first entry places a partition of this size at that distance.
+bool ebrDescribesPartition(BlockDevice& parent, std::uint64_t startLba, std::uint32_t hidden, ByteCount partitionSectors) {
+    if (hidden == 0 || hidden > startLba) return false;
+    auto sec = parent.read((startLba - hidden) * parent.sectorSize(), 512);
+    if (!sec || loadLe16(sec->data() + 510) != 0xAA55) return false;
+    const std::uint8_t type = std::to_integer<std::uint8_t>((*sec)[446 + 4]);
+    return type != 0 && loadLe32(sec->data() + 446 + 8) == hidden && loadLe32(sec->data() + 446 + 12) == partitionSectors;
+}
+
+// Does this FAT copy start the way a formatter leaves it: FAT[0] the media byte under all-ones,
+// FAT[1] an end-of-chain mark (its clean-shutdown and hard-error bits, FAT16/32, may be clear)?
+// The test fsck.fat applies before it decides which of two differing copies to trust.
+bool fatHeadSound(std::span<const std::byte> head, int bits, std::uint8_t media) {
+    if (bits == 12) {
+        const std::uint32_t e0 = loadLe16(head.data()) & 0x0FFFu, e1 = loadLe16(head.data() + 1) >> 4;
+        return e0 == (0x0F00u | media) && e1 >= 0xFF8u;
+    }
+    if (bits == 16) {
+        const std::uint32_t e0 = loadLe16(head.data()), e1 = loadLe16(head.data() + 2) | 0xC000u;
+        return e0 == (0xFF00u | media) && e1 >= 0xFFF8u;
+    }
+    const std::uint32_t e0 = loadLe32(head.data()) & 0x0FFFFFFFu, e1 = (loadLe32(head.data() + 4) & 0x0FFFFFFFu) | 0x0C000000u;
+    return e0 == (0x0FFFFF00u | media) && e1 >= 0x0FFFFFF8u;
+}
+
+// Which of an FSInfo sector's three signatures are wrong, as "lead, struct, trail"; empty when all hold.
+std::string fsinfoBadSignatures(const gen::Fat32Fsinfo& f) {
+    std::string bad;
+    if (f.leadSignature() != 0x41615252u) bad = "lead";
+    if (f.structSignature() != 0x61417272u) bad += std::string(bad.empty() ? "" : ", ") + "struct";
+    if (f.trailSignature() != 0xAA550000u) bad += std::string(bad.empty() ? "" : ", ") + "trail";
+    return bad;
 }
 
 // The boot sector as one node spanning all 512 bytes: the common BPB, the extended BPB of the
@@ -138,32 +191,36 @@ layout::Node describeFatBootSector(std::span<const std::byte> s, ByteCount base,
     return sector;
 }
 
-// What repair() puts right on a FAT volume, all of it copies of metadata that exists elsewhere:
-// the FAT32 backup boot sector and backup FSInfo sector are rewritten from the live ones, and
-// with mirroring on every other FAT is rewritten from the active one. Only sectors that differ
-// are written; directories and file data are never touched. Unlike exFAT's VolumeFlags and
-// PercentInUse, no byte of a FAT boot sector may legitimately differ between the copies.
+// What repair() puts right on a FAT volume, all of it copies of metadata that exists elsewhere,
+// and only where one copy is demonstrably the broken one: the FAT32 backup boot sector is
+// rewritten from the live one (no byte of a FAT boot sector may legitimately differ between the
+// two, unlike exFAT's VolumeFlags and PercentInUse); an FSInfo copy whose signatures are wrong is
+// rewritten from the copy whose signatures hold; with mirroring on, a FAT copy whose head is not
+// what a formatter writes is rewritten from one whose head is. Two copies that both look intact
+// and still differ are reported, not touched: nothing here can tell which one is right (a backup
+// FSInfo that merely lags the live free count is the normal state of a written volume). Only
+// sectors that differ are written; directories and file data are never touched.
 struct FatRepairPlan {
     ByteCount bps = 0;
-    std::uint32_t reserved = 0, fats = 0, fatSectors = 0, activeFat = 0;
-    bool mirroring = true;
-    std::uint32_t backupSector = 0, fsinfoSector = 0;   // 0 = no copy to keep in sync
-    ByteCount fatBytesInUse = 0;                        // entries 0..clusters+1, whole sectors
+    std::uint32_t reserved = 0, fatSectors = 0;
+    std::uint32_t backupSector = 0;                // 0 = no backup boot sector to keep in sync
+    std::uint32_t fsinfoFrom = 0, fsinfoTo = 0;    // FSInfo sector `to` rewritten from `from`; 0 = neither needs it
+    struct FatCopy {
+        std::uint32_t from, to;
+    };
+    std::vector<FatCopy> fatCopies;                // FAT `to` rewritten from FAT `from`
+    ByteCount fatBytesInUse = 0;                   // entries 0..clusters+1, whole sectors
 };
 
 Expected<void> repairFat(BlockDevice& target, const FatRepairPlan& p) {
-    if (p.backupSector) {
+    if (p.backupSector)
         if (auto r = copyChangedSectors(target, 0, ByteCount{p.backupSector} * p.bps, p.bps, p.bps); !r) return r;
-        if (p.fsinfoSector)
-            if (auto r = copyChangedSectors(target, ByteCount{p.fsinfoSector} * p.bps, ByteCount{p.backupSector + 1} * p.bps, p.bps, p.bps); !r) return r;
-    }
-    if (p.mirroring && p.fats >= 2) {
-        const ByteCount active = (ByteCount{p.reserved} + ByteCount{p.activeFat} * p.fatSectors) * p.bps;
-        for (std::uint32_t i = 0; i < p.fats; ++i) {
-            if (i == p.activeFat) continue;
-            const ByteCount other = (ByteCount{p.reserved} + ByteCount{i} * p.fatSectors) * p.bps;
-            if (auto r = copyChangedSectors(target, active, other, p.fatBytesInUse, p.bps); !r) return r;
-        }
+    if (p.fsinfoTo)
+        if (auto r = copyChangedSectors(target, ByteCount{p.fsinfoFrom} * p.bps, ByteCount{p.fsinfoTo} * p.bps, p.bps, p.bps); !r) return r;
+    for (const auto& c : p.fatCopies) {
+        const ByteCount from = (ByteCount{p.reserved} + ByteCount{c.from} * p.fatSectors) * p.bps;
+        const ByteCount to = (ByteCount{p.reserved} + ByteCount{c.to} * p.fatSectors) * p.bps;
+        if (auto r = copyChangedSectors(target, from, to, p.fatBytesInUse, p.bps); !r) return r;
     }
     return target.flush();
 }
@@ -375,8 +432,11 @@ Result detectFat(Dev dev) {
     // NT onwards and Linux set at mount and clear at unmount) and FAT[1]'s clean-shutdown bit
     // (the DOS / Windows 9x convention, which Windows still maintains). Either one saying
     // "dirty" makes info.clean false and raises one fat.dirty naming the flag(s);
-    // allocationMap() then refuses to trust the FAT.
-    const std::uint8_t state = fat32Layout ? e32.reserved1() : e16.reserved1();
+    // allocationMap() then refuses to trust the FAT. The reserved1 byte exists only with the
+    // extended BPB (boot_signature 0x28/0x29, DOS 4.0 onwards): a DOS 3.x boot sector has boot
+    // code at that offset, which says nothing about the volume, like its label and serial.
+    const bool hasExtendedBpb = extended(fat32Layout ? e32.bootSignature() : e16.bootSignature());
+    const std::uint8_t state = !hasExtendedBpb ? 0 : fat32Layout ? e32.reserved1() : e16.reserved1();
     std::string dirtyBy;
     if (state & 0x01) dirtyBy = "boot sector state flag";
     if (fatClean && !*fatClean) dirtyBy += std::string(dirtyBy.empty() ? "" : " and ") + "FAT[1] clean-shutdown bit";
@@ -387,14 +447,9 @@ Result detectFat(Dev dev) {
 
     std::string bootLabel;
     std::uint32_t serial = 0;
-    if (fat32Layout) {
-        if (extended(e32.bootSignature())) {
-            bootLabel = e32.volumeLabel();
-            serial = e32.volumeId();
-        }
-    } else if (extended(e16.bootSignature())) {
-        bootLabel = e16.volumeLabel();
-        serial = e16.volumeId();
+    if (hasExtendedBpb) {
+        bootLabel = fat32Layout ? e32.volumeLabel() : e16.volumeLabel();
+        serial = fat32Layout ? e32.volumeId() : e16.volumeId();
     }
     // The root directory's label entry is authoritative (this is what blkid reports as LABEL).
     std::string dirLabel;
@@ -429,14 +484,12 @@ Result detectFat(Dev dev) {
     FatRepairPlan plan;
     plan.bps = bps;
     plan.reserved = reserved;
-    plan.fats = fats;
     plan.fatSectors = fatSectors;
-    plan.activeFat = activeFat;
-    plan.mirroring = mirroring;
     if (fat32Layout) {
         // FSInfo: Linux reads sector 1 when the BPB says 0, so do we.
         const std::uint32_t fsinfo = e32.fsinfoSector() ? e32.fsinfoSector() : 1;
         std::vector<std::byte> fsinfoSector;
+        std::string fsinfoBad;   // its wrong signatures; the diagnostic waits for the backup copy, which may be the cure
         if (fsinfo >= reserved) {
             fs->diag(Validity::Warning, "fat.fsinfo_bad", "FSInfo sector " + std::to_string(fsinfo) + " lies outside the " + std::to_string(reserved) + " reserved sectors");
         } else if (auto fi = dev->read(ByteCount{fsinfo} * bps, bps)) {
@@ -445,13 +498,8 @@ Result detectFat(Dev dev) {
             auto n = f.describe(ByteCount{fsinfo} * bps);
             n.name = "FSInfo sector";
             fs->addNode(std::move(n));
-            std::string bad;
-            if (f.leadSignature() != 0x41615252u) bad = "lead";
-            if (f.structSignature() != 0x61417272u) bad += std::string(bad.empty() ? "" : ", ") + "struct";
-            if (f.trailSignature() != 0xAA550000u) bad += std::string(bad.empty() ? "" : ", ") + "trail";
-            if (!bad.empty()) {
-                fs->diag(Validity::Warning, "fat.fsinfo_bad", "FSInfo sector " + std::to_string(fsinfo) + ": " + bad + " signature wrong; its free-cluster hint is not trusted");
-            } else {
+            fsinfoBad = fsinfoBadSignatures(f);
+            if (fsinfoBad.empty()) {
                 if (f.freeCount() != 0xFFFFFFFFu) {
                     if (f.freeCount() > clusters)
                         fs->diag(Validity::Warning, "fat.fsinfo_free_count", "FSInfo free_count " + std::to_string(f.freeCount()) + " exceeds the " + std::to_string(clusters) + " clusters of the volume");
@@ -465,6 +513,7 @@ Result detectFat(Dev dev) {
         // when it has drifted from the live one (a label edited in one sector only, for instance).
         // Its FSInfo copy follows it in the next sector.
         const std::uint32_t backup = e32.backupBootSector();
+        std::string fsinfoCure;   // appended to fat.fsinfo_bad when the backup copy can restore it
         if (backup && backup < reserved && backup != fsinfo) {
             auto live = dev->read(0, bps);
             if (auto bb = dev->read(ByteCount{backup} * bps, bps); bb && live) {
@@ -475,15 +524,34 @@ Result detectFat(Dev dev) {
             }
             if (!fsinfoSector.empty() && backup + 1 < reserved && backup + 1 != fsinfo) {
                 if (auto bf = dev->read(ByteCount{backup + 1} * bps, bps)) {
-                    auto n = gen::Fat32Fsinfo(*bf).describe(ByteCount{backup + 1} * bps);
+                    gen::Fat32Fsinfo b(*bf);
+                    auto n = b.describe(ByteCount{backup + 1} * bps);
                     n.name = "backup FSInfo sector";
                     fs->addNode(std::move(n));
-                    if (!std::equal(bf->begin(), bf->end(), fsinfoSector.begin()))
-                        fs->diag(Validity::Info, "fat.backup_fsinfo_mismatch", "backup FSInfo sector (sector " + std::to_string(backup + 1) + ") differs from the FSInfo sector", true);
-                    plan.fsinfoSector = fsinfo;
+                    const std::string backupBad = fsinfoBadSignatures(b);
+                    const std::string backupName = "backup FSInfo sector (sector " + std::to_string(backup + 1) + ")";
+                    if (!std::equal(bf->begin(), bf->end(), fsinfoSector.begin())) {
+                        // The two differ. A copy whose signatures hold is trusted over one whose do
+                        // not; two intact copies differ on every volume that has been written to
+                        // (drivers update the live free count and let the backup lag), so that is
+                        // information, not a fault, and nothing is rewritten.
+                        if (fsinfoBad.empty() && !backupBad.empty()) {
+                            fs->diag(Validity::Warning, "fat.backup_fsinfo_mismatch", backupName + ": " + backupBad + " signature wrong; repair rewrites it from the FSInfo sector", true);
+                            plan.fsinfoFrom = fsinfo;
+                            plan.fsinfoTo = backup + 1;
+                        } else if (!fsinfoBad.empty() && backupBad.empty()) {
+                            fsinfoCure = "; repair restores it from the " + backupName + ", whose signatures hold";
+                            plan.fsinfoFrom = backup + 1;
+                            plan.fsinfoTo = fsinfo;
+                        } else if (fsinfoBad.empty()) {
+                            fs->diag(Validity::Info, "fat.backup_fsinfo_mismatch", backupName + " differs from the FSInfo sector");
+                        }
+                    }
                 }
             }
         }
+        if (!fsinfoBad.empty())
+            fs->diag(Validity::Warning, "fat.fsinfo_bad", "FSInfo sector " + std::to_string(fsinfo) + ": " + fsinfoBad + " signature wrong; its free-cluster hint is not trusted" + fsinfoCure, !fsinfoCure.empty());
     }
     // The label the OS shows lives in the root directory, not in the boot sector.
     if (labelEntryOffset) {
@@ -497,28 +565,56 @@ Result detectFat(Dev dev) {
     // --- FAT copies ---
     // With mirroring on every FAT is a copy of the active one. Compared over the entries in use
     // (0..clusters+1) up to the 64 MiB limit; a FAT bigger than that is said to be only partly
-    // compared. The repair rewrites the differing sectors of the other copies from the active one.
+    // compared. When two copies differ, the one whose head is not what a formatter writes is the
+    // broken one and the repair rewrites it from the other (fsck.fat's rule, in both directions:
+    // the active copy is not trusted for being active). Two intact heads leave nothing to go on,
+    // so that difference is reported and left for chkdsk / fsck.fat.
     const ByteCount fatInUse = std::min(fatBytes, alignUp(fatNeeded, bps));
     plan.fatBytesInUse = fatInUse;
     if (fats >= 2 && mirroring) {
         const ByteCount compared = std::min(fatInUse, kFatCompareLimit);
+        const auto fatAt = [&](std::uint32_t i) { return (ByteCount{reserved} + ByteCount{i} * fatSectors) * bps; };
+        const auto sound = [&](std::uint32_t i) {
+            auto head = dev->read(fatAt(i), 8);
+            return head && fatHeadSound(*head, bits, bpb.media());
+        };
+        const char* kUnsound = " does not start with the media byte and an end-of-chain mark";
+        std::optional<bool> activeSound;   // decided once, only when a copy differs
         for (std::uint32_t i = 0; i < fats; ++i) {
             if (i == activeFat) continue;
-            const ByteCount other = (ByteCount{reserved} + ByteCount{i} * fatSectors) * bps;
-            auto diff = firstDifference(*dev, fatOffset, other, compared);
+            auto diff = firstDifference(*dev, fatOffset, fatAt(i), compared);
             if (!diff) break;   // beyond the device: fat.truncated has said so
-            if (*diff)
-                fs->diag(Validity::Warning, "fat.fat_copies_differ", "FAT " + std::to_string(i) + " differs from FAT " + std::to_string(activeFat) + " (first difference at FAT byte " + std::to_string(**diff) + ")", true);
+            if (!*diff) continue;
+            if (!activeSound) activeSound = sound(activeFat);
+            const bool otherSound = sound(i);
+            const std::string active = "FAT " + std::to_string(activeFat), other = "FAT " + std::to_string(i);
+            const std::string where = other + " differs from " + active + " (first difference at FAT byte " + std::to_string(**diff) + ")";
+            const bool activeAlreadyRestored = std::any_of(plan.fatCopies.begin(), plan.fatCopies.end(), [&](const FatRepairPlan::FatCopy& c) { return c.to == activeFat; });
+            if (*activeSound && !otherSound) {
+                fs->diag(Validity::Warning, "fat.fat_copies_differ", where + "; " + other + kUnsound + ", so repair rewrites it from " + active, true);
+                plan.fatCopies.push_back({activeFat, i});
+            } else if (!*activeSound && otherSound) {
+                // The first intact copy restores the active one; a third copy, rare and already
+                // flagged under fat.bpb_geometry, is only reported.
+                fs->diag(Validity::Warning, "fat.fat_copies_differ", where + "; " + active + kUnsound + (activeAlreadyRestored ? "" : ", so repair rewrites it from " + other), !activeAlreadyRestored);
+                if (!activeAlreadyRestored) plan.fatCopies.push_back({i, activeFat});
+            } else if (*activeSound) {
+                fs->diag(Validity::Warning, "fat.fat_copies_differ", where + "; both copies start as a formatter leaves them, so neither is rewritten: chkdsk / fsck.fat decides which one to keep");
+            } else {
+                fs->diag(Validity::Error, "fat.fat_copies_differ", where + "; neither copy starts with the media byte and an end-of-chain mark: nothing to restore from");
+            }
         }
         if (fatInUse > kFatCompareLimit)
             fs->diag(Validity::Info, "fat.fat_copies_not_compared", "FAT copies compared over their first 64 MiB only; each FAT holds " + humanBytes(fatInUse) + " of entries");
     }
 
     // --- where the volume sits ---
-    // hidden_sectors is the partition's start LBA as the formatter saw it. Probing a slice of a
-    // larger device, the two should agree; a moved or re-imaged volume shows up here.
-    if (auto start = partitionStartLba(*dev); start && *start != bpb.hiddenSectors())
-        fs->diag(Validity::Info, "fat.hidden_sectors_mismatch", "hidden_sectors is " + std::to_string(bpb.hiddenSectors()) + " but the volume starts at LBA " + std::to_string(*start) + " of its parent device");
+    // hidden_sectors is the partition's start LBA as the formatter saw it. Probing a partition of
+    // a larger device, the two should agree; a moved or re-imaged volume shows up here. An MBR
+    // logical partition may carry the distance from its EBR instead (DOS, Windows).
+    if (auto win = partitionWindow(*dev); win && win->startLba != bpb.hiddenSectors() &&
+                                          !ebrDescribesPartition(*win->parent, win->startLba, bpb.hiddenSectors(), dev->size() / dev->sectorSize()))
+        fs->diag(Validity::Info, "fat.hidden_sectors_mismatch", "hidden_sectors is " + std::to_string(bpb.hiddenSectors()) + " but the volume starts at LBA " + std::to_string(win->startLba) + " of its parent device");
 
     {
         auto alloc = std::make_unique<FatAllocation>();

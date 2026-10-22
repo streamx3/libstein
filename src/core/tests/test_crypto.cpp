@@ -8,7 +8,10 @@
 #include "stein/core/strings.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
+#include <thread>
 
 using namespace stein;
 
@@ -123,6 +126,82 @@ TEST_CASE("argon2id: RFC 9106 vector and oracle vectors") {
     CHECK_FALSE(crypto::argon2id(hexBytes("00"), hexBytes("0000000000000000"), 0, 64, 1, out));
     CHECK_FALSE(crypto::argon2id(hexBytes("00"), hexBytes("0000000000000000"), 1, 4, 1, out));
     CHECK_FALSE(crypto::argon2id(hexBytes("00"), hexBytes("0000"), 1, 64, 1, out));
+}
+
+TEST_CASE("argon2: the lanes of a slice on threads give the single-thread tag; cancellation between slices; the memory cap") {
+    // Every multi-lane vector, on one thread, on fewer threads than lanes (uneven shares) and on the default.
+    for (const auto& v : test::vectors::kArgon2id) {
+        if (v.p < 2) continue;
+        CAPTURE(v.p);
+        for (std::uint32_t threads : {1u, 2u, 3u, 0u}) {
+            CAPTURE(threads);
+            crypto::Argon2Options opt;
+            opt.threads = threads;
+            std::vector<std::uint8_t> out(v.outLen);
+            REQUIRE(crypto::argon2id(hexBytes(v.password), hexBytes(v.salt), v.t, v.mKiB, v.p, out, hexBytes(v.secret), hexBytes(v.ad), opt));
+            CHECK(Hasher::hex(out) == v.tag);
+        }
+    }
+    // Argon2i and Argon2d have no vectors here: the threaded result equals the single-thread one.
+    for (auto type : {crypto::Argon2Type::I, crypto::Argon2Type::D}) {
+        std::vector<std::uint8_t> one(48), many(48);
+        crypto::Argon2Options single, parallel;
+        single.threads = 1;
+        REQUIRE(crypto::argon2(type, hexBytes("7077"), hexBytes("7373737373737373"), 3, 1024, 4, one, {}, {}, single));
+        REQUIRE(crypto::argon2(type, hexBytes("7077"), hexBytes("7373737373737373"), 3, 1024, 4, many, {}, {}, parallel));
+        CHECK(one == many);
+        CHECK(std::count(one.begin(), one.end(), 0) < 16);
+    }
+    // The hook is polled once per slice, before the slice runs; the third poll cancels here.
+    {
+        int polls = 0;
+        crypto::Argon2Options opt;
+        opt.cancelled = [&] { return ++polls == 3; };
+        std::vector<std::uint8_t> out(32);
+        auto r = crypto::argon2id(hexBytes("7077"), hexBytes("7373737373737373"), 2, 256, 4, out, {}, {}, opt);
+        REQUIRE_FALSE(r);
+        CHECK(r.error().category() == ErrorCategory::Cancelled);
+        CHECK(polls == 3);
+        polls = 0;
+        opt.cancelled = [&] { ++polls; return false; };
+        REQUIRE(crypto::argon2id(hexBytes("7077"), hexBytes("7373737373737373"), 2, 256, 4, out, {}, {}, opt));
+        CHECK(polls == 8);   // 2 passes x 4 slices
+    }
+    // Memory above the cap is refused up front, naming the request in MiB, instead of being attempted.
+    {
+        const std::uint64_t cap = crypto::argon2MemoryCapKiB();
+        CHECK(cap > 0);
+        CHECK(cap <= 4ull * 1024 * 1024);
+        const std::uint32_t over = static_cast<std::uint32_t>(std::min<std::uint64_t>(cap + 1024, 0xFFFFFFFFull));
+        std::vector<std::uint8_t> out(32);
+        auto r = crypto::argon2id(hexBytes("7077"), hexBytes("7373737373737373"), 1, over, 1, out);
+        REQUIRE_FALSE(r);
+        CHECK(r.error().category() == ErrorCategory::Unsupported);
+        CHECK_MESSAGE(r.error().message().find(std::to_string(over / 1024) + " MiB") != std::string::npos, r.error().message());
+    }
+}
+
+// A timing, not a unit test, so it runs only with STEIN_BENCH=1: cryptsetup-like parameters
+// (argon2id t=4, 256 MiB, 4 lanes) on the single-thread path and on the lane threads. Both tags
+// must agree; the numbers go to the log.
+TEST_CASE("argon2: lane threads against one thread on t=4 m=256MiB p=4 (STEIN_BENCH=1)") {
+    if (!std::getenv("STEIN_BENCH")) {
+        MESSAGE("set STEIN_BENCH=1 to time argon2id t=4 m=256MiB p=4 on one thread and on the lane threads");
+        return;
+    }
+    const auto password = hexBytes("7077"), salt = hexBytes("73616c7473616c7473616c74");
+    std::vector<std::uint8_t> one(64), many(64);
+    auto timed = [&](std::uint32_t threads, std::vector<std::uint8_t>& out) {
+        crypto::Argon2Options opt;
+        opt.threads = threads;
+        const auto start = std::chrono::steady_clock::now();
+        REQUIRE(crypto::argon2id(password, salt, 4, 256 * 1024, 4, out, {}, {}, opt));
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    };
+    const double single = timed(1, one), threaded = timed(0, many);
+    CHECK(one == many);
+    const unsigned lanes = std::min(4u, std::max(1u, std::thread::hardware_concurrency()));
+    MESSAGE("argon2id t=4 m=256MiB p=4: one thread ", single, " s; ", lanes, " lane threads ", threaded, " s");
 }
 
 #include "stein/core/keys.hpp"

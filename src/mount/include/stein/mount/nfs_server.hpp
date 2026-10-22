@@ -10,6 +10,7 @@
 #include "stein/fs/reader.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -18,12 +19,22 @@ namespace stein::mount {
 struct NfsServerOptions {
     std::string bindAddress = "127.0.0.1";
     std::uint16_t port = 0;   // 0 = any free port; see port()
+    // The directory the MOUNT program exports: the path after "host:" in the client's mount
+    // argument, which is also what macOS Finder shows as the volume name. MNT of "/" is
+    // accepted as well so a plain `mount host:/` keeps working; any other path is MNT3ERR_NOENT.
+    std::string exportPath = "/";
+    // Called from a server thread, outside the server's lock, when a client sends UMNT or
+    // UMNTALL: the kernel client does so while unmounting, so a mount backend can notice an
+    // external unmount at once. Must not call back into the server.
+    std::function<void()> onUnmount;
 };
 
 class NfsServer {
 public:
-    // Bind, listen and start serving on a background thread. The reader is used from that
-    // thread only; the caller keeps the device stack alive.
+    // Bind, listen and start serving on background threads: one accepts connections (and answers
+    // UDP datagrams), one per client connection serves its requests. Every call into the reader
+    // runs under one mutex, so the reader sees one request at a time and need not be thread-safe;
+    // the caller keeps the device stack alive.
     static Expected<std::unique_ptr<NfsServer>> start(std::unique_ptr<fs::Reader> reader, const NfsServerOptions& options = {});
     ~NfsServer();
     NfsServer(const NfsServer&) = delete;

@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT
 #include "stein/pt/mbr_table.hpp"
 
+#include "stein/block/slice_device.hpp"
 #include "stein/core/crypto.hpp"
 #include "stein/core/strings.hpp"
+#include "stein/fs/filesystem.hpp"
 #include "stein/layout/gen/mbr.hpp"
 
 #include <algorithm>
@@ -93,6 +95,125 @@ std::optional<OrphanEbr> parseOrphanEbr(std::span<const std::byte> sec, Lba lba,
     return o;
 }
 
+// Non-owning handle on a device the caller keeps alive for the duration of the call.
+BlockDevicePtr borrow(BlockDevice& device) { return BlockDevicePtr(&device, [](BlockDevice*) {}); }
+
+// What the filesystem detectors make of `region`: the content's type and the number of sectors
+// it says it spans. Containers that only echo the device size (LUKS, BitLocker) report the
+// region's own length, which the callers read as "no size of its own".
+struct Content {
+    fs::FsType type = fs::FsType::Unknown;
+    std::optional<SectorCount> sectors;
+};
+
+std::optional<Content> probeContent(BlockDevicePtr device, Region region, std::uint32_t ss) {
+    if (!device || region.length < ss) return std::nullopt;
+    auto slice = SliceDevice::create(std::move(device), region);
+    if (!slice) return std::nullopt;
+    auto r = fs::probe(*slice);
+    if (!r || !*r) return std::nullopt;
+    Content c;
+    c.type = (*r)->type();
+    if (const auto& total = (*r)->info().totalBytes; total && *total > 0) c.sectors = (*total + ss - 1) / ss;
+    return c;
+}
+
+// The MBR type fdisk, parted and the installers give a partition holding this content.
+std::uint8_t mbrTypeFor(fs::FsType t) {
+    using fs::FsType;
+    switch (t) {
+    case FsType::Fat12: return 0x01;
+    case FsType::Fat16: return 0x06;
+    case FsType::Fat32: return 0x0C;
+    case FsType::ExFat: case FsType::Ntfs: case FsType::ReFs: case FsType::BitLocker: return 0x07;
+    case FsType::Hfs: case FsType::HfsPlus: case FsType::HfsX: case FsType::Apfs: return 0xAF;
+    case FsType::Swap: return 0x82;
+    case FsType::Lvm2Pv: return 0x8E;
+    case FsType::MdRaidMember: return 0xFD;
+    case FsType::Minix: return 0x81;
+    case FsType::Zfs: return 0xBF;
+    case FsType::Ufs: return 0xA5;
+    default: return 0x83;   // Linux filesystems, LUKS, and whatever else Linux tools make
+    }
+}
+
+// Where partitioners put a logical's data relative to its EBR: the 1 MiB grid (fdisk, sfdisk,
+// parted since 2.x), one 63-sector track (the CHS era), or the very next sector (some installers).
+std::array<Lba, 3> usualDataGaps(std::uint32_t ss) { return {std::max<Lba>(1, MiB / ss), Lba{63}, Lba{1}}; }
+
+// A grid candidate is believed only when its data start carries content the detectors recognise
+// and that content is no larger than the entry and no more than one alignment unit smaller. A
+// stale EBR (an earlier layout's leftover inside live data or free space) points into the middle
+// of a filesystem or at nothing; a size that disagrees is an entry that described another layout.
+bool corroborated(BlockDevice& device, const Partition& logical, std::uint32_t ss) {
+    auto c = probeContent(borrow(device), logical.region(ss), ss);
+    if (!c) return false;
+    if (!c->sectors) return true;
+    const SectorCount want = logical.sectors(), slack = std::max<Lba>(1, MiB / ss);
+    return *c->sectors <= want && *c->sectors + slack >= want;
+}
+
+// Last sector a logical behind `from` may run to before it hits something we know of: another
+// logical's EBR or data, or the end of the extended partition.
+Lba freeUntil(Lba from, std::span<const Partition> known, std::span<const Partition> found, Lba extLast) {
+    Lba limit = extLast;
+    auto consider = [&](const Partition& p) {
+        if (p.isExtended) return;
+        if (p.firstLba > from) limit = std::min(limit, p.firstLba - 1);
+        if (p.ebrLba && *p.ebrLba > from) limit = std::min(limit, *p.ebrLba - 1);
+    };
+    for (const auto& p : known) consider(p);
+    for (const auto& p : found) consider(p);
+    return limit;
+}
+
+// Rebuilds the logical a lost EBR at `ebr` described from the content at the usual data starts
+// behind it. The filesystem's own size gives the end, rounded up to the alignment unit the
+// partitioner used (NTFS keeps its backup boot sector in that last stretch) but never past
+// `limit`. Content that does not know its size (LUKS) takes the whole gap: too large is harmless
+// for an encrypted payload, too small loses data.
+std::optional<Partition> rebuildFromContent(BlockDevice& device, Lba ebr, Lba limit, std::uint32_t ss) {
+    const Lba grid = std::max<Lba>(1, MiB / ss);
+    for (const Lba gap : usualDataGaps(ss)) {
+        const Lba data = ebr + gap;
+        if (data > limit) continue;
+        const Region whole{data * ss, (limit - data + 1) * ss};
+        auto c = probeContent(borrow(device), whole, ss);
+        if (!c) continue;
+        Lba last = limit;
+        if (c->sectors && *c->sectors < whole.length / ss) last = std::min<Lba>(limit, alignUp(data + *c->sectors, grid) - 1);
+        Partition p;
+        p.firstLba = data;
+        p.lastLba = last;
+        p.type = PartitionType::mbr(mbrTypeFor(c->type));
+        p.isLogical = true;
+        p.ebrLba = ebr;
+        return p;
+    }
+    return std::nullopt;
+}
+
+// A head EBR that reads as all zero is either a fresh extended partition or one whose head was
+// wiped; what lies behind it tells the two apart: content at the usual data starts, or an EBR on
+// the first track or the first few points of the 1 MiB grid.
+bool logicalsBehindBlankHead(const BlockDevicePtr& device, const Partition& ext, Lba extLast, std::uint32_t ss) {
+    const Lba head = ext.firstLba;
+    for (const Lba gap : usualDataGaps(ss)) {
+        const Lba data = head + gap;
+        if (data <= extLast && probeContent(device, Region{data * ss, (extLast - data + 1) * ss}, ss)) return true;
+    }
+    const Lba grid = std::max<Lba>(1, MiB / ss);
+    constexpr Lba kGridPoints = 8;
+    std::vector<Lba> at{head + 63};
+    for (Lba i = 1; i <= kGridPoints; ++i) at.push_back(head + grid * i);
+    for (const Lba lba : at) {
+        if (lba > extLast) continue;
+        auto sec = device->readSectors(lba, 1);
+        if (sec && parseOrphanEbr(*sec, lba, ext, extLast, false)) return true;
+    }
+    return false;
+}
+
 } // namespace
 
 // ----------------------------------------------------------------------------- reading
@@ -156,6 +277,7 @@ Expected<std::unique_ptr<MbrTable>> MbrTable::read(BlockDevicePtr device) {
     const Partition* extPtr = t->extendedPartition();
     if (extPtr) {
         const Partition ext = *extPtr;   // m_partitions reallocates below; never keep the pointer
+        const Lba extLast = std::min(ext.lastLba, sectors - 1);
         std::set<Lba> visited;
         Lba ebr = ext.firstLba;
         std::uint32_t index = 5;
@@ -184,9 +306,17 @@ Expected<std::unique_ptr<MbrTable>> MbrTable::read(BlockDevicePtr device) {
                 break;
             }
             if (gen::MbrSector(*sec).bootSignature() != 0xAA55) {
-                // Nothing was ever written at the start of a fresh extended partition.
                 if (ebr == ext.firstLba && allZero(*sec)) {
-                    t->m_chainEnd = ChainEnd::Empty;
+                    // Nothing was ever written at the start of a fresh extended partition. A
+                    // wiped head reads the same; only what lies behind it tells the two apart.
+                    if (!logicalsBehindBlankHead(device, ext, extLast, ss)) {
+                        t->m_chainEnd = ChainEnd::Empty;
+                        break;
+                    }
+                    t->m_ebrs.emplace_back(ebr, *sec);
+                    t->m_chainEnd = ChainEnd::Wiped;
+                    t->m_chainBreakLba = ebr;
+                    t->addDiagnostic(Validity::Error, "mbr.ebr_chain_broken", "EBR at " + at + " is blank but logical partitions lie behind it", Region{ebr * ss, ss}, true);
                     break;
                 }
                 t->m_ebrs.emplace_back(ebr, *sec);
@@ -215,11 +345,30 @@ Expected<std::unique_ptr<MbrTable>> MbrTable::read(BlockDevicePtr device) {
                                  Region{ebr * ss + kEntriesOffset + 16, 16}, true);
             ebr = ext.firstLba + next.firstLba;
         }
-        if (t->chainBroken())
-            t->addDiagnostic(Validity::Warning, "mbr.logical_lost",
-                             "the EBR chain stops at LBA " + std::to_string(*t->m_chainBreakLba) +
-                                 " before its end; logical partitions behind that point are missing from the table",
-                             {}, true);
+        if (t->chainBroken()) {
+            const Lba brk = *t->m_chainBreakLba;
+            std::string msg = "the EBR chain stops at LBA " + std::to_string(brk) +
+                              " before its end; logical partitions behind that point are missing from the table";
+            bool rebuildable = true;
+            if (t->m_chainEnd == ChainEnd::Unreadable || t->m_chainEnd == ChainEnd::Unsigned || t->m_chainEnd == ChainEnd::Wiped) {
+                // The sector at the break was itself an EBR. What it described comes back from
+                // its entries when only the signature is gone, else from the content behind it;
+                // with neither, closing the chain would erase a partition that may be intact.
+                bool fromEntries = false;
+                for (const auto& [lba, bytes] : t->m_ebrs)
+                    if (lba == brk && parseOrphanEbr(bytes, lba, ext, extLast, true)) fromEntries = true;
+                if (!fromEntries) {
+                    if (auto p = rebuildFromContent(*device, brk, freeUntil(brk, t->m_partitions, {}, extLast), ss)) {
+                        msg += "; a partition of " + formatSize(p->sectors() * ss) + " starting at LBA " + std::to_string(p->firstLba) +
+                               " was found behind it and repair re-enters it";
+                    } else {
+                        rebuildable = false;
+                        msg += "; nothing recognisable lies at the usual data starts behind it, so the logical partition that EBR described cannot be rebuilt";
+                    }
+                }
+            }
+            t->addDiagnostic(rebuildable ? Validity::Warning : Validity::Error, "mbr.logical_lost", msg, {}, rebuildable);
+        }
     }
     t->validate();
     return t;
@@ -475,13 +624,17 @@ Expected<void> MbrTable::write(BlockDevice& device) const {
 
 // ----------------------------------------------------------------------------- repair
 
-std::vector<Partition> MbrTable::recoverLogicals(BlockDevice& device, const Partition& ext) const {
+MbrTable::Recovery MbrTable::recoverLogicals(BlockDevice& device, const Partition& ext) const {
     const std::uint32_t ss = m_geometry.logicalSectorSize;
     const SectorCount sectors = std::min(m_geometry.sectors(), device.geometry().sectors());
-    if (sectors == 0 || ext.firstLba >= sectors) return {};
+    Recovery out;
+    if (sectors == 0 || ext.firstLba >= sectors) return out;
     const Lba extLast = std::min(ext.lastLba, sectors - 1);
-    std::vector<Partition> found;
-    ByteCount budget = kRecoveryScanBudget;
+    std::vector<Partition>& found = out.logicals;
+    // Each grid pass gets its own share so a long 1 MiB pass cannot starve the track pass. A
+    // corroboration probe reads a few dozen small pieces and is charged as one 256 KiB read.
+    ByteCount budget = kRecoveryScanBudget / 2;
+    constexpr ByteCount kProbeCost = 256 * KiB;
     // Sectors the walk already read; the one it broke on is examined again (a read may succeed
     // on retry, and a signature-less EBR is only accepted through the link that reached it).
     std::set<Lba> seen;
@@ -503,15 +656,20 @@ std::vector<Partition> MbrTable::recoverLogicals(BlockDevice& device, const Part
         return false;
     };
     // Examines one sector; returns the onward link of an accepted EBR so a whole chain behind
-    // the break is picked up from its first sector.
+    // the break is picked up from its first sector. A grid candidate also has to be vouched for
+    // by the content at its data start; a sector a link points at is vouched for by the link.
     auto examine = [&](Lba lba, bool linkTarget) -> std::optional<Lba> {
-        if (lba < ext.firstLba || lba > extLast || seen.count(lba) || insideData(lba) || budget < ss) return std::nullopt;
+        if (budget < ss || lba < ext.firstLba || lba > extLast || seen.count(lba) || insideData(lba)) return std::nullopt;
         seen.insert(lba);
         budget -= ss;
         auto sec = device.readSectors(lba, 1);
         if (!sec) return std::nullopt;
         auto o = parseOrphanEbr(*sec, lba, ext, extLast, linkTarget);
         if (!o || overlapsKnown(o->logical)) return std::nullopt;
+        if (!linkTarget) {
+            budget = budget > kProbeCost ? budget - kProbeCost : 0;
+            if (!corroborated(device, o->logical, ss)) return std::nullopt;
+        }
         found.push_back(std::move(o->logical));
         return o->link;
     };
@@ -521,16 +679,65 @@ std::vector<Partition> MbrTable::recoverLogicals(BlockDevice& device, const Part
             linkTarget = true;   // an accepted EBR vouches for whatever it links to
         }
     };
+    // First sector at or after `lba` that is not inside the data of a partition we know or found.
+    auto skipData = [&](Lba lba) {
+        for (bool moved = true; moved;) {
+            moved = false;
+            auto past = [&](const Partition& p) {
+                if (!p.isExtended && lba >= p.firstLba && lba <= p.lastLba) {
+                    lba = p.lastLba + 1;
+                    moved = true;
+                }
+            };
+            for (const auto& p : m_partitions) past(p);
+            for (const auto& f : found) past(f);
+        }
+        return lba;
+    };
+    // Walks the grid points of `step` in [from, to], jumping over known data: a 2 TiB extended
+    // partition has two million 1 MiB points and 34 million tracks per terabyte, most of them
+    // inside partitions that are still in the table.
+    auto gridPass = [&](Lba step, Lba from, Lba to) {
+        for (Lba lba = alignUp(from, step); lba <= to && budget >= ss;) {
+            const Lba free = skipData(lba);
+            if (free != lba) {
+                lba = alignUp(free, step);
+                continue;
+            }
+            followFrom(lba, false);
+            lba += step;
+        }
+    };
 
     followFrom(m_chainBreakLba, true);
-    // Where partitioners put EBRs: the 1 MiB grid (fdisk, sfdisk, parted since 2.x) and the
-    // 63-sector track grid of the CHS era. Each hit may lead a chain of its own.
-    for (const Lba step : {std::max<Lba>(1, MiB / ss), Lba{63}}) {
-        const Lba first = ((ext.firstLba + step - 1) / step) * step;
-        for (Lba lba = first; lba <= extLast && budget >= ss; lba += step) followFrom(lba, false);
+    // Where partitioners put EBRs: the 1 MiB grid (fdisk, sfdisk, parted since 2.x) anywhere in
+    // the extended partition; the 63-sector track grid of the CHS era only right behind the
+    // break, which is where the EBR the walk lost would sit.
+    gridPass(std::max<Lba>(1, MiB / ss), ext.firstLba, extLast);
+    budget = kRecoveryScanBudget / 2;
+    Lba gapStart = ext.firstLba;
+    if (m_chainBreakLba && *m_chainBreakLba >= ext.firstLba && *m_chainBreakLba <= extLast) {
+        gapStart = *m_chainBreakLba;
+    } else {
+        for (const auto& p : m_partitions)
+            if (p.isLogical) gapStart = std::max(gapStart, p.lastLba + 1);
+    }
+    if (gapStart <= extLast) gridPass(63, gapStart, freeUntil(gapStart, m_partitions, found, extLast));
+
+    // The EBR at the break described a logical of its own. When neither its entries nor any
+    // scan brought that logical back, the content behind it is the last witness; without one
+    // the chain must not be closed over what may be an intact partition.
+    if (m_chainBreakLba && (m_chainEnd == ChainEnd::Unreadable || m_chainEnd == ChainEnd::Unsigned || m_chainEnd == ChainEnd::Wiped)) {
+        const Lba brk = *m_chainBreakLba;
+        const bool rescued = std::any_of(found.begin(), found.end(), [&](const Partition& p) { return p.ebrLba == brk; });
+        if (!rescued) {
+            auto rebuilt = rebuildFromContent(device, brk, freeUntil(brk, m_partitions, found, extLast), ss);
+            if (rebuilt && !overlapsKnown(*rebuilt)) found.push_back(std::move(*rebuilt));
+            else out.lostAtBreak = true;
+        }
     }
     std::sort(found.begin(), found.end(), [](const Partition& a, const Partition& b) { return a.firstLba < b.firstLba; });
-    return found;
+    return out;
 }
 
 Expected<void> MbrTable::repair(BlockDevice& device, const RepairOptions&) {
@@ -549,7 +756,12 @@ Expected<void> MbrTable::repair(BlockDevice& device, const RepairOptions&) {
                                                         "-byte sectors, this one has " + std::to_string(device.geometry().logicalSectorSize));
     if (const Partition* extPtr = extendedPartition(); extPtr && chainBroken()) {
         const Partition ext = *extPtr;   // m_partitions grows below
-        for (auto& p : recoverLogicals(device, ext)) m_partitions.push_back(std::move(p));
+        Recovery rec = recoverLogicals(device, ext);
+        if (rec.lostAtBreak)
+            return fail(ErrorCategory::InvalidFormat, "the EBR at LBA " + std::to_string(*m_chainBreakLba) +
+                                                          " described a logical partition that cannot be rebuilt: the sector is lost and nothing "
+                                                          "recognisable lies at the usual data starts behind it; refusing to close the chain over it");
+        for (auto& p : rec.logicals) m_partitions.push_back(std::move(p));
         std::vector<Partition*> logicals;
         for (auto& p : m_partitions)
             if (p.isLogical) logicals.push_back(&p);

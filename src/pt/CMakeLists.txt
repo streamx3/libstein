@@ -5,7 +5,10 @@ stein_add_module(pt
     src/gpt_table.cpp
     src/mbr_table.cpp
     src/apm_table.cpp
-  PUBLIC_DEPS stein::core stein::block stein::layout)
+  PUBLIC_DEPS stein::core stein::block stein::layout
+  # The MBR repair asks the filesystem detectors to vouch for recovered logicals; nothing in
+  # the public headers needs them.
+  PRIVATE_DEPS stein::fs)
 
 stein_add_test(test_pt
   SOURCES ../core/tests/test_main.cpp tests/test_pt.cpp

@@ -78,7 +78,7 @@ endif()
 
 stein_add_test(test_mount
   SOURCES ../core/tests/test_main.cpp tests/test_mount.cpp
-  DEPS stein::mount stein::fs)
+  DEPS stein::mount stein::fs stein::container)   # container: the LUKS -> filesystem -> mount test
 if(TARGET test_mount)
   # A FUSE request that is never answered blocks uninterruptibly; fail instead of hanging CI.
   set_tests_properties(test_mount PROPERTIES TIMEOUT 180)

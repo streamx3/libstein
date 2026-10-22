@@ -433,3 +433,407 @@ TEST_CASE("nfs server: the ext4 fixture served over NFSv3 reads like the kernel 
     CHECK(missing.u32() == 2);   // NFS3ERR_NOENT
     (*server)->stop();
 }
+
+// ---------------------------------------------------------------- the mount from the OS side: external unmount, LUKS end to end
+
+#if !defined(_WIN32)
+#include "stein/container/luks.hpp"
+
+#include <set>
+#include <sys/stat.h>
+#if defined(__APPLE__)
+#include <sys/mount.h>
+#include <sys/param.h>
+#endif
+
+namespace {
+
+// A reader mounted at a fresh temp directory and served from its own thread. The destructor
+// stops the loop, joins it and removes the directory, so a failing assertion leaves no mount.
+struct LiveMount {
+    std::filesystem::path mp;
+    std::unique_ptr<stein::mount::Mount> mount;
+    std::thread loop;
+    Expected<void> loopResult;
+    std::string skipWhy;   // set when no mount could be made: the test skips (or fails under STEIN_REQUIRE_MOUNT)
+
+    LiveMount(std::unique_ptr<fs::Reader> reader, const stein::mount::MountOptions& options) {
+        mp = std::filesystem::temp_directory_path() / ("stein_mount_test_" + std::to_string(std::random_device{}()));
+        std::filesystem::create_directories(mp);
+        auto m = stein::mount::Mount::create(std::move(reader), mp, options);
+        if (!m) {
+            skipWhy = "mount failed (" + m.error().toString() + "); skipping";
+            return;
+        }
+        mount = std::move(*m);
+        loop = std::thread([this] { loopResult = mount->run(); });
+        // Never touch the mountpoint unless the loop is serving: a request with no server blocks forever.
+        for (int i = 0; i < 200 && !mount->running(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (!mount->running()) {
+            loop.join();
+            skipWhy = "serving loop did not start: " + (loopResult ? std::string("exited cleanly") : loopResult.error().toString());
+            mount.reset();
+        }
+    }
+    // True when run() returned on its own within `limit` (the loop is joined then).
+    bool waitForExit(std::chrono::milliseconds limit) {
+        const auto deadline = std::chrono::steady_clock::now() + limit;
+        while (mount->running() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        if (mount->running()) return false;
+        loop.join();
+        return true;
+    }
+    ~LiveMount() {
+        if (mount) mount->stop();
+        if (loop.joinable()) loop.join();
+        mount.reset();
+        std::error_code ec;
+        std::filesystem::remove(mp, ec);
+    }
+};
+
+// What the user does: umount (macOS) / fusermount3 -u (Linux) in a shell, not through stop().
+int unmountFromOutside(const std::filesystem::path& mp) {
+#if defined(__APPLE__)
+    const std::string cmd = "/sbin/umount '" + mp.string() + "' 2>&1";
+#else
+    const std::string cmd = "fusermount3 -u '" + mp.string() + "' 2>&1 || umount '" + mp.string() + "' 2>&1";
+#endif
+    return std::system(cmd.c_str());
+}
+
+std::unique_ptr<fs::Reader> ext4Reader() {
+    auto dev = loadSparseFixture("extfs/ext4.sparse");
+    auto probed = fs::probe(dev);
+    REQUIRE(probed);
+    REQUIRE(*probed);
+    auto reader = (*probed)->openReader();
+    REQUIRE(reader);
+    return std::move(*reader);
+}
+
+} // namespace
+
+TEST_CASE("mount: run() returns when the user unmounts from outside (umount / fusermount3 -u), and running() turns false") {
+    if (!stein::mount::Mount::available()) {
+        skipOrFail("no usable mount backend on this machine; skipping");
+        return;
+    }
+    LiveMount live(ext4Reader(), {});
+    if (!live.skipWhy.empty()) {
+        skipOrFail(live.skipWhy);
+        return;
+    }
+    std::error_code ec;
+    CHECK(std::filesystem::is_directory(live.mp / "lost+found", ec));
+    // A second of serving, then the user's umount from another thread.
+    int rc = -1;
+    std::thread eject([&] {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        rc = unmountFromOutside(live.mp);
+    });
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool exited = live.waitForExit(std::chrono::seconds(10));
+    const auto took = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0);
+    eject.join();
+    CHECK(rc == 0);
+    CHECK_MESSAGE(exited, "run() still serving " << took.count() << " ms after the external unmount");
+    CHECK(took < std::chrono::seconds(6));   // one second of serving plus the detection
+    MESSAGE("run() returned " << took.count() << " ms after the test started (unmount at 1000 ms)");
+    CHECK_FALSE(live.mount->running());
+    CHECK(live.loopResult);
+    // Nothing is mounted there any more: the directory is a plain, empty one again.
+    CHECK_FALSE(std::filesystem::exists(live.mp / "lost+found", ec));
+    // stop() after the fact is harmless and must not try to unmount somebody else's mount.
+    live.mount->stop();
+}
+
+TEST_CASE("mount: LUKS2 (argon2id, 512-byte sectors; pbkdf2, 4096-byte sectors) -> ext2 -> mount, listed and stat'ed through the OS") {
+    if (!stein::mount::Mount::available()) {
+        skipOrFail("no usable mount backend on this machine; skipping");
+        return;
+    }
+    for (const char* name : {"luks2", "luks2_pbkdf2"}) {
+        const std::string fixture = name;
+        CAPTURE(fixture);
+        auto dev = loadSparseFixture("luks/" + fixture + ".sparse");
+        REQUIRE(dev);
+        auto luks = container::Luks::open(dev);
+        REQUIRE_MESSAGE(luks, (luks ? std::string() : luks.error().toString()));
+        CHECK(luks->info().sectorSize == (fixture == "luks2_pbkdf2" ? 4096u : 512u));
+        auto payload = luks->openPayload("luks test passphrase", true);
+        REQUIRE_MESSAGE(payload, (payload ? std::string() : payload.error().toString()));
+        auto probed = fs::probe(*payload);
+        REQUIRE(probed);
+        REQUIRE(*probed);
+        CHECK((*probed)->type() == fs::FsType::Ext2);
+        const std::string label = (*probed)->info().label;
+        CHECK(label == "inside_luks");
+        auto reader = (*probed)->openReader();
+        REQUIRE(reader);
+        // The reader's own view of the root is what the OS must show through the mount.
+        std::map<std::string, fs::Stat> want;
+        {
+            auto root = (*reader)->root();
+            REQUIRE(root);
+            auto entries = (*reader)->readdir(*root);
+            REQUIRE(entries);
+            for (const auto& e : *entries) {
+                auto st = (*reader)->stat(e.inode);
+                REQUIRE(st);
+                want[e.name] = *st;
+            }
+        }
+        REQUIRE(want.count("lost+found") == 1);
+        stein::mount::MountOptions mo;
+        mo.fsName = label;
+        LiveMount live(std::move(*reader), mo);
+        if (!live.skipWhy.empty()) {
+            skipOrFail(live.skipWhy);
+            return;
+        }
+        std::error_code ec;
+        std::set<std::string> seen;
+        for (const auto& e : std::filesystem::directory_iterator(live.mp, ec)) seen.insert(e.path().filename().string());
+        CHECK_FALSE(ec);
+        CHECK(seen.count("lost+found") == 1);
+        for (const auto& [entry, st] : want) {
+            CAPTURE(entry);
+            CHECK(seen.count(entry) == 1);
+        }
+        CHECK(seen.size() == want.size());
+        // stat through the kernel: a directory, read-only, the reader's size and mtime.
+        struct stat sb {};
+        REQUIRE(::stat((live.mp / "lost+found").c_str(), &sb) == 0);
+        CHECK(S_ISDIR(sb.st_mode));
+        CHECK((sb.st_mode & 0222) == 0);
+        CHECK(static_cast<std::uint32_t>(sb.st_mode & 0777) == (want["lost+found"].mode & 0777u & ~0222u));
+        CHECK(static_cast<std::uint64_t>(sb.st_size) == want["lost+found"].size);
+        if (want["lost+found"].mtime) CHECK(static_cast<std::int64_t>(sb.st_mtime) == want["lost+found"].mtime);
+        CHECK_FALSE(std::filesystem::exists(live.mp / "does-not-exist", ec));
+        std::ofstream nope(live.mp / "new.txt");
+        CHECK_FALSE(nope);
+#if defined(__APPLE__)
+        // The export carries the label, so Finder names the volume after it instead of "127.0.0.1:/".
+        struct statfs sf {};
+        REQUIRE(::statfs(live.mp.c_str(), &sf) == 0);
+        CHECK(std::string(sf.f_fstypename) == "nfs");
+        CHECK(std::string(sf.f_mntfromname) == "127.0.0.1:/" + label);
+#endif
+        live.mount->stop();
+        live.loop.join();
+        CHECK(live.loopResult);
+    }
+}
+
+TEST_CASE("mount: the LUKS2 payload over NFS: lost+found listed and stat'ed through the OS, the volume named after the label, and run() returns after the user's umount") {
+    if (!stein::mount::Mount::available()) {
+        skipOrFail("no usable mount backend on this machine (macOS: /sbin/mount_nfs); skipping");
+        return;
+    }
+    auto dev = loadSparseFixture("luks/luks2.sparse");
+    REQUIRE(dev);
+    auto luks = container::Luks::open(dev);
+    REQUIRE_MESSAGE(luks, (luks ? std::string() : luks.error().toString()));
+    // Read-only, so the payload comes with the read cache in front of the decryption: the NFS
+    // threads and this thread share it, which is the arrangement the app's Browse + Mount makes.
+    auto payload = luks->openPayload("luks test passphrase", true);
+    REQUIRE_MESSAGE(payload, (payload ? std::string() : payload.error().toString()));
+    auto probed = fs::probe(*payload);
+    REQUIRE(probed);
+    REQUIRE(*probed);
+    REQUIRE((*probed)->type() == fs::FsType::Ext2);
+    const std::string label = (*probed)->info().label;
+    REQUIRE(label == "inside_luks");
+    auto reader = (*probed)->openReader();
+    REQUIRE(reader);
+    fs::Stat wantLf;
+    {
+        auto root = (*reader)->root();
+        REQUIRE(root);
+        auto lf = (*reader)->lookup(*root, "lost+found");
+        REQUIRE(lf);
+        auto st = (*reader)->stat(*lf);
+        REQUIRE(st);
+        wantLf = *st;
+    }
+    stein::mount::MountOptions mo;
+    mo.fsName = label;
+    LiveMount live(std::move(*reader), mo);
+    if (!live.skipWhy.empty()) {
+        skipOrFail(live.skipWhy);
+        return;
+    }
+    std::error_code ec;
+    std::set<std::string> seen;
+    for (const auto& e : std::filesystem::directory_iterator(live.mp, ec)) seen.insert(e.path().filename().string());
+    CHECK_FALSE(ec);
+    CHECK(seen == std::set<std::string>{"lost+found"});
+    // stat through the kernel: a directory, no write bits anywhere, the reader's size and mtime.
+    struct stat sb {};
+    REQUIRE(::stat((live.mp / "lost+found").c_str(), &sb) == 0);
+    CHECK(S_ISDIR(sb.st_mode));
+    CHECK((sb.st_mode & 0222) == 0);
+    CHECK(static_cast<std::uint32_t>(sb.st_mode & 0777) == (wantLf.mode & 0777u & ~0222u));
+    CHECK(static_cast<std::uint64_t>(sb.st_size) == wantLf.size);
+    if (wantLf.mtime) CHECK(static_cast<std::int64_t>(sb.st_mtime) == wantLf.mtime);
+    std::set<std::string> inside;
+    for (const auto& e : std::filesystem::directory_iterator(live.mp / "lost+found", ec)) inside.insert(e.path().filename().string());
+    CHECK_FALSE(ec);
+    CHECK(inside.empty());
+    CHECK_FALSE(std::filesystem::exists(live.mp / "nothing-here", ec));
+    std::ofstream nope(live.mp / "new.txt");
+    CHECK_FALSE(nope);
+#if defined(__APPLE__)
+    struct statfs sf {};
+    REQUIRE(::statfs(live.mp.c_str(), &sf) == 0);
+    CHECK(std::string(sf.f_fstypename) == "nfs");
+    CHECK(std::string(sf.f_mntfromname) == "127.0.0.1:/" + label);
+    CHECK((sf.f_flags & MNT_RDONLY) != 0);
+#endif
+    // The user ejects from outside: run() must return on its own, and nothing of ours stays at the mountpoint.
+    int rc = -1;
+    std::thread eject([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        rc = unmountFromOutside(live.mp);
+    });
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool exited = live.waitForExit(std::chrono::seconds(10));
+    const auto took = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0);
+    eject.join();
+    CHECK(rc == 0);
+    CHECK_MESSAGE(exited, "run() still serving " << took.count() << " ms after the external unmount");
+    CHECK(took < std::chrono::seconds(6));
+    MESSAGE("LUKS2 payload over NFS: run() returned " << took.count() << " ms after the test started (umount at 500 ms)");
+    CHECK_FALSE(live.mount->running());
+    CHECK(live.loopResult);
+    CHECK_FALSE(std::filesystem::exists(live.mp / "lost+found", ec));
+#if defined(__APPLE__)
+    REQUIRE(::statfs(live.mp.c_str(), &sf) == 0);
+    CHECK(std::string(sf.f_fstypename) != "nfs");   // the directory is back on its own filesystem
+#endif
+    // The device chain outlives the mount: the payload is still readable in process.
+    auto again = fs::probe(*payload);
+    REQUIRE(again);
+    REQUIRE(*again);
+    CHECK((*again)->info().label == label);
+    live.mount->stop();   // after the fact: harmless, and it must not unmount somebody else's mount
+}
+#endif   // !_WIN32
+
+// ---------------------------------------------------------------- a real cryptsetup volume with files in it, through the OS
+
+#if !defined(_WIN32)
+#include "stein/core/strings.hpp"   // fromHex
+
+namespace {
+// tests/fixtures/luks/<name>.oracle.txt: "key=value" lines (passphrase, master_key, ...).
+std::string luksOracle(const std::string& fixture, const std::string& key) {
+    std::ifstream in(std::string(STEIN_FIXTURE_DIR) + "/luks/" + fixture + ".oracle.txt");
+    std::string line;
+    while (std::getline(in, line))
+        if (line.rfind(key + "=", 0) == 0) return line.substr(key.size() + 1);
+    return {};
+}
+// ext4_small.oracle.txt is `sha256sum` output: "<hex>  <path>" per line.
+std::map<std::string, std::string> ext4SmallOracle() {
+    std::map<std::string, std::string> m;
+    std::ifstream in(std::string(STEIN_FIXTURE_DIR) + "/luks/ext4_small.oracle.txt");
+    std::string line;
+    while (std::getline(in, line))
+        if (auto sep = line.find("  "); sep != std::string::npos) m[line.substr(sep + 2)] = line.substr(0, sep);
+    return m;
+}
+std::string sha256HexOfFile(const std::filesystem::path& path, std::uint64_t& size) {
+    std::ifstream in(path, std::ios::binary);
+    REQUIRE_MESSAGE(in, path.string());
+    auto hasher = Hasher::create(HashAlgorithm::Sha256);
+    std::vector<std::byte> buf(64 * 1024);
+    size = 0;
+    while (in.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(buf.size())) || in.gcount() > 0) {
+        hasher->update(std::span<const std::byte>(buf.data(), static_cast<std::size_t>(in.gcount())));
+        size += static_cast<std::uint64_t>(in.gcount());
+    }
+    return Hasher::hex(hasher->finish());
+}
+} // namespace
+
+TEST_CASE("mount: a volume cryptsetup 2.8.4 made with its defaults (luks2_real: argon2id, 4096-byte sectors, ext4 with files) mounted over NFS: every file reads through the kernel with the oracle's sha256") {
+    if (!stein::mount::Mount::available()) {
+        skipOrFail("no usable mount backend on this machine (macOS: /sbin/mount_nfs); skipping");
+        return;
+    }
+    auto dev = loadSparseFixture("luks/luks2_real.sparse");
+    REQUIRE(dev);
+    auto luks = container::Luks::open(dev);
+    REQUIRE_MESSAGE(luks, (luks ? std::string() : luks.error().toString()));
+    REQUIRE(luks->info().sectorSize == 4096);
+    // The oracle's master key (what a passphrase unlock derives, minus the 1 GiB Argon2id): the
+    // digest vouches for it, and the payload comes with the read cache the NFS threads share.
+    auto hex = luksOracle("luks2_real", "master_key");
+    auto keyBytes = fromHex(hex);
+    REQUIRE(keyBytes);
+    std::vector<std::uint8_t> masterKey(keyBytes->size());
+    for (std::size_t i = 0; i < masterKey.size(); ++i) masterKey[i] = std::to_integer<std::uint8_t>((*keyBytes)[i]);
+    auto payload = luks->openPayload(masterKey, true);
+    REQUIRE_MESSAGE(payload, (payload ? std::string() : payload.error().toString()));
+    auto probed = fs::probe(*payload);
+    REQUIRE(probed);
+    REQUIRE(*probed);
+    REQUIRE((*probed)->type() == fs::FsType::Ext4);
+    const std::string label = (*probed)->info().label;
+    REQUIRE(label == "small_luks");
+    auto reader = (*probed)->openReader();
+    REQUIRE(reader);
+    const auto files = ext4SmallOracle();
+    REQUIRE(files.size() == 6);
+    // What the reader says each file holds; the kernel must agree byte for byte.
+    std::map<std::string, std::uint64_t> wantSize;
+    for (const auto& [path, sha] : files) {
+        auto inode = fs::resolvePath(**reader, path);
+        REQUIRE_MESSAGE(inode, path);
+        auto st = (*reader)->stat(*inode);
+        REQUIRE(st);
+        wantSize[path] = st->size;
+    }
+    stein::mount::MountOptions mo;
+    mo.fsName = label;
+    LiveMount live(std::move(*reader), mo);
+    if (!live.skipWhy.empty()) {
+        skipOrFail(live.skipWhy);
+        return;
+    }
+    std::error_code ec;
+    std::set<std::string> seen;
+    for (const auto& e : std::filesystem::directory_iterator(live.mp, ec)) seen.insert(e.path().filename().string());
+    CHECK_FALSE(ec);
+    CHECK(seen == std::set<std::string>{"big.bin", "dir", "hello.txt", "lost+found"});
+    std::set<std::string> nested;
+    for (const auto& e : std::filesystem::directory_iterator(live.mp / "dir" / "nested", ec)) nested.insert(e.path().filename().string());
+    CHECK_FALSE(ec);
+    CHECK(nested == std::set<std::string>{"leaf.txt"});
+    std::uint64_t total = 0;
+    for (const auto& [path, sha] : files) {
+        CAPTURE(path);
+        std::uint64_t size = 0;
+        CHECK(sha256HexOfFile(live.mp / path, size) == sha);
+        CHECK(size == wantSize[path]);
+        CHECK(std::filesystem::file_size(live.mp / path, ec) == wantSize[path]);
+        total += size;
+    }
+    MESSAGE("luks2_real over NFS: " << files.size() << " files, " << total << " bytes read through the kernel and hashed");
+    std::ofstream nope(live.mp / "dir" / "new.txt");
+    CHECK_FALSE(nope);
+#if defined(__APPLE__)
+    struct statfs sf {};
+    REQUIRE(::statfs(live.mp.c_str(), &sf) == 0);
+    CHECK(std::string(sf.f_mntfromname) == "127.0.0.1:/" + label);
+    CHECK((sf.f_flags & MNT_RDONLY) != 0);
+#endif
+    live.mount->stop();
+    live.loop.join();
+    CHECK(live.loopResult);
+    CHECK_FALSE(std::filesystem::exists(live.mp / "hello.txt", ec));
+}
+#endif   // !_WIN32

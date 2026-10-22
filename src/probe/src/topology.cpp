@@ -106,42 +106,76 @@ void probeTable(Node& node, const Options& options, int depth) {
     }
 }
 
-// A LUKS container with a passphrase that opens it: descend into the plaintext.
+bool isCancelled(const Options& options) { return options.cancelled && options.cancelled(); }
+
+// Hang the plaintext of an opened container under its node and probe it like a device.
+void addDecryptedChild(Node& node, const Options& options, int depth, std::string name, std::shared_ptr<BlockDevice> payload, ByteCount payloadOffset) {
+    Node child;
+    child.kind = NodeKind::Decrypted;
+    child.name = std::move(name);
+    child.device = std::move(payload);
+    child.region = Region{node.region.offset + payloadOffset, child.device->size()};
+    Node tmp;
+    tmp.kind = NodeKind::Device;
+    tmp.device = child.device;
+    tmp.region = child.region;
+    probeInto(tmp, options, depth + 1);
+    child.table = std::move(tmp.table);
+    child.content = std::move(tmp.content);
+    child.children = std::move(tmp.children);
+    child.notes = std::move(tmp.notes);
+    node.children.push_back(std::move(child));
+}
+
+// A LUKS container: say when it cannot be opened in-process at all, else open it with the cached
+// master key or a passphrase and descend into the plaintext.
 void probeLuks(Node& node, const Options& options, int depth) {
-    if (!node.content || options.passphrases.empty()) return;
+    if (!node.content) return;
     const auto t = node.content->type();
     if (t != fs::FsType::Luks1 && t != fs::FsType::Luks2) return;
+    // The header is parsed even with nothing to try: the unsupported verdict is what lets a UI hide
+    // its Unlock action, and a header read costs nothing next to a key derivation.
     auto luks = container::Luks::open(node.device);
     if (!luks) {
         node.notes.push_back(Note{Validity::Warning, "luks.header", luks.error().message()});
         return;
     }
-    if (!luks->info().supported) {
-        node.notes.push_back(Note{Validity::Info, "luks.unsupported", "cannot open in-process: " + luks->info().unsupportedWhy});
+    const container::LuksInfo& info = luks->info();
+    if (!info.supported) {
+        node.notes.push_back(Note{Validity::Info, "luks.unsupported", "cannot open in-process: " + info.unsupportedWhy});
         return;
     }
+    // A key unlocked earlier in the session skips the KDF entirely. A stale or foreign key fails
+    // the digest check (Integrity) or the size check (InvalidArgument); either way the passphrases
+    // are the fallback and the user is not told about a cache miss.
+    if (auto cached = options.masterKeys.find(info.uuid); cached != options.masterKeys.end()) {
+        if (auto payload = luks->openPayload(cached->second, true)) {
+            addDecryptedChild(node, options, depth, "decrypted", *payload, info.payloadOffset);
+            return;
+        }
+    }
+    if (options.passphrases.empty()) return;
+    container::UnlockOptions uo;
+    uo.cancelled = options.cancelled;
     for (const auto& pass : options.passphrases) {
-        auto payload = luks->openPayload(pass, true);
-        if (!payload) {
-            if (payload.error().category() != ErrorCategory::Integrity) node.notes.push_back(Note{Validity::Warning, "luks.unlock", payload.error().message()});
+        if (isCancelled(options)) return;   // nothing refuted: no luks.locked
+        // unlock() then openPayload(key) rather than openPayload(passphrase): the key is what the
+        // caller wants back for its session cache.
+        auto key = luks->unlock(pass, uo);
+        if (!key) {
+            const auto category = key.error().category();
+            if (category == ErrorCategory::Cancelled) return;
+            if (category != ErrorCategory::Integrity) node.notes.push_back(Note{Validity::Warning, "luks.unlock", key.error().message()});
             continue;
         }
-        Node child;
-        child.kind = NodeKind::Decrypted;
-        child.name = "decrypted";
-        child.device = *payload;
-        child.region = Region{node.region.offset + luks->info().payloadOffset, (*payload)->size()};
-        // The plaintext may carry a table or a filesystem: probe it like a device.
-        Node tmp;
-        tmp.kind = NodeKind::Device;
-        tmp.device = child.device;
-        tmp.region = child.region;
-        probeInto(tmp, options, depth + 1);
-        child.table = std::move(tmp.table);
-        child.content = std::move(tmp.content);
-        child.children = std::move(tmp.children);
-        child.notes = std::move(tmp.notes);
-        node.children.push_back(std::move(child));
+        auto payload = luks->openPayload(*key, true);
+        if (!payload) {
+            node.notes.push_back(Note{Validity::Warning, "luks.unlock", payload.error().message()});
+            continue;
+        }
+        if (options.onUnlocked) options.onUnlocked(info.uuid, *key);
+        std::fill(key->begin(), key->end(), std::uint8_t{0});   // the payload device holds its own schedule
+        addDecryptedChild(node, options, depth, "decrypted", *payload, info.payloadOffset);
         return;
     }
     node.notes.push_back(Note{Validity::Info, "luks.locked", "no supplied passphrase opens this container"});
@@ -154,6 +188,9 @@ void probeTcrypt(Node& node, const Options& options, int depth) {
     container::TcryptOptions to;
     to.pim = options.pim;
     for (const auto& pass : options.passphrases) {
+        // TcryptOptions has no cancel hook yet, so the trial (up to 500k PBKDF2 iterations per
+        // header location) runs to its end; the poll between passphrases is what we have.
+        if (isCancelled(options)) return;
         auto t = container::Tcrypt::unlock(node.device, pass, to);
         if (!t) {
             if (t.error().category() != ErrorCategory::Integrity) node.notes.push_back(Note{Validity::Info, "tcrypt.unlock", t.error().message()});
@@ -164,21 +201,8 @@ void probeTcrypt(Node& node, const Options& options, int depth) {
             node.notes.push_back(Note{Validity::Warning, "tcrypt.payload", payload.error().message()});
             return;
         }
-        Node child;
-        child.kind = NodeKind::Decrypted;
-        child.name = t->info().variant + (t->info().hidden ? " hidden volume" : " volume") + " (" + t->info().prf + (t->info().backupHeader ? ", backup header)" : ")");
-        child.device = *payload;
-        child.region = Region{node.region.offset + t->info().payloadOffset, (*payload)->size()};
-        Node tmp;
-        tmp.kind = NodeKind::Device;
-        tmp.device = child.device;
-        tmp.region = child.region;
-        probeInto(tmp, options, depth + 1);
-        child.table = std::move(tmp.table);
-        child.content = std::move(tmp.content);
-        child.children = std::move(tmp.children);
-        child.notes = std::move(tmp.notes);
-        node.children.push_back(std::move(child));
+        const std::string name = t->info().variant + (t->info().hidden ? " hidden volume" : " volume") + " (" + t->info().prf + (t->info().backupHeader ? ", backup header)" : ")");
+        addDecryptedChild(node, options, depth, name, *payload, t->info().payloadOffset);
         return;
     }
 }

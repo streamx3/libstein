@@ -1,0 +1,27 @@
+LUKS header information for luks1-ripemd.img
+
+Version:       	1
+Cipher name:   	aes
+Cipher mode:   	xts-plain64
+Hash spec:     	ripemd160
+Payload offset:	4096
+MK bits:       	512
+MK digest:     	57 0b 0a 23 d2 43 10 14 e7 ee d0 37 3e 47 6a ec 59 b6 1b 42 
+MK salt:       	04 73 f5 81 2d 0c 1f 2b 2e 0d 77 29 ed 4b f3 54 
+               	c4 fb 5c 79 2e de 14 75 de 0e 68 ff a0 1e fb 6b 
+MK iterations: 	46217
+UUID:          	7f777410-b353-4a39-bf3b-5b4fac1e4f99
+
+Key Slot 0: ENABLED
+	Iterations:         	747914
+	Salt:               	68 a3 4c c8 0f a5 a5 34 af 54 89 ad 14 66 4a 25 
+	                      	29 ae 32 db ed 63 90 c1 04 e4 02 16 1d 37 1b 10 
+	Key material offset:	8
+	AF stripes:            	4000
+Key Slot 1: DISABLED
+Key Slot 2: DISABLED
+Key Slot 3: DISABLED
+Key Slot 4: DISABLED
+Key Slot 5: DISABLED
+Key Slot 6: DISABLED
+Key Slot 7: DISABLED

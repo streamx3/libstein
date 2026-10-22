@@ -12,7 +12,8 @@
 //   stein pt create|add|rm|set|wipe ...   edit the table (simulated on an overlay, applied in one pass)
 //   stein types [gpt|mbr]                 list known partition types
 //
-// <image> is a regular file, a .sparse piece (a STEINSPARSE1 run list, opened read-only in memory) or (on Linux) a raw block device such as /dev/sdb.
+// <image> is a regular file, a .sparse piece (a STEINSPARSE1 run list, opened read-only as a device that holds only its runs and reads
+// zeros elsewhere) or (on Linux) a raw block device such as /dev/sdb.
 #include <functional>
 #include "stein/block/file_device.hpp"
 #include "stein/block/sparse_file.hpp"
@@ -60,7 +61,7 @@ int usage() {
                "  stein inspect <image> [--doc] [--sector-size N]\n"
                "  stein verify  <image>\n"
                "  stein repair  <image> [--dry-run]         table copies and the MBR EBR chain, then filesystems that can fix their own metadata\n"
-               "      (FAT: backup boot sector, backup FSInfo, stale FAT copies; exFAT: boot regions and their checksums)\n"
+               "      (FAT: backup boot sector, a backup FSInfo whose signatures are wrong, a FAT copy whose head is broken, from the sound copy; exFAT: boot regions and their checksums)\n"
                "  stein pt dump <image> <piece.sparse>\n"
                "  stein pt restore <piece.sparse> <image>\n"
                "      pieces are encrypted when --passphrase (or $STEIN_PASSPHRASE) is given\n"
@@ -87,28 +88,33 @@ int usage() {
                "  stein fs      <image> [--doc]       filesystem / container signature, label, uuid\n"
                "  stein fs dump <image> <piece.sparse> [--part N]   save the filesystem's metadata regions alone\n"
                "  stein fs restore <piece.sparse> <image>\n"
-               "  <image> may be a file, a .stein image, a .sparse piece (read-only), a split raw set (disk.img.000 ...) or a block device\n"
+               "  <image> may be a file, a .stein image, a .sparse piece (read-only: its runs, zeros elsewhere), a split raw set (disk.img.000 ...) or a block device\n"
                "  stein media scan <device|file>                      read-only surface scan (unreadable sectors)\n"
                "  stein media test <device|file> [--quick N] [--keep] --force   DESTRUCTIVE capacity/fake-flash test\n"
-               "  stein luks info    <image|device> [--part N]        header, cipher, key slots\n"
-               "  stein luks unlock  <image|device> [--part N]        check a passphrase and probe the plaintext\n"
-               "  stein luks extract <image|device> <out> [--part N]  decrypt the payload into a plain image\n"
+               "  stein luks info    <image|device> [--part N] [--header H]        header copies, cipher, key slots (KDF, tokens, priority, what cannot be tried)\n"
+               "  stein luks unlock  <image|device> [--part N] [--header H]        check a passphrase and probe the plaintext\n"
+               "  stein luks extract <image|device> <out> [--part N] [--header H]  decrypt the payload into a plain image\n"
+               "      --header <file|device>: a detached header (cryptsetup --header, luksHeaderBackup); the payload offset it records applies to <image|device>\n"
+               "      a LUKS layer met without --passphrase, --passphrase-file or $STEIN_PASSPHRASE asks for the passphrase on a terminal (no echo);\n"
+               "      non-interactive runs fail instead\n"
                "  stein tcrypt unlock  <image|device> [--part N] [--pim N] [--prf sha512|sha256|blake2s|ripemd160|whirlpool|streebog]\n"
                "                       VeraCrypt/TrueCrypt: find the header by trial decryption (any cipher or cascade), probe the plaintext\n"
                "  stein tcrypt extract <image|device> <out> [--part N] [--pim N] [--prf NAME]\n"
                "      stein probe --passphrase P also descends into LUKS containers it can open\n"
                "  stein lvm list    <image|device> [--part N] [--doc]   volume group, PVs, LVs and how they map\n"
                "  stein lvm extract <image|device> <lv> <out> [--part N] copy a logical volume into a plain image\n"
-               "  stein ls  <image|device> [path] [--part N] [--lv NAME] [--volume V] [--snapshot S] [--passphrase P]   list a directory in-process\n"
+               "  stein ls  <image|device> [path] [--part N] [--lv NAME] [--volume V] [--snapshot S] [--passphrase P] [--header H]   list a directory in-process\n"
                "                                 (--volume/--snapshot: an APFS container's volume by name or slot, and a snapshot by name or xid)\n"
                "  stein cat <image|device> <path> ...                                       print a file\n"
                "  stein cp  <image|device> <path> <out> ...                                 copy a file or a directory tree out (any filesystem stein can read)\n"
-               "  stein mount <image|device> <mountpoint> [--part N] [--lv NAME] [--passphrase P] [--allow-other]\n"
+               "  stein mount <image|device> <mountpoint> [--part N] [--lv NAME] [--passphrase P] [--header H] [--allow-other]\n"
                "      read-only mount of a filesystem inside an image / LUKS / LVM (Linux: FUSE, macOS: NFS loopback, Windows: WinFsp)\n"
-               "  stein serve <image|device> [--port N] [--raw] [--part N] [--lv NAME] [--passphrase P]\n"
+               "  stein serve <image|device> [--port N] [--raw] [--part N] [--lv NAME] [--passphrase P] [--header H]\n"
                "      serve the filesystem (or, with --raw, the decoded disk as one file) over NFSv3 on 127.0.0.1 for any NFS client\n"
-               "  stein attach <image|device> [--part N] [--lv NAME] [--passphrase P] [--no-mount]\n"
+               "  stein attach <image|device> [--part N] [--lv NAME] [--passphrase P] [--header H] [--no-mount]\n"
                "      macOS: hand the decoded disk to the system's own filesystem drivers (NFS loopback + hdiutil attach)\n"
+               "      ls/cat/cp/mount/serve/attach: --header H opens <image|device> (or its --part) as the data of a LUKS volume whose header is in H;\n"
+               "      a LUKS layer met without a passphrase given asks for one on a terminal, non-interactive runs fail\n"
                "  stein types [gpt|mbr]\n"
                "  stein app init    <profile.json> <device> <image.stein>   write a profile for a disk (identity from the OS)\n"
                "  stein app status  <profile.json> [--unlock]\n"
@@ -133,6 +139,7 @@ struct Args {
     bool rewriteAll = false;                     // image restore --rewrite-all: no compare-before-write
     std::string start, size, end, type, name, index;
     std::string passphrase, passphraseFile, newPassphrase, kdf, lv;
+    std::string header;             // luks/ls/cat/mount...: a detached LUKS header (file or device) for the data device given
     std::string volume, snapshot;   // APFS: which volume of the container and which snapshot of it
     std::uint32_t pim = 0;
     std::string prf;   // tcrypt: try only this PRF
@@ -166,6 +173,7 @@ Args parse(int argc, char** argv) {
         else if (s == "--name" && i + 1 < argc) a.name = argv[++i];
         else if ((s == "--index" || s == "--part") && i + 1 < argc) a.index = argv[++i];
         else if (s == "--lv" && i + 1 < argc) a.lv = argv[++i];
+        else if (s == "--header" && i + 1 < argc) a.header = argv[++i];
         else if (s == "--volume" && i + 1 < argc) a.volume = argv[++i];
         else if (s == "--snapshot" && i + 1 < argc) a.snapshot = argv[++i];
         else if (s == "--allow-other") a.allowOther = true;
@@ -243,7 +251,28 @@ std::string readPassphrase(const Args& a, const char* prompt) {
     return line;
 }
 
+// Whether a prompt can be answered: stdin is a terminal (not a pipe, a file or /dev/null).
+bool stdinIsTerminal() {
+#if !defined(_WIN32)
+    return isatty(STDIN_FILENO) != 0;
+#else
+    return _isatty(_fileno(stdin)) != 0;
+#endif
+}
+
 std::string g_passphrase;   // set from the arguments once; used when an encrypted image is opened as a device
+
+// The passphrase for a LUKS layer met at `where`: the one given (--passphrase, --passphrase-file,
+// $STEIN_PASSPHRASE), else a no-echo prompt naming the device when someone is there to answer it.
+// A script that forgot the passphrase gets the error, not a hang on a prompt nobody sees.
+Expected<std::string> luksPassphrase(const Args& a, const std::string& where) {
+    if (!g_passphrase.empty()) return g_passphrase;
+    if (!stdinIsTerminal())
+        return fail(ErrorCategory::Permission, where + " is LUKS-encrypted; pass --passphrase, --passphrase-file or $STEIN_PASSPHRASE");
+    const std::string pass = readPassphrase(a, ("LUKS passphrase for " + where + ": ").c_str());
+    if (pass.empty()) return fail(ErrorCategory::InvalidArgument, "empty passphrase");
+    return pass;
+}
 
 // --kdf argon2id|pbkdf2, --kdf-cost (passes or iterations), --kdf-memory KiB
 Expected<KdfParams> kdfFromArgs(const Args& a) {
@@ -267,19 +296,15 @@ Expected<std::shared_ptr<BlockDevice>> openImage(const std::string& path, bool w
     // A .stein image opens as a (read-only) device like any disk.
     std::error_code ec;
     if (platform::isDevicePath(path)) return platform::openAny(path, writable ? platform::OpenMode::ReadWrite : platform::OpenMode::ReadOnly, ss);
-    // A sparse piece is a list of byte runs, not a disk: it opens as the in-memory device it
-    // describes (its own size and sector size), and only read-only, since writes would land in
-    // memory and vanish. To edit one, restore it onto a raw file first.
+    // A sparse piece is a list of byte runs, not a disk: it opens as a device of the size and
+    // sector size it describes that holds only the runs (zeros elsewhere), since a table piece
+    // dumped from a 2 TB disk is a few KiB describing 2 TiB. Read-only, since writes would land
+    // nowhere. To edit one, restore it onto a raw file first.
     if (std::filesystem::is_regular_file(path, ec) && looksLikeSparsePiece(path)) {
         if (writable)
             return fail(ErrorCategory::Permission, path + " is a sparse piece (byte runs, not a disk); stein opens those read-only. "
                                                    "Restore it onto a raw file first: stein pt restore <piece> <file>");
-        auto piece = SparseFile::read(path, g_passphrase);
-        if (!piece) return fail(piece.error());
-        auto mem = std::make_shared<MemoryDevice>(piece->totalSize, piece->sectorSize);
-        if (auto r = SparseFile::apply(*piece, *mem); !r) return fail(r.error());
-        mem->setReadOnly(true);
-        return std::shared_ptr<BlockDevice>(std::move(mem));
+        return SparseFile::openAsDevice(path, g_passphrase);
     }
     if (!writable && std::filesystem::is_regular_file(path, ec) && image::SteinReader::looksLikeStein(path)) return image::openImage(path, g_passphrase);
     // qcow2 / VHD / VHDX / VMDK / VDI containers open read-only as the disk they describe.
@@ -622,23 +647,69 @@ Expected<std::shared_ptr<BlockDevice>> deviceOrPartition(const Args& a, const st
     return fail(ErrorCategory::NotFound, "no partition " + a.index);
 }
 
+// Luks::open on `data`, with the header read from --header when given (cryptsetup's detached
+// header: a luksHeaderBackup file or a small device). The header is never a partition of itself,
+// so --part applies to the data device only.
+Expected<container::Luks> openLuks(const Args& a, std::shared_ptr<BlockDevice> data) {
+    if (a.header.empty()) return container::Luks::open(std::move(data));
+    auto header = openImage(a.header, false, a.sectorSize);
+    if (!header) return fail(header.error());
+    return container::Luks::open(*header, std::move(data));
+}
+
+// One key slot of `luks info`: "slot 1: argon2id (t=4 m=1GiB p=4) [systemd-tpm2 token] priority preferred -- cannot try: ...".
+std::string describeSlot(const container::LuksSlotInfo& sl) {
+    std::string line = "slot " + std::to_string(sl.id) + ": " + (sl.active ? "" : "inactive, ") + sl.kdf;
+    if (!sl.kdfDetail.empty()) line += " (" + sl.kdfDetail + ")";
+    for (const auto& t : sl.tokens) line += " [" + t + " token]";
+    if (sl.priority == 2) line += " priority preferred";
+    else if (sl.priority == 0) line += " priority ignored (tried only when no other slot opens)";
+    else if (sl.priority != 1) line += " priority " + std::to_string(sl.priority);
+    if (!sl.unsupportedWhy.empty()) line += " -- cannot try: " + sl.unsupportedWhy;
+    return line;
+}
+
 int cmdLuks(const Args& a) {
     if (a.positional.size() < 3) return usage();
     const std::string& sub = a.positional[1];
     auto dev = deviceOrPartition(a, a.positional[2]);
     if (!dev) return die(dev.error());
-    auto luks = container::Luks::open(*dev);
+    auto luks = openLuks(a, *dev);
     if (!luks) return die(luks.error());
     const auto& info = luks->info();
+    const std::string where = a.positional[2] + (a.index.empty() ? "" : " partition " + a.index);
     if (sub == "info") {
-        std::printf("LUKS%d  %s-%s  %u-bit key  payload at %s (%s, %u-byte sectors)%s\n", info.version, info.cipher.c_str(), info.mode.c_str(), info.keyBytes * 8,
-                    formatSizeExact(info.payloadOffset).c_str(), formatSize(info.payloadSize).c_str(), info.sectorSize, info.supported ? "" : ("  [cannot open in-process: " + info.unsupportedWhy + "]").c_str());
+        std::printf("LUKS%d  %s-%s  %u-bit key  payload at %s (%s, %u-byte sectors)\n", info.version, info.cipher.c_str(), info.mode.c_str(), info.keyBytes * 8,
+                    formatSizeExact(info.payloadOffset).c_str(), formatSize(info.payloadSize).c_str(), info.sectorSize);
         if (!info.uuid.empty()) std::printf("UUID %s%s\n", info.uuid.c_str(), info.label.empty() ? "" : ("  label \"" + info.label + "\"").c_str());
         if (!info.hash.empty()) std::printf("hash %s\n", info.hash.c_str());
-        for (const auto& sl : info.slots) std::printf("slot %d: %s%s%s\n", sl.id, sl.active ? "" : "inactive, ", sl.kdf.c_str(), sl.kdfDetail.empty() ? "" : (" (" + sl.kdfDetail + ")").c_str());
+        if (info.version == 2) {
+            // Two copies of the binary header + JSON area; say which one the rest of the output comes from.
+            std::printf("header: %s per copy%s; %s copy in use, %s copy %s\n", formatSize(info.headerSize).c_str(),
+                        a.header.empty() ? "" : (" (detached, from " + a.header + ")").c_str(), info.headerCopyUsed == 0 ? "primary" : "SECONDARY",
+                        info.headerCopyUsed == 0 ? "secondary" : "primary", (info.headerCopyUsed == 0 ? info.secondaryValid : info.primaryValid) ? "OK" : "DAMAGED");
+        } else if (!a.header.empty()) {
+            std::printf("header: detached, from %s\n", a.header.c_str());
+        }
+        if (!info.flags.empty()) {
+            std::string flags;
+            for (const auto& f : info.flags) flags += (flags.empty() ? "" : ", ") + f;
+            std::printf("flags: %s\n", flags.c_str());
+        }
+        if (!info.requirements.empty()) {
+            std::string req;
+            for (const auto& r : info.requirements) req += (req.empty() ? "" : ", ") + r;
+            std::printf("requirements: %s\n", req.c_str());
+        }
+        for (const auto& sl : info.slots) std::printf("%s\n", describeSlot(sl).c_str());
+        if (!info.supported) std::printf("cannot open in-process: %s\n", info.unsupportedWhy.c_str());
         return 0;
     }
-    const std::string pass = g_passphrase.empty() ? readPassphrase(a, "LUKS passphrase: ") : g_passphrase;
+    // unlock/extract: the passphrase given, else a prompt; a pipe on stdin still works (one line).
+    const std::string pass = g_passphrase.empty() ? readPassphrase(a, ("LUKS passphrase for " + where + ": ").c_str()) : g_passphrase;
+    if (pass.empty())
+        return die(Error(ErrorCategory::InvalidArgument, std::string("no passphrase: pass --passphrase, --passphrase-file or $STEIN_PASSPHRASE") +
+                                                            (stdinIsTerminal() ? "" : " (stdin is not a terminal, and gave no line)")));
     if (sub == "unlock") {
         // Prove the passphrase opens the container and show what is inside.
         auto payload = luks->openPayload(pass, true);
@@ -893,15 +964,43 @@ int cmdPtEdit(const Args& a) {
                 if (q.isExtended) ext = &q;
             if (!ext) return die(Error(ErrorCategory::NotFound, "no extended partition to hold a logical one (add it first: --type 05 or 0f)"));
             std::vector<pt::FreeRegion> inside;
+            bool onlySlack = false;   // gaps existed, but none has room for a partition
             for (auto f : free) {
                 f.firstLba = std::max(f.firstLba, ext->firstLba);
                 f.lastLba = std::min(f.lastLba, ext->lastLba);
-                if (f.lastLba > f.firstLba) inside.push_back(f);
+                if (f.lastLba <= f.firstLba) continue;
+                // freeRegions() runs the gap up to the next logical's data, but that logical's EBR
+                // needs a sector in the gap: where the chain has it when that is inside the gap,
+                // else one alignment unit before the data, where MbrTable::write() relocates it
+                // (the chain's head EBR passes to the new, lower logical). A partition reaching
+                // the gap's end leaves no room and write() refuses the whole edit.
+                const pt::Partition* next = nullptr;
+                for (const auto& q : table.partitions())
+                    if (q.isLogical && q.firstLba > f.lastLba && (!next || q.firstLba < next->firstLba)) next = &q;
+                if (next) {
+                    const bool ebrInGap = next->ebrLba && *next->ebrLba > f.firstLba && *next->ebrLba < next->firstLba;
+                    const Lba ebr = ebrInGap ? *next->ebrLba : (next->firstLba > align ? next->firstLba - align : 0);
+                    if (ebr <= f.firstLba) {
+                        onlySlack = true;
+                        continue;
+                    }
+                    f.lastLba = std::min(f.lastLba, ebr - 1);
+                }
+                // The gap's first sector is an EBR (the extended partition's head, or the new
+                // logical's own) and the data starts on the next alignment boundary: a gap without
+                // room for that is only an EBR plus alignment slack. With --start the user chooses.
+                if (a.start.empty() && ((f.firstLba + 1 + align - 1) / align) * align > f.lastLba) {
+                    onlySlack = true;
+                    continue;
+                }
+                inside.push_back(f);
             }
             free = std::move(inside);
+            if (free.empty() && a.start.empty())
+                return die(Error(ErrorCategory::OutOfRange, std::string("no free space inside the extended partition") +
+                                                                (onlySlack ? " (the gaps left hold only EBRs and alignment slack)" : "")));
         }
-        if (free.empty() && a.start.empty())
-            return die(Error(ErrorCategory::OutOfRange, a.logical ? "no free space inside the extended partition" : "no free space in the table"));
+        if (free.empty() && a.start.empty()) return die(Error(ErrorCategory::OutOfRange, "no free space in the table"));
         pt::FreeRegion target;
         for (const auto& f : free)
             if (f.sectors() > target.sectors()) target = f;
@@ -1224,13 +1323,35 @@ int cmdLvm(const Args& a) {
 
 // ---- files inside filesystems (stein_fs L3) -----------------------------------
 
-// The block device to read: <image|device> [--part N] [--lv name], through LUKS/VeraCrypt with
-// --passphrase and LVM with --lv, down to the layer that holds a filesystem (or nothing known).
+// The block device to read: <image|device> [--part N] [--lv name], through LUKS (with the
+// passphrase given or asked for, and --header for a detached header) and VeraCrypt with
+// --passphrase, and LVM with --lv, down to the layer that holds a filesystem (or nothing known).
 Expected<std::shared_ptr<BlockDevice>> resolveDevice(const Args& a, const std::string& path, std::string& where) {
     auto dev = deviceOrPartition(a, path);
     if (!dev) return fail(dev.error());
     std::shared_ptr<BlockDevice> target = *dev;
     where = path + (a.index.empty() ? "" : " partition " + a.index);
+    // Typed once at the prompt and kept for the layers below; never printed.
+    std::string luksPass = g_passphrase;
+    auto decrypt = [&](const container::Luks& luks) -> Expected<void> {
+        if (luksPass.empty()) {
+            auto p = luksPassphrase(a, where);
+            if (!p) return fail(p.error());
+            luksPass = *p;
+        }
+        auto payload = luks.openPayload(luksPass, true);
+        if (!payload) return fail(payload.error());
+        target = *payload;
+        return {};
+    };
+    if (!a.header.empty()) {
+        // A detached header: the data device carries no LUKS signature, so probing could never
+        // find this layer; it is the first one by declaration.
+        auto luks = openLuks(a, target);
+        if (!luks) return fail(luks.error());
+        if (auto r = decrypt(*luks); !r) return fail(r.error());
+        where += " (decrypted, header " + a.header + ")";
+    }
     for (int hops = 0; hops < 4; ++hops) {
         auto probed = fs::probe(target);
         if (!probed) return fail(probed.error());
@@ -1252,12 +1373,9 @@ Expected<std::shared_ptr<BlockDevice>> resolveDevice(const Args& a, const std::s
         }
         const auto t = (*probed)->type();
         if (t == fs::FsType::Luks1 || t == fs::FsType::Luks2) {
-            if (g_passphrase.empty()) return fail(ErrorCategory::Permission, where + " is LUKS-encrypted; pass --passphrase");
             auto luks = container::Luks::open(target);
             if (!luks) return fail(luks.error());
-            auto payload = luks->openPayload(g_passphrase, true);
-            if (!payload) return fail(payload.error());
-            target = *payload;
+            if (auto r = decrypt(*luks); !r) return fail(r.error());
             where += " (decrypted)";
             continue;
         }

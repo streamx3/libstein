@@ -985,3 +985,74 @@ TEST_CASE("dmg: UDRO, UDZO (zlib), UDBZ (bzip2), UDCO (ADC), ULMO (lzma) and ULF
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
 }
+
+// ---------------------------------------------------------------- shared image devices
+
+#include <atomic>
+#include <thread>
+
+TEST_CASE("image devices: four threads reading one stein image and one compressed qcow2 see the bytes a single thread read") {
+    // The app browses an image from the UI thread while a mount serves the same device from the
+    // NFS/FUSE threads: the one-chunk caches inside ImageDevice and the vdisk MappedDevice are
+    // the shared state. Every window read concurrently must equal the sequential reference.
+    auto dir = tmpDir("stein_test_image_threads");
+    auto src = makeSource();
+    Sink sink;
+    Progress progress(sink);
+    CreateOptions co;
+    co.chunkSize = 1 * MiB;
+    co.compression = Compression::Lz4;
+    REQUIRE(createImage(src, dir / "disk.stein", co, progress));
+    auto steinDev = openImage(dir / "disk.stein");
+    REQUIRE(steinDev);
+    auto mem = SparseFile::loadIntoMemory(std::string(STEIN_FIXTURE_DIR) + "/vdisk/qcow2_compressed.sparse");
+    REQUIRE(mem);
+    const auto qcowPath = dir / "disk.qcow2";
+    {
+        auto out = FileDevice::create(qcowPath, (*mem)->size());
+        REQUIRE(out);
+        std::vector<std::byte> buf(1 * MiB);
+        for (ByteCount off = 0; off < (*mem)->size(); off += buf.size()) {
+            const std::size_t n = static_cast<std::size_t>(std::min<ByteCount>(buf.size(), (*mem)->size() - off));
+            REQUIRE((*mem)->readAt(off, std::span<std::byte>(buf).subspan(0, n)));
+            REQUIRE((*out)->writeAt(off, std::span<const std::byte>(buf).subspan(0, n)));
+        }
+        REQUIRE((*out)->flush());
+    }
+    auto qcowDev = image::openVdisk(qcowPath);
+    REQUIRE_MESSAGE(qcowDev, (qcowDev ? std::string() : qcowDev.error().toString()));
+    for (const std::shared_ptr<BlockDevice>& dev : {*steinDev, *qcowDev}) {
+        CAPTURE(dev->name());
+        std::vector<std::byte> all(static_cast<std::size_t>(dev->size()));
+        for (ByteCount off = 0; off < dev->size(); off += 1 * MiB) {
+            const std::size_t n = static_cast<std::size_t>(std::min<ByteCount>(1 * MiB, dev->size() - off));
+            REQUIRE(dev->readAt(off, std::span<std::byte>(all).subspan(static_cast<std::size_t>(off), n)));
+        }
+        std::atomic<int> mismatches{0}, failures{0};
+        std::vector<std::thread> threads;
+        for (int t = 0; t < 4; ++t)
+            threads.emplace_back([&, t] {
+                std::mt19937_64 rng(1000 + t);
+                std::vector<std::byte> win;
+                for (int i = 0; i < 150; ++i) {
+                    // Windows up to 512 KiB straddle chunk and cluster boundaries, so each read
+                    // refills the cache several times while the other threads do the same.
+                    const std::size_t n = 1 + static_cast<std::size_t>(rng() % (512 * 1024));
+                    const ByteCount off = rng() % (dev->size() - n);
+                    win.resize(n);
+                    if (!dev->readAt(off, win)) {
+                        ++failures;
+                        continue;
+                    }
+                    if (std::memcmp(win.data(), all.data() + off, n) != 0) ++mismatches;
+                }
+            });
+        for (auto& th : threads) th.join();
+        CHECK(failures.load() == 0);
+        CHECK(mismatches.load() == 0);
+    }
+    steinDev->reset();
+    qcowDev->reset();
+    mem->reset();
+    stein::test::removeTree(dir);
+}

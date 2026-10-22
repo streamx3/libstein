@@ -10,6 +10,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <span>
 #include <vector>
 
@@ -44,11 +45,27 @@ void blake2b(std::span<std::uint8_t> out, std::span<const std::byte> message, st
 
 // Argon2 (RFC 9106, version 0x13). memoryKiB >= 8 * parallelism; passes >= 1.
 enum class Argon2Type : std::uint8_t { D = 0, I = 1, Id = 2 };
+struct Argon2Options {
+    // Polled between slices (the synchronisation points of RFC 9106 §3.4); returning true aborts
+    // the derivation with Cancelled. A LUKS slot with cryptsetup's defaults takes seconds, so a UI's
+    // Cancel must reach into the KDF.
+    std::function<bool()> cancelled;
+    // Worker threads for the lanes of a slice: the lanes of one slice are independent, so they run
+    // in parallel. 0 = min(parallelism, hardware_concurrency()); 1 forces the single-thread path
+    // (what parallelism 1 always takes). The result does not depend on the thread count.
+    std::uint32_t threads = 0;
+};
+// The most memory one derivation may ask for: min(4 GiB, physical memory / 2). A header above it is
+// refused with Unsupported (naming the request) instead of risking std::bad_alloc on a damaged or
+// hostile header that asks for terabytes.
+std::uint64_t argon2MemoryCapKiB();
 Expected<void> argon2(Argon2Type type, std::span<const std::byte> password, std::span<const std::byte> salt, std::uint32_t passes, std::uint32_t memoryKiB,
-                      std::uint32_t parallelism, std::span<std::uint8_t> out, std::span<const std::byte> secret = {}, std::span<const std::byte> ad = {});
+                      std::uint32_t parallelism, std::span<std::uint8_t> out, std::span<const std::byte> secret = {}, std::span<const std::byte> ad = {},
+                      const Argon2Options& options = {});
 inline Expected<void> argon2id(std::span<const std::byte> password, std::span<const std::byte> salt, std::uint32_t passes, std::uint32_t memoryKiB,
-                               std::uint32_t parallelism, std::span<std::uint8_t> out, std::span<const std::byte> secret = {}, std::span<const std::byte> ad = {}) {
-    return argon2(Argon2Type::Id, password, salt, passes, memoryKiB, parallelism, out, secret, ad);
+                               std::uint32_t parallelism, std::span<std::uint8_t> out, std::span<const std::byte> secret = {}, std::span<const std::byte> ad = {},
+                               const Argon2Options& options = {}) {
+    return argon2(Argon2Type::Id, password, salt, passes, memoryKiB, parallelism, out, secret, ad, options);
 }
 
 // Cryptographically secure random bytes from the OS.

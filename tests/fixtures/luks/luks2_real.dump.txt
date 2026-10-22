@@ -1,0 +1,62 @@
+LUKS header information
+Version:       	2
+Epoch:         	6
+Metadata area: 	16384 [bytes]
+Keyslots area: 	1048576 [bytes]
+UUID:          	9e98058a-b62a-40dd-9c42-1e2bb8e021c4
+Label:         	(no label)
+Subsystem:     	(no subsystem)
+Flags:       	(no flags)
+
+Data segments:
+  0: crypt
+	offset: 2097152 [bytes]
+	length: (whole device)
+	cipher: aes-xts-plain64
+	sector: 4096 [bytes]
+
+Keyslots:
+  0: luks2
+	Key:        512 bits
+	Priority:   normal
+	Cipher:     aes-xts-plain64
+	Cipher key: 512 bits
+	PBKDF:      argon2id
+	Time cost:  10
+	Memory:     1048576
+	Threads:    4
+	Salt:       4a 88 65 a7 ab 2a f7 86 94 07 19 b6 4e 36 35 0b 
+	            6b cd c4 66 ee 1e 56 9f b2 35 48 fb f9 da 66 04 
+	AF stripes: 4000
+	AF hash:    sha256
+	Area offset:32768 [bytes]
+	Area length:258048 [bytes]
+	Digest ID:  0
+  1: luks2
+	Key:        512 bits
+	Priority:   normal
+	Cipher:     aes-xts-plain64
+	Cipher key: 512 bits
+	PBKDF:      argon2id
+	Time cost:  10
+	Memory:     1048576
+	Threads:    4
+	Salt:       05 d1 53 e2 75 8c 9b 07 8e 5b 6e f1 ec f7 20 c8 
+	            ba e6 ec 6b d2 cc 01 d3 62 8c 70 73 57 c3 b5 31 
+	AF stripes: 4000
+	AF hash:    sha256
+	Area offset:290816 [bytes]
+	Area length:258048 [bytes]
+	Digest ID:  0
+Tokens:
+  0: luks2-keyring
+	Key description: stein-test
+	Keyslot:    1
+Digests:
+  0: pbkdf2
+	Hash:       sha256
+	Iterations: 553630
+	Salt:       8b eb 4b 22 7a 15 28 f9 46 ec 11 84 d1 23 fa 46 
+	            1c 97 e9 1c d0 e1 b7 25 f9 06 63 0f bf 3c 3a 75 
+	Digest:     e4 8f 4c 14 e0 96 af 0d 2b df 65 ce a1 24 77 ad 
+	            7b b7 e8 ad 98 83 06 9c e6 d3 b0 28 8a 7f 66 a9 

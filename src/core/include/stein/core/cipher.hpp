@@ -3,6 +3,20 @@
 // Camellia-256, Kuznyechik) and XTS (IEEE 1619, plain64 tweak) over any of
 // them, including VeraCrypt's cascades. Own implementations, verified
 // against Botan and the GOST reference (tests/cipher_vectors.hpp).
+//
+// Hardware acceleration, chosen once at startup from cpuFeatures()
+// (STEIN_NO_SIMD=1 in the environment forces the portable code everywhere):
+//   - AES block encrypt/decrypt: AES-NI on x86-64, the ARMv8 Crypto Extensions
+//     on aarch64, the portable table implementation elsewhere (aes.cpp, aes_hw.cpp).
+//   - Xts over a single AES layer (LUKS aes-xts-plain64, VeraCrypt AES): a
+//     dedicated kernel runs eight blocks through the rounds together, with the
+//     eight tweaks of each group precomputed by GF(2^128) doubling, so the
+//     pipelined AES unit never waits on one block's fourteen rounds (aesXts*Hardware
+//     in aes_hw.cpp). Without hardware AES the same loop runs the portable kernel
+//     eight blocks at a time, with no virtual call per block. Xts::implementation()
+//     names the path in use.
+//   - Serpent, Twofish, Camellia, Kuznyechik and every cascade: portable code, one
+//     block per virtual BlockCipher call through the generic XTS loop.
 #pragma once
 
 #include "stein/core/error.hpp"
@@ -16,6 +30,8 @@
 #include <vector>
 
 namespace stein::crypto {
+
+class Aes;
 
 enum class CipherAlgorithm : std::uint8_t { Aes, Serpent, Twofish, Camellia, Kuznyechik };
 std::string_view toString(CipherAlgorithm c);   // "aes", "serpent", "twofish", "camellia", "kuznyechik"
@@ -90,12 +106,13 @@ private:
 // (tweak) keys in the same order: 64 bytes for one 256-bit cipher (32 for
 // AES-128), 128 for two, 192 for three. The tweak is the little-endian
 // 64-bit sector / data-unit number (dm-crypt plain64, VeraCrypt).
+// An Xts has no mutable state: one instance may serve several threads at once.
 class Xts {
 public:
     static Expected<Xts> create(CipherAlgorithm cipher, std::span<const std::uint8_t> key);
     static Expected<Xts> create(std::span<const CipherAlgorithm> cascade, std::span<const std::uint8_t> key);
 
-    // `in` must be a multiple of 16 bytes; `out` at least as long.
+    // `in` must be a multiple of 16 bytes; `out` at least as long. `out` may be the same buffer as `in`.
     Expected<void> encrypt(std::uint64_t sector, std::span<const std::byte> in, std::span<std::byte> out) const;
     Expected<void> decrypt(std::uint64_t sector, std::span<const std::byte> in, std::span<std::byte> out) const;
     // A run of equally sized sectors starting at `firstSector`.
@@ -106,13 +123,24 @@ public:
     std::vector<CipherAlgorithm> cascade() const;
     static std::size_t keySize(std::span<const CipherAlgorithm> cascade) { return cascade.size() * 64; }
 
+    // Which code runs the data: "aes-ni", "arm-aes" or "aes-portable" for the single-AES-layer fast
+    // path, "generic" for every other cipher and for cascades (one block per virtual call).
+    std::string_view implementation() const;
+    // Tests pin the fast path against the generic one on the same key; off, a single AES layer
+    // takes the per-block path that cascades use. On by default.
+    void setFastPath(bool enabled) { m_fastPath = enabled; }
+
 private:
     struct Layer {
         std::shared_ptr<const BlockCipher> data, tweak;
+        // Set when the layer is AES: the schedule the multi-block kernels read, owned by `data` above.
+        const Aes* aesData = nullptr;
     };
+    bool fastPath() const { return m_fastPath && m_layers.size() == 1 && m_layers[0].aesData; }
     static void layerEncrypt(const Layer& l, std::uint64_t sector, std::span<const std::byte> in, std::span<std::byte> out);
     static void layerDecrypt(const Layer& l, std::uint64_t sector, std::span<const std::byte> in, std::span<std::byte> out);
     std::vector<Layer> m_layers;
+    bool m_fastPath = true;
 };
 
 } // namespace stein::crypto

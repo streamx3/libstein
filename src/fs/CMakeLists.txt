@@ -28,4 +28,4 @@ stein_add_module(fs
 
 stein_add_test(test_fs
   SOURCES ../core/tests/test_main.cpp tests/test_fs.cpp
-  DEPS stein::fs)
+  DEPS stein::fs stein::container)   # the FAT-inside-LUKS case

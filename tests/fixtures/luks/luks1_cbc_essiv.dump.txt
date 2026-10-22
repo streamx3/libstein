@@ -1,0 +1,27 @@
+LUKS header information for luks1-cbc-essiv.img
+
+Version:       	1
+Cipher name:   	aes
+Cipher mode:   	cbc-essiv:sha256
+Hash spec:     	sha256
+Payload offset:	4096
+MK bits:       	256
+MK digest:     	bd a0 a0 fe 9e 52 9d d8 2f 3e a1 b1 e0 42 4d f7 4a 14 99 01 
+MK salt:       	86 6c 72 8f 03 0d 88 fa 38 cf 56 ff 4a 83 82 4f 
+               	2d 60 03 53 bc 3b e8 e0 ea 0d 6b 2d 81 98 ba 35 
+MK iterations: 	1077673
+UUID:          	dfdf3c6c-3e47-4660-bfe7-349ba5285537
+
+Key Slot 0: ENABLED
+	Iterations:         	17458080
+	Salt:               	4e a0 0b f1 c2 f5 4a 02 2a 5c 7f 88 66 f1 f9 1f 
+	                      	7b 28 95 1e da 8a cc d3 95 f7 c9 6b 5f 3c 70 08 
+	Key material offset:	8
+	AF stripes:            	4000
+Key Slot 1: DISABLED
+Key Slot 2: DISABLED
+Key Slot 3: DISABLED
+Key Slot 4: DISABLED
+Key Slot 5: DISABLED
+Key Slot 6: DISABLED
+Key Slot 7: DISABLED

@@ -82,3 +82,28 @@ make_one luks1 luks1 --hash sha256 --pbkdf-force-iterations 1000
 make_one luks1_sha1 luks1 --hash sha1 --pbkdf-force-iterations 1000
 make_one luks2 luks2 --pbkdf argon2id --pbkdf-force-iterations 4 --pbkdf-memory 64 --pbkdf-parallel 1 --luks2-metadata-size 16k --luks2-keyslots-size 256k --sector-size 512
 make_one luks2_pbkdf2 luks2 --pbkdf pbkdf2 --pbkdf-force-iterations 1000 --luks2-metadata-size 16k --luks2-keyslots-size 256k --sector-size 4096
+
+# ---------------------------------------------------------------------------
+# The cryptsetup 2.8.4 set (tests/fixtures/luks/luks2_real, luks2_serpent, luks2_aes128,
+# luks2_label, luks1_aes128, luks1_ripemd160, luks1_cbc_essiv, luks2_detached_*) was made
+# on an Ubuntu 26.04 aarch64 VM on 2026-10-22 with cryptsetup's own cost benchmark (no
+# --pbkdf-force-* flags), so the slots carry what a real installer writes: argon2id,
+# t=9..10, 1 GiB, p=4, 4096-byte sectors. Only --luks2-keyslots-size 1024k departs from the
+# defaults, because cryptsetup fills the whole key-slot area with random bytes and a 16 MiB
+# area does not compress. The payloads were written afterwards through libstein's own
+# encrypting payload device (Luks::openPayload(passphrase, readOnly=false)), 1.5 MiB ext4
+# "small_luks" made with mkfs.ext4 -b 1024 and populated with debugfs -w (no root needed);
+# the header-only fixtures are cut 64 KiB past the payload offset. Commands, as run:
+#   P="luks test passphrase"; KS="--luks2-keyslots-size 1024k"
+#   truncate -s 8M luks2-default.img && printf "%s" "$P" | cryptsetup luksFormat --batch-mode --type luks2 $KS luks2-default.img --key-file -
+#   printf "second slot passphrase" | cryptsetup luksAddKey --batch-mode --key-file <(printf "%s" "$P") luks2-default.img -
+#   cryptsetup token add --token-type luks2-keyring --key-description stein-test --key-slot 1 luks2-default.img
+#   ... --type luks2 --cipher serpent-xts-plain64 $KS      (luks2_serpent)
+#   ... --type luks2 --key-size 256 $KS                     (luks2_aes128)
+#   ... --type luks2 --label STEIN_LUKS --subsystem test $KS (luks2_label)
+#   ... --type luks1 --key-size 256                         (luks1_aes128)
+#   ... --type luks1 --hash ripemd160                       (luks1_ripemd160)
+#   ... --type luks1 --cipher aes-cbc-essiv:sha256 --key-size 256 (luks1_cbc_essiv, refused by libstein)
+#   truncate -s 4M data.img; truncate -s 2M hdr.img; ... --type luks2 $KS --header hdr.img data.img (luks2_detached_*)
+#   cryptsetup luksDump X > X.dump.txt; printf "%s" "$P" | cryptsetup luksDump --dump-volume-key --batch-mode --key-file - X
+

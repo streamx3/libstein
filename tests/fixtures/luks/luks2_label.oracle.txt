@@ -1,0 +1,4 @@
+passphrase=luks test passphrase
+master_key=d193cc21a5f7e479bd5093a7a1a62b574a9e4875b972d59cc4e7613c78cf8fc08d97a67c2a03d1ee35f51f3cc0df67492c982dc21cab53b2bbf04ec93fb75972
+generated=cryptsetup 2.8.4 on Ubuntu 26.04 aarch64, 2026-10-22, luksFormat --type luks2 --label STEIN_LUKS --subsystem test --luks2-keyslots-size 1024k
+payload=header only: the image is cut 64 KiB past the payload offset; unlock and key checks, no filesystem
