@@ -139,6 +139,7 @@ struct Args {
     bool rewriteAll = false;                     // image restore --rewrite-all: no compare-before-write
     std::string start, size, end, type, name, index;
     std::string passphrase, passphraseFile, newPassphrase, kdf, lv;
+    bool passphraseGiven = false;   // --passphrase was on the command line, empty or not
     std::string header;             // luks/ls/cat/mount...: a detached LUKS header (file or device) for the data device given
     std::string volume, snapshot;   // APFS: which volume of the container and which snapshot of it
     std::uint32_t pim = 0;
@@ -189,7 +190,10 @@ Args parse(int argc, char** argv) {
         else if (s == "--used-only") a.usedOnly = true;
         else if (s == "--quick" && i + 1 < argc) a.quick = static_cast<std::uint32_t>(std::stoul(argv[++i]));
         else if (s == "--keep") a.keep = true;
-        else if (s == "--passphrase" && i + 1 < argc) a.passphrase = argv[++i];
+        else if (s == "--passphrase" && i + 1 < argc) {
+            a.passphrase = argv[++i];
+            a.passphraseGiven = true;
+        }
         else if (s == "--passphrase-file" && i + 1 < argc) a.passphraseFile = argv[++i];
         else if (s == "--new-passphrase" && i + 1 < argc) a.newPassphrase = argv[++i];
         else if (s == "--kdf" && i + 1 < argc) a.kdf = argv[++i];
@@ -210,7 +214,7 @@ Args parse(int argc, char** argv) {
 
 // Passphrase: --passphrase, --passphrase-file, $STEIN_PASSPHRASE, else a no-echo prompt on a terminal.
 std::string readPassphrase(const Args& a, const char* prompt) {
-    if (!a.passphrase.empty()) return a.passphrase;
+    if (a.passphraseGiven) return a.passphrase;   // an explicit "" is not a reason to prompt
     if (!a.passphraseFile.empty()) {
         std::ifstream in(a.passphraseFile, std::ios::binary);
         std::string line;
@@ -954,21 +958,37 @@ int cmdPtEdit(const Args& a) {
         p.type = *type;
         // Default placement: the largest free region, start aligned to 1 MiB.
         const SectorCount align = std::max<SectorCount>(1, (1 * MiB) / ss);
-        auto free = table.freeRegions(align);
-        if (a.logical) {
-            // Only the extended partition's interior is a candidate. freeRegions() treats the
-            // container as free space, so its gaps may reach past the container's ends: clip them.
-            if (table.type() != pt::TableType::Mbr) return die(Error(ErrorCategory::InvalidArgument, "--logical needs an MBR table"));
-            const pt::Partition* ext = nullptr;
+        // freeRegions() treats an MBR extended partition as free space, so its gaps may straddle the
+        // container: a logical may only use their part inside it, a primary only the parts outside
+        // (a primary over the container, like the largest gap on a disk whose extended partition
+        // holds the most free space, is refused by the table and was a dead end). `choosable` is
+        // every gap of any size a --start may name; `free` the default placement's candidates.
+        if (a.logical && table.type() != pt::TableType::Mbr) return die(Error(ErrorCategory::InvalidArgument, "--logical needs an MBR table"));
+        const pt::Partition* ext = nullptr;
+        if (table.type() == pt::TableType::Mbr)
             for (const auto& q : table.partitions())
                 if (q.isExtended) ext = &q;
-            if (!ext) return die(Error(ErrorCategory::NotFound, "no extended partition to hold a logical one (add it first: --type 05 or 0f)"));
+        if (a.logical && !ext) return die(Error(ErrorCategory::NotFound, "no extended partition to hold a logical one (add it first: --type 05 or 0f)"));
+        auto confine = [&](std::vector<pt::FreeRegion> gaps) {
+            if (!ext) return gaps;
+            std::vector<pt::FreeRegion> out;
+            for (const auto& f : gaps) {
+                if (a.logical) {
+                    const pt::FreeRegion in{std::max(f.firstLba, ext->firstLba), std::min(f.lastLba, ext->lastLba)};
+                    if (in.lastLba > in.firstLba) out.push_back(in);
+                } else {
+                    if (f.firstLba < ext->firstLba) out.push_back({f.firstLba, std::min(f.lastLba, ext->firstLba - 1)});
+                    if (f.lastLba > ext->lastLba) out.push_back({std::max(f.firstLba, ext->lastLba + 1), f.lastLba});
+                }
+            }
+            return out;
+        };
+        const std::vector<pt::FreeRegion> choosable = confine(table.freeRegions(1));
+        auto free = confine(table.freeRegions(align));
+        if (a.logical) {
             std::vector<pt::FreeRegion> inside;
             bool onlySlack = false;   // gaps existed, but none has room for a partition
             for (auto f : free) {
-                f.firstLba = std::max(f.firstLba, ext->firstLba);
-                f.lastLba = std::min(f.lastLba, ext->lastLba);
-                if (f.lastLba <= f.firstLba) continue;
                 // freeRegions() runs the gap up to the next logical's data, but that logical's EBR
                 // needs a sector in the gap: where the chain has it when that is inside the gap,
                 // else one alignment unit before the data, where MbrTable::write() relocates it
@@ -1000,7 +1020,15 @@ int cmdPtEdit(const Args& a) {
                 return die(Error(ErrorCategory::OutOfRange, std::string("no free space inside the extended partition") +
                                                                 (onlySlack ? " (the gaps left hold only EBRs and alignment slack)" : "")));
         }
-        if (free.empty() && a.start.empty()) return die(Error(ErrorCategory::OutOfRange, "no free space in the table"));
+        auto listGaps = [&] {
+            std::string gaps;
+            for (const auto& f : choosable) gaps += (gaps.empty() ? "" : ", ") + std::to_string(f.firstLba) + ".." + std::to_string(f.lastLba);
+            return gaps;
+        };
+        if (free.empty() && a.start.empty())
+            return die(Error(ErrorCategory::OutOfRange, choosable.empty() ? std::string("no free space in the table")
+                                                                          : "no free gap of " + std::to_string(align) + " sectors or more; the gaps are " + listGaps() +
+                                                                                " (sectors); give --start"));
         pt::FreeRegion target;
         for (const auto& f : free)
             if (f.sectors() > target.sectors()) target = f;
@@ -1008,9 +1036,24 @@ int cmdPtEdit(const Args& a) {
             auto s = parseLba(a.start, ss);
             if (!s) return die(s.error());
             p.firstLba = *s;
-            // Pick the free region containing the start, if any.
-            for (const auto& f : free)
-                if (*s >= f.firstLba && *s <= f.lastLba) target = f;
+            // The gap holding the start: the default placement's version when it reaches the start,
+            // else the whole gap (a logical may start in the slack the next logical's EBR occupies;
+            // that EBR then moves to the sector after the new one, which stays free for it). Never
+            // another gap: sized by that gap's end, the partition landed somewhere else entirely,
+            // or became a single sector when the gap lay below the start.
+            auto holds = [&](const pt::FreeRegion& f) { return *s >= f.firstLba && *s <= f.lastLba; };
+            if (auto hit = std::find_if(free.begin(), free.end(), holds); hit != free.end()) {
+                target = *hit;
+            } else if (auto gap = std::find_if(choosable.begin(), choosable.end(), holds); gap != choosable.end()) {
+                target = *gap;
+                if (a.logical && std::any_of(table.partitions().begin(), table.partitions().end(),
+                                             [&](const pt::Partition& q) { return q.isLogical && q.firstLba == target.lastLba + 1; }))
+                    --target.lastLba;
+            } else {
+                return die(Error(ErrorCategory::OutOfRange, "--start " + a.start + " (LBA " + std::to_string(*s) + ") is not in a free gap" +
+                                                                std::string(a.logical ? " inside the extended partition" : "") +
+                                                                (choosable.empty() ? std::string(" (there is none)") : "; the gaps are " + listGaps() + " (sectors)")));
+            }
         } else {
             // A logical's gap begins with its EBR sector; the data starts on the next alignment
             // boundary after it (fdisk's layout, and what MbrTable expects of the first logical).
@@ -1653,8 +1696,18 @@ int cmdTypes(const Args& a) {
 int main(int argc, char** argv) {
     Args a = parse(argc, argv);
     if (a.positional.empty()) return usage();
-    if (!a.passphrase.empty() || !a.passphraseFile.empty()) g_passphrase = readPassphrase(a, "Passphrase: ");
-    else if (const char* e = std::getenv("STEIN_PASSPHRASE"); e && *e) g_passphrase = e;
+    if (a.passphraseGiven || !a.passphraseFile.empty()) {
+        // A source named on the command line that yields nothing is the mistake to report, here:
+        // the command that later needs the passphrase would only say "pass --passphrase ...".
+        if (!a.passphraseGiven && !std::ifstream(a.passphraseFile, std::ios::binary))
+            return die(Error(ErrorCategory::NotFound, "cannot read --passphrase-file " + a.passphraseFile));
+        g_passphrase = readPassphrase(a, "Passphrase: ");
+        if (g_passphrase.empty())
+            return die(Error(ErrorCategory::InvalidArgument, a.passphraseGiven ? std::string("--passphrase gave an empty passphrase")
+                                                                               : "--passphrase-file " + a.passphraseFile + " gave no passphrase"));
+    } else if (const char* e = std::getenv("STEIN_PASSPHRASE"); e && *e) {
+        g_passphrase = e;
+    }
     const std::string& cmd = a.positional[0];
     if (cmd == "list") return cmdList(a);
     if (cmd == "probe") return cmdProbe(a);

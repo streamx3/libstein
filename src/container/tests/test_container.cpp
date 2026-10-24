@@ -7,12 +7,14 @@
 #include "stein/core/endian.hpp"
 #include "stein/core/hash.hpp"
 #include "stein/core/json.hpp"
+#include "stein/core/secure.hpp"
 #include "stein/core/strings.hpp"
 #include "stein/fs/filesystem.hpp"
 #include "stein/fs/reader.hpp"
 #include "stein/layout/gen/luks.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -890,7 +892,413 @@ std::shared_ptr<BlockDevice> bareXts(std::shared_ptr<BlockDevice> dev, const con
     REQUIRE(xts);
     return std::make_shared<container::detail::XtsDevice>(std::move(dev), Region{info.payloadOffset, info.payloadSize}, info.sectorSize, info.ivTweak, std::move(*xts), true, "bare");
 }
+
+// ---------------------------------------------------------------------------------------------
+// Review of bcfb2ad: a damaged or hostile header is settled when it is parsed, with the reason,
+// and never costs a derivation, an unbounded allocation or a read into garbage.
+
+// A device whose first `badBytes` cannot be read (a disk with its first sectors gone); everything else intact.
+class UnreadableHeadDevice final : public BlockDevice {
+public:
+    UnreadableHeadDevice(std::shared_ptr<MemoryDevice> inner, ByteCount badBytes) : m_inner(std::move(inner)), m_bad(badBytes) {}
+    std::string name() const override { return "unreadable-head"; }
+    Geometry geometry() const override { return m_inner->geometry(); }
+    bool isReadOnly() const override { return true; }
+    Expected<void> readAt(ByteCount offset, std::span<std::byte> dst) override {
+        if (offset < m_bad) return fail(ErrorCategory::Io, "unreadable sector at " + std::to_string(offset));
+        return m_inner->readAt(offset, dst);
+    }
+    Expected<void> writeAt(ByteCount, std::span<const std::byte>) override { return fail(ErrorCategory::Permission, "read-only"); }
+    Expected<void> flush() override { return {}; }
+
+private:
+    std::shared_ptr<MemoryDevice> m_inner;
+    ByteCount m_bad;
+};
+
+// The luks2 fixture with `tweak` applied to its only keyslot, both header copies rewritten.
+std::shared_ptr<MemoryDevice> luks2WithSlot0(const std::function<void(json::Value&)>& tweak) {
+    auto dev = loadSparseFixture("luks/luks2.sparse");
+    REQUIRE(dev);
+    rewriteLuks2Json(*dev, editJson([&](json::Value& j) {
+        json::Value slot = j.get("keyslots").get("0");
+        tweak(slot);
+        setSlot(j, "0", slot);
+    }));
+    return dev;
+}
+// `obj` without `key` (json::Value has no erase).
+json::Value without(const json::Value& obj, std::string_view key) {
+    json::Value out = json::Value::object();
+    for (const auto& [k, v] : obj.asObject())
+        if (k != key) out.set(k, v);
+    return out;
+}
+bool allZero(std::span<const std::uint8_t> bytes) { return std::all_of(bytes.begin(), bytes.end(), [](std::uint8_t b) { return b == 0; }); }
+double msSince(std::chrono::steady_clock::time_point start) { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(); }
 } // namespace
+
+TEST_CASE("luks2: a slot that could not open the volume is settled at parse time, with its reason, and costs no derivation: key sizes XTS refuses, implausible stripes, an area inside the header, beyond the device or too small, Argon2 lanes out of bounds") {
+    struct Case { const char* why; std::function<void(json::Value&)> tweak; };
+    const Case cases[] = {
+        {"area key_size 48 (XTS takes 64 bytes, or 32 with aes)", [](json::Value& s) { setIn(s, "area", "key_size", 48); }},
+        {"key size 48 (XTS takes 64 bytes, or 32 with aes)", [](json::Value& s) { s.set("key_size", 48); }},   // the only slot: this is the volume key size itself
+        {"implausible key material size (4294967295 stripes of 64 bytes)", [](json::Value& s) { setIn(s, "af", "stripes", std::uint64_t{4294967295ull}); }},
+        {"key material (256000 bytes) larger than its area (4096)", [](json::Value& s) { setIn(s, "area", "size", "4096"); }},
+        {"key material area at 4096 lies inside the header", [](json::Value& s) { setIn(s, "area", "offset", "4096"); }},
+        {"key material area at 1099511627776 runs beyond the end of the device", [](json::Value& s) { setIn(s, "area", "offset", "1099511627776"); }},
+        {"argon2id parameters t=4 m=64KiB p=536870912 are invalid", [](json::Value& s) { setIn(s, "kdf", "cpus", std::uint64_t{536870912}); }},   // 8 * 2^29 wraps to 0 in 32 bits
+        {"argon2id parameters t=4 m=64KiB p=16777216 are invalid", [](json::Value& s) { setIn(s, "kdf", "cpus", std::uint64_t{16777216}); }},     // one above Argon2's lane maximum
+        // The reviewer's case, last so that a regression fails on the cases above before it stalls here: before
+        // the fix a 4 GiB area key was allocated and the KDF asked to fill it (hours) before XTS refused it.
+        {"area key_size 4294967295 (XTS takes", [](json::Value& s) { setIn(s, "area", "key_size", std::uint64_t{4294967295ull}); }},
+        {"key size 4294967295 (XTS takes", [](json::Value& s) { s.set("key_size", std::uint64_t{4294967295ull}); }},
+    };
+    for (const auto& c : cases) {
+        const std::string why = c.why;
+        CAPTURE(why);
+        const auto start = std::chrono::steady_clock::now();
+        auto luks = container::Luks::open(luks2WithSlot0(c.tweak));
+        REQUIRE_MESSAGE(luks, (luks ? std::string() : luks.error().toString()));
+        REQUIRE(luks->info().slots.size() == 1);
+        CHECK_MESSAGE(luks->info().slots[0].unsupportedWhy.find(c.why) != std::string::npos, luks->info().slots[0].unsupportedWhy);
+        CHECK_FALSE(luks->info().supported);
+        CHECK_MESSAGE(luks->info().unsupportedWhy.find("no usable key slot") != std::string::npos, luks->info().unsupportedWhy);
+        // Unsupported straight away: the cancel hook, polled before every slot and every Argon2 slice, is never asked.
+        int polls = 0;
+        container::UnlockOptions opt;
+        opt.cancelled = [&] { ++polls; return false; };
+        auto key = luks->unlock(kLuksPassphrase, opt);
+        REQUIRE_FALSE(key);
+        CHECK(key.error().category() == ErrorCategory::Unsupported);
+        CHECK(polls == 0);
+        CHECK(msSince(start) < 2000);
+    }
+    // Beside a good slot the bad one is skipped and the volume opens; the bad slot still costs nothing.
+    for (const auto& c : cases) {
+        const std::string why = c.why;
+        if (why.starts_with("key size")) continue;   // a second slot's own key size hits the volume-key check first (tested above and in the slots case)
+        CAPTURE(why);
+        auto dev = loadSparseFixture("luks/luks2.sparse");
+        rewriteLuks2Json(*dev, editJson([&](json::Value& j) {
+            json::Value slot = j.get("keyslots").get("0");
+            c.tweak(slot);
+            slot.set("priority", 2);
+            setSlot(j, "1", slot);
+            bindDigest(j, {"0", "1"});
+        }));
+        auto luks = container::Luks::open(dev);
+        REQUIRE_MESSAGE(luks, (luks ? std::string() : luks.error().toString()));
+        REQUIRE(luks->info().slots.size() == 2);
+        CHECK(luks->info().supported);
+        CHECK(luks->info().slots[0].unsupportedWhy.empty());
+        CHECK_MESSAGE(luks->info().slots[1].unsupportedWhy.find(c.why) != std::string::npos, luks->info().slots[1].unsupportedWhy);
+        int polls = 0;
+        container::UnlockOptions opt;
+        opt.cancelled = [&] { ++polls; return false; };
+        auto key = luks->unlock(kLuksPassphrase, opt);
+        REQUIRE_MESSAGE(key, (key ? std::string() : key.error().toString()));
+        CHECK(Hasher::hex(*key) == oracle("luks2")["master_key"]);
+        CHECK(polls == 17);   // once before slot 0, then its 16 Argon2 slices (t=4): the preferred but unusable slot 1 was never derived
+    }
+}
+
+TEST_CASE("luks2: what cannot be right is InvalidFormat from open(): a digest that is not the hash's size, a missing digest or salt, a segment offset that is not whole sectors or lies inside the header and key material, an iv_tweak that is not whole sectors") {
+    auto refused = [](const JsonEdit& edit, const char* fixture = "luks2") {
+        auto dev = loadSparseFixture(std::string("luks/") + fixture + ".sparse");
+        REQUIRE(dev);
+        rewriteLuks2Json(*dev, edit);
+        auto luks = container::Luks::open(dev);
+        REQUIRE_FALSE(luks);
+        CHECK(luks.error().category() == ErrorCategory::InvalidFormat);
+        return luks.error().message();
+    };
+    auto setDigest = [](const std::string& key, const json::Value& value) {
+        return editJson([=](json::Value& j) { setNested(j, "digests", "0", key, value); });
+    };
+    // Before the fix a 16-byte digest made the right passphrase a "wrong passphrase" (PBKDF2 of 16 bytes never equals it), and a long
+    // one sized a PBKDF2 run with no bound.
+    CHECK(refused(setDigest("digest", "AAECAwQFBgcICQoLDA0ODw==")).find("digest value is 16 bytes, sha256 makes 32") != std::string::npos);
+    CHECK(refused(setDigest("digest", std::string(64, 'A'))).find("digest value is 48 bytes") != std::string::npos);
+    CHECK(refused(setDigest("digest", "")).find("digest value is missing") != std::string::npos);
+    CHECK(refused(setDigest("salt", "")).find("digest salt is missing") != std::string::npos);
+    CHECK(refused(setDigest("salt", 42)).find("digest salt is missing") != std::string::npos);
+    CHECK(refused(editJson([](json::Value& j) {
+        json::Value digests = j.get("digests");
+        digests.set("0", without(j.get("digests").get("0"), "digest"));
+        j.set("digests", digests);
+    })).find("digest value is missing") != std::string::npos);
+    // A pbkdf2 slot without its salt: before the fix it parsed with an empty salt and read as a wrong passphrase.
+    CHECK(refused(editJson([](json::Value& j) {
+        json::Value slot = j.get("keyslots").get("0");
+        slot.set("kdf", without(slot.get("kdf"), "salt"));
+        setSlot(j, "0", slot);
+    }), "luks2_pbkdf2").find("keyslot 0 salt is missing") != std::string::npos);
+    CHECK(refused(editJson([](json::Value& j) { setNested(j, "keyslots", "0", "kdf", [&] { json::Value k = j.get("keyslots").get("0").get("kdf"); k.set("salt", ""); return k; }()); })).find("keyslot 0 salt is missing") != std::string::npos);
+    // The segment offset: dm-crypt maps 512-byte sectors; the fixture's key material ends at 32768 + 258048.
+    CHECK(refused(replaceText("\"offset\":\"1048576\"", "\"offset\":\"1048577\"")).find("segment offset 1048577 is not a multiple of 512") != std::string::npos);
+    CHECK(refused(replaceText("\"offset\":\"1048576\"", "\"offset\":\"16384\"")).find("segment offset 16384 lies inside the header and key material (first 290816 bytes)") != std::string::npos);
+    CHECK(refused(replaceText("\"offset\":\"1048576\"", "\"offset\":\"204800\"")).find("lies inside the header and key material") != std::string::npos);
+    // iv_tweak counts 512-byte sectors: on 4096-byte sectors it must be a multiple of 8; on 512-byte sectors any value is whole.
+    CHECK(refused(replaceText("\"iv_tweak\":\"0\"", "\"iv_tweak\":\"3\""), "luks2_pbkdf2").find("iv_tweak 3 is not a multiple of the sector size in 512-byte units (8)") != std::string::npos);
+    {
+        auto dev = loadSparseFixture("luks/luks2.sparse");
+        rewriteLuks2Json(*dev, replaceText("\"iv_tweak\":\"0\"", "\"iv_tweak\":\"3\""));
+        auto luks = container::Luks::open(dev);
+        REQUIRE_MESSAGE(luks, (luks ? std::string() : luks.error().toString()));
+        CHECK(luks->info().ivTweak == 3);
+    }
+    // Offset 0 on the header's own device is what cryptsetup writes for a detached header: a header only, not damage.
+    {
+        auto dev = loadSparseFixture("luks/luks2.sparse");
+        rewriteLuks2Json(*dev, replaceText("\"offset\":\"1048576\"", "\"offset\":\"0\""));
+        auto luks = container::Luks::open(dev);
+        REQUIRE_MESSAGE(luks, (luks ? std::string() : luks.error().toString()));
+        CHECK(luks->info().headerOnly);
+        CHECK(luks->info().payloadSize == 0);
+        CHECK(luks->info().supported);
+        auto key = luks->unlock(kLuksPassphrase);
+        REQUIRE(key);
+        CHECK(Hasher::hex(*key) == oracle("luks2")["master_key"]);
+        auto payload = luks->openPayload(*key, true);
+        REQUIRE_FALSE(payload);
+        CHECK(payload.error().category() == ErrorCategory::OutOfRange);
+    }
+}
+
+TEST_CASE("luks1: key material inside the header, beyond the device or implausibly striped makes the slot unusable; a key size XTS refuses makes the volume unsupported; a payload offset inside the header or key material is InvalidFormat; offset 0 is a header only") {
+    using Phdr = layout::gen::Luks1Phdr;
+    using Keyslot = layout::gen::Luks1Keyslot;
+    // No checksum seals a LUKS1 header, so its fields are patched in place.
+    auto patched = [](const std::function<void(std::span<std::byte>)>& edit) {
+        auto dev = loadSparseFixture("luks/luks1.sparse");
+        REQUIRE(dev);
+        edit(dev->bytes());
+        return dev;
+    };
+    auto slot0 = [](std::span<std::byte> hdr) { return hdr.subspan(0xD0, 48); };
+    auto unusable = [&](const std::function<void(std::span<std::byte>)>& edit, const std::string& why) {
+        CAPTURE(why);
+        auto luks = container::Luks::open(patched(edit));
+        REQUIRE_MESSAGE(luks, (luks ? std::string() : luks.error().toString()));
+        CHECK_FALSE(luks->info().supported);
+        REQUIRE(luks->info().slots.size() == 8);
+        CHECK_MESSAGE(luks->info().slots[0].unsupportedWhy.find(why) != std::string::npos, luks->info().slots[0].unsupportedWhy);
+        CHECK_MESSAGE(luks->info().unsupportedWhy.find(why) != std::string::npos, luks->info().unsupportedWhy);
+        auto key = luks->unlock(kLuksPassphrase);
+        REQUIRE_FALSE(key);
+        CHECK(key.error().category() == ErrorCategory::Unsupported);
+        return *luks;
+    };
+    // key_material_offset 1 (512 bytes) is inside the 592-byte phdr; 0x7FFFFFFF sectors is past any device; 2^32 - 1 stripes of 64 bytes is 256 GiB.
+    auto luks = unusable([&](std::span<std::byte> b) { Keyslot::setKeyMaterialOffset(slot0(b), 1); }, "key material at 512 lies inside the header");
+    CHECK(luks.info().unsupportedWhy.find("no usable key slot") != std::string::npos);
+    unusable([&](std::span<std::byte> b) { Keyslot::setKeyMaterialOffset(slot0(b), 0x7FFFFFFFu); }, "runs beyond the end of the device");
+    unusable([&](std::span<std::byte> b) { Keyslot::setStripes(slot0(b), 0xFFFFFFFFu); }, "implausible key material size (4294967295 stripes of 64 bytes)");
+    // key_bytes 48 with aes-xts-plain64: a header-level reason, shared by every slot.
+    unusable([](std::span<std::byte> b) { Phdr::setKeyBytes(b, 48); }, "key size 48 (XTS takes 64 bytes, or 32 with aes)");
+    // payload_offset inside the phdr (sector 1) or inside slot 0's key material (sector 9: 4608 < 4096 + 4000 * 64).
+    for (std::uint32_t sectors : {1u, 9u}) {
+        CAPTURE(sectors);
+        auto bad = container::Luks::open(patched([&](std::span<std::byte> b) { Phdr::setPayloadOffset(b, sectors); }));
+        REQUIRE_FALSE(bad);
+        CHECK(bad.error().category() == ErrorCategory::InvalidFormat);
+        CHECK_MESSAGE(bad.error().message().find("lies inside the header and key material (first 260096 bytes)") != std::string::npos, bad.error().message());
+    }
+    // payload_offset 0 on the header's own device: a detached header opened by itself. The slot unlocks; there is no payload here.
+    {
+        auto alone = container::Luks::open(patched([](std::span<std::byte> b) { Phdr::setPayloadOffset(b, 0); }));
+        REQUIRE_MESSAGE(alone, (alone ? std::string() : alone.error().toString()));
+        CHECK(alone->info().headerOnly);
+        CHECK(alone->info().payloadSize == 0);
+        CHECK(alone->info().supported);
+        auto key = alone->unlock(kLuksPassphrase);
+        REQUIRE_MESSAGE(key, (key ? std::string() : key.error().toString()));
+        CHECK(Hasher::hex(*key) == oracle("luks1")["master_key"]);
+        auto payload = alone->openPayload(kLuksPassphrase, true);
+        REQUIRE_FALSE(payload);
+        CHECK(payload.error().category() == ErrorCategory::OutOfRange);
+    }
+    // Untouched, the fixture is not a header only.
+    CHECK_FALSE(container::Luks::open(loadSparseFixture("luks/luks1.sparse"))->info().headerOnly);
+}
+
+TEST_CASE("luks2: high_priority (cryptsetup >= 2.7 --perf-high_priority) is a harmless flag; a name we do not know is still refused") {
+    auto dev = loadSparseFixture("luks/luks2.sparse");
+    rewriteLuks2Json(*dev, editJson([](json::Value& j) { setIn(j, "config", "flags", json::Value::array().push("high_priority").push("allow-discards")); }));
+    auto ok = container::Luks::open(dev);
+    REQUIRE_MESSAGE(ok, (ok ? std::string() : ok.error().toString()));
+    CHECK(ok->info().supported);
+    CHECK(ok->info().flags == std::vector<std::string>{"high_priority", "allow-discards"});
+    REQUIRE(ok->unlock(kLuksPassphrase));
+    dev = loadSparseFixture("luks/luks2.sparse");
+    rewriteLuks2Json(*dev, editJson([](json::Value& j) { setIn(j, "config", "flags", json::Value::array().push("high_priority").push("low_priority")); }));
+    auto unknown = container::Luks::open(dev);
+    REQUIRE(unknown);
+    CHECK_FALSE(unknown->info().supported);
+    CHECK_MESSAGE(unknown->info().unsupportedWhy.find("unknown flags low_priority") != std::string::npos, unknown->info().unsupportedWhy);
+}
+
+TEST_CASE("luks: a device whose first sectors cannot be read opens from the LUKS2 secondary copy; with no copy to fall back on, the I/O error is what is reported") {
+    // Before the fix the read error of the first 4 KiB was returned before the secondary was looked for.
+    {
+        auto mem = loadSparseFixture("luks/luks2.sparse");
+        REQUIRE(mem);
+        auto dev = std::make_shared<UnreadableHeadDevice>(mem, 4096);
+        auto luks = container::Luks::open(dev);
+        REQUIRE_MESSAGE(luks, (luks ? std::string() : luks.error().toString()));
+        CHECK(luks->info().headerCopyUsed == 1);
+        CHECK_FALSE(luks->info().primaryValid);
+        CHECK(luks->info().secondaryValid);
+        CHECK(luks->info().supported);
+        auto payload = luks->openPayload(kLuksPassphrase, true);
+        REQUIRE_MESSAGE(payload, (payload ? std::string() : payload.error().toString()));
+        CHECK(payloadLabel(*payload) == "inside_luks");
+    }
+    // LUKS1 has no second copy: the read error, not "no LUKS header".
+    {
+        auto luks = container::Luks::open(std::make_shared<UnreadableHeadDevice>(loadSparseFixture("luks/luks1.sparse"), 4096));
+        REQUIRE_FALSE(luks);
+        CHECK(luks.error().category() == ErrorCategory::Io);
+    }
+    // The secondary damaged as well: InvalidFormat naming both copies, the primary's reason being the read error.
+    {
+        auto mem = loadSparseFixture("luks/luks2.sparse");
+        REQUIRE(mem->writeAt(16384 + kLuks2Binary + 20, stein::test::bytesOf("garbage")));
+        auto luks = container::Luks::open(std::make_shared<UnreadableHeadDevice>(mem, 4096));
+        REQUIRE_FALSE(luks);
+        CHECK(luks.error().category() == ErrorCategory::InvalidFormat);
+        CHECK_MESSAGE(luks.error().message().find("primary copy unreadable sector at 0") != std::string::npos, luks.error().message());
+        CHECK_MESSAGE(luks.error().message().find("secondary copy") != std::string::npos, luks.error().message());
+        // And the secondary gone: nothing found anywhere, so the I/O error is the news.
+        REQUIRE(mem->writeAt(16384, std::vector<std::byte>(kLuks2Binary)));
+        auto none = container::Luks::open(std::make_shared<UnreadableHeadDevice>(mem, 4096));
+        REQUIRE_FALSE(none);
+        CHECK(none.error().category() == ErrorCategory::Io);
+    }
+}
+
+TEST_CASE("luks2: iv_tweak counts 512-byte sectors whatever the segment's sector size (dm-crypt's iv_offset): 40 is five 4096-byte sectors, or forty 512-byte ones") {
+    // The payload re-encrypted the way dm-crypt would read it with iv_offset 40 and the header's iv_tweak set to match: the volume must read as before.
+    for (const char* name : {"luks2_pbkdf2", "luks2"}) {   // 4096- and 512-byte sectors
+        const std::string fixture = name;
+        CAPTURE(fixture);
+        auto dev = loadSparseFixture("luks/" + fixture + ".sparse");
+        REQUIRE(dev);
+        auto original = container::Luks::open(dev);
+        REQUIRE(original);
+        const container::LuksInfo info = original->info();
+        const auto masterKey = oracleMasterKey(fixture);
+        auto xts = crypto::Xts::create(crypto::CipherAlgorithm::Aes, masterKey);
+        REQUIRE(xts);
+        const std::uint64_t tweak512 = 40;
+        const std::uint64_t tweakSectors = tweak512 * 512 / info.sectorSize;   // 5 or 40
+        auto cipher = readAll(*dev, info.payloadOffset, info.payloadSize);
+        std::vector<std::byte> plain(cipher.size()), shifted(cipher.size());
+        REQUIRE(xts->decryptSectors(0, info.sectorSize, cipher, plain));
+        REQUIRE(xts->encryptSectors(tweakSectors, info.sectorSize, plain, shifted));
+        CHECK(shifted != cipher);
+        REQUIRE(dev->writeAt(info.payloadOffset, shifted));
+        rewriteLuks2Json(*dev, replaceText("\"iv_tweak\":\"0\"", "\"iv_tweak\":\"40\""));
+        auto luks = container::Luks::open(dev);
+        REQUIRE_MESSAGE(luks, (luks ? std::string() : luks.error().toString()));
+        CHECK(luks->info().ivTweak == 40);   // as stored
+        auto payload = luks->openPayload(kLuksPassphrase, true);
+        REQUIRE_MESSAGE(payload, (payload ? std::string() : payload.error().toString()));
+        CHECK(payloadLabel(*payload) == "inside_luks");
+        CHECK(readAll(**payload, 0, info.payloadSize) == plain);
+        // The same bytes through a bare view whose tweak is in the device's own sectors.
+        auto bareXts2 = crypto::Xts::create(crypto::CipherAlgorithm::Aes, masterKey);
+        REQUIRE(bareXts2);
+        auto bare = std::make_shared<container::detail::XtsDevice>(dev, Region{info.payloadOffset, info.payloadSize}, info.sectorSize, tweakSectors, std::move(*bareXts2), true, "bare");
+        CHECK(readAll(*bare, 0, info.payloadSize) == plain);
+        // Before the fix 40 was added in sectors of the segment's size: on 4096-byte sectors that is 32 KiB off, garbage.
+        if (info.sectorSize != 512) {
+            auto wrongXts = crypto::Xts::create(crypto::CipherAlgorithm::Aes, masterKey);
+            REQUIRE(wrongXts);
+            auto wrong = std::make_shared<container::detail::XtsDevice>(dev, Region{info.payloadOffset, info.payloadSize}, info.sectorSize, tweak512, std::move(*wrongXts), true, "wrong");
+            CHECK(readAll(*wrong, 0, info.payloadSize) != plain);
+        }
+    }
+}
+
+TEST_CASE("luks1: the payload is whole sectors even when the device is not: a trailing partial sector is left out, on the header's device and on a detached data device") {
+    using Phdr = layout::gen::Luks1Phdr;
+    auto whole = loadSparseFixture("luks/luks1.sparse");
+    REQUIRE(whole);
+    const ByteCount payloadOffset = 4096 * 512;
+    // 100 bytes past the last whole sector. Before the fix payloadSize kept them and the last sector could not be read.
+    std::vector<std::byte> odd(whole->bytes().begin(), whole->bytes().end());
+    odd.resize(odd.size() + 100);
+    auto dev = std::make_shared<MemoryDevice>(odd);
+    REQUIRE(dev->size() % 512 == 100);
+    auto luks = container::Luks::open(dev);
+    REQUIRE_MESSAGE(luks, (luks ? std::string() : luks.error().toString()));
+    CHECK(luks->info().payloadSize == whole->size() - payloadOffset);
+    CHECK(luks->info().payloadSize % 512 == 0);
+    auto payload = luks->openPayload(kLuksPassphrase, true);
+    REQUIRE_MESSAGE(payload, (payload ? std::string() : payload.error().toString()));
+    CHECK((*payload)->size() == luks->info().payloadSize);
+    REQUIRE((*payload)->read((*payload)->size() - 512, 512));
+    CHECK(payloadLabel(*payload) == "inside_luks");
+    // Detached: the header with payload_offset 0, the data device 100 bytes longer than its sectors.
+    std::vector<std::byte> hdrBytes(whole->bytes().begin(), whole->bytes().begin() + static_cast<std::ptrdiff_t>(payloadOffset));
+    storeBe32(hdrBytes.data() + Phdr::kPayloadOffsetOffset, 0);
+    auto header = std::make_shared<MemoryDevice>(hdrBytes);
+    std::vector<std::byte> dataBytes(whole->bytes().begin() + static_cast<std::ptrdiff_t>(payloadOffset), whole->bytes().end());
+    dataBytes.resize(dataBytes.size() + 100);
+    auto data = std::make_shared<MemoryDevice>(dataBytes);
+    auto detached = container::Luks::open(header, data);
+    REQUIRE_MESSAGE(detached, (detached ? std::string() : detached.error().toString()));
+    CHECK_FALSE(detached->info().headerOnly);
+    CHECK(detached->info().payloadSize == data->size() - 100);
+    auto p2 = detached->openPayload(kLuksPassphrase, true);
+    REQUIRE_MESSAGE(p2, (p2 ? std::string() : p2.error().toString()));
+    REQUIRE((*p2)->read((*p2)->size() - 512, 512));
+    CHECK(payloadLabel(*p2) == "inside_luks");
+}
+
+TEST_CASE("secureZero zeroes a buffer and is not elided; WipeOnExit and WipeBytesOnExit wipe when their scope ends, however it ends") {
+    std::vector<std::uint8_t> buf(4096, 0xA5);
+    secureZero(buf.data(), buf.size());
+    // Read back through a volatile view, so the check itself cannot be folded away either.
+    volatile const std::uint8_t* v = buf.data();
+    std::uint32_t acc = 0;
+    for (std::size_t i = 0; i < buf.size(); ++i) acc |= v[i];
+    CHECK(acc == 0);
+    secureZero(nullptr, 0);
+    secureZero(buf.data(), 0);
+    std::vector<std::uint8_t> key(64, 0x5C);
+    {
+        WipeOnExit guard(key);
+        CHECK(key[0] == 0x5C);
+    }
+    CHECK(allZero(key));
+    CHECK(key.size() == 64);
+    std::array<std::byte, 32> arr;
+    arr.fill(std::byte{0xFF});
+    { WipeOnExit guard(arr); }
+    CHECK(std::all_of(arr.begin(), arr.end(), [](std::byte b) { return b == std::byte{0}; }));
+    std::uint64_t words[16];
+    std::fill(std::begin(words), std::end(words), 0x1111111111111111ull);
+    { WipeBytesOnExit guard(words, sizeof words); }
+    CHECK(std::all_of(std::begin(words), std::end(words), [](std::uint64_t w) { return w == 0; }));
+    // A vector that grew under the guard: the buffer it holds at the end is the one wiped.
+    std::vector<std::uint8_t> grown;
+    {
+        WipeOnExit guard(grown);
+        grown.assign(1000, 0x77);
+    }
+    CHECK(allZero(grown));
+    // An early return still wipes.
+    std::vector<std::uint8_t> early(16, 0x42);
+    [&]() -> int {
+        WipeOnExit guard(early);
+        if (early[0] == 0x42) return 1;
+        return 0;
+    }();
+    CHECK(allZero(early));
+}
 
 TEST_CASE("luks end to end: each fixture opens, refuses a wrong passphrase, unlocks, and its payload is the ext2 'inside_luks' whose root directory a Reader lists") {
     for (const char* name : kLuksFixtures) {
@@ -1294,7 +1702,9 @@ TEST_CASE("luks (cryptsetup 2.8.4 fixtures): info() reads what luksDump prints: 
         CHECK(o["master_key"].size() == 2 * f.keyBytes);   // the oracle's key is the size the header says
         CHECK(info.sectorSize == f.sectorSize);
         CHECK(info.payloadOffset == f.payloadOffset);
-        CHECK(info.payloadSize == dev->size() - f.payloadOffset);
+        // Offset 0 on the header's own device is a detached header opened by itself: no payload here.
+        CHECK(info.headerOnly == (f.payloadOffset == 0));
+        CHECK(info.payloadSize == (f.payloadOffset == 0 ? 0 : dev->size() - f.payloadOffset));
         CHECK(info.uuid == f.uuid);
         CHECK(info.label == f.label);
         CHECK(info.supported == f.supported);
@@ -1420,8 +1830,9 @@ TEST_CASE("luks (cryptsetup 2.8.4 fixtures): opened with the oracle's master key
         }
     }
     // Detached header (luksFormat --header): the key material in one image, the payload from byte 0
-    // of the other, as dm-crypt maps it. The data image alone is not LUKS; the header alone
-    // decrypts its own bytes, which are not a filesystem.
+    // of the other, as dm-crypt maps it. The data image alone is not LUKS; the header alone is a
+    // header only: the digest still vouches for the key, but there is no payload to decrypt (its
+    // own bytes would only make garbage).
     {
         auto header = loadSparseFixture("luks/luks2_detached_header.sparse");
         auto data = loadSparseFixture("luks/luks2_detached_data.sparse");
@@ -1437,12 +1848,18 @@ TEST_CASE("luks (cryptsetup 2.8.4 fixtures): opened with the oracle's master key
         const auto masterKey = oracleMasterKey("luks2_detached_header");
         checkPayload(data, *luks, "luks2_detached (header + data)", masterKey, data->size());
         auto alone = container::Luks::open(header);
-        REQUIRE(alone);
-        CHECK(alone->info().payloadSize == header->size());
+        REQUIRE_MESSAGE(alone, (alone ? std::string() : alone.error().toString()));
+        CHECK(alone->info().headerOnly);
+        CHECK(alone->info().payloadOffset == 0);
+        CHECK(alone->info().payloadSize == 0);
+        CHECK(alone->info().supported);
+        CHECK_FALSE(luks->info().headerOnly);
         auto own = alone->openPayload(masterKey, true);
-        REQUIRE(own);
-        auto probed = fs::probe(*own);
-        CHECK((!probed || !*probed));
+        REQUIRE_FALSE(own);
+        CHECK(own.error().category() == ErrorCategory::OutOfRange);
+        auto bad = masterKey;
+        bad[3] ^= 0x10;
+        CHECK(alone->openPayload(bad, true).error().category() == ErrorCategory::Integrity);
     }
     // Header-only fixtures (the image cut 64 KiB past the payload offset): the digest vouches for
     // the oracle's key and what little payload there is has the header's sector size. The

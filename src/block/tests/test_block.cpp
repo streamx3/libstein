@@ -8,10 +8,12 @@
 #include "stein/block/overlay_device.hpp"
 #include "stein/block/slice_device.hpp"
 #include "stein/block/sparse_file.hpp"
+#include "stein/core/endian.hpp"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -342,6 +344,27 @@ public:
 private:
     std::shared_ptr<MemoryDevice> m_inner;
     std::mutex m_mutex;
+};
+
+// A device with one unreadable sector: every read touching it fails, every other read succeeds.
+class BadSectorDevice final : public BlockDevice {
+public:
+    BadSectorDevice(std::shared_ptr<MemoryDevice> inner, ByteCount badOffset) : m_inner(std::move(inner)), m_bad(badOffset) {}
+    std::string name() const override { return "bad-sector"; }
+    Geometry geometry() const override { return m_inner->geometry(); }
+    bool isReadOnly() const override { return true; }
+    Expected<void> readAt(ByteCount offset, std::span<std::byte> dst) override {
+        ++reads;
+        if (offset < m_bad + 512 && offset + dst.size() > m_bad) return fail(ErrorCategory::Io, "unreadable sector " + std::to_string(m_bad / 512));
+        return m_inner->readAt(offset, dst);
+    }
+    Expected<void> writeAt(ByteCount, std::span<const std::byte>) override { return fail(ErrorCategory::Permission, "read-only"); }
+    Expected<void> flush() override { return {}; }
+    std::uint64_t reads = 0;
+
+private:
+    std::shared_ptr<MemoryDevice> m_inner;
+    ByteCount m_bad;
 };
 
 } // namespace
@@ -677,6 +700,88 @@ TEST_CASE("SparseFile::openAsDevice: a fixture piece reads byte for byte like it
     REQUIRE(encAll);
     CHECK(*encAll == *all);
     CHECK(SparseFile::openAsDevice(dir / "missing.sparse").error().category() == ErrorCategory::NotFound);
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
+TEST_CASE("CachedDevice: one unreadable sector costs only the reads that touch it, not the whole chunk around it") {
+    // A disk with a single bad sector: the chunk read that would fill the cache fails, but the
+    // bytes the caller asked for may be perfectly readable. They are served with an uncached read of
+    // exactly that window; only a window touching the bad sector gets the inner device's error.
+    auto inner = std::make_shared<BadSectorDevice>(patternDevice(64 * KiB), 5 * 512);   // sector 5, in chunk 0
+    auto cache = CachedDevice::create(inner, {4096, 16 * KiB});
+    auto r = cache->read(0, 512);
+    REQUIRE(r);
+    CHECK(matches(*r, 0));
+    auto s = cache->stats();
+    CHECK(s.misses == 1);
+    CHECK(s.chunks == 0);   // an incomplete chunk is not kept
+    r = cache->read(6 * 512 + 100, 500);   // still inside chunk 0
+    REQUIRE(r);
+    CHECK(matches(*r, 6 * 512 + 100));
+    CHECK(cache->stats().chunks == 0);
+    CHECK(cache->stats().misses == 2);
+    // The bad sector itself, and a window straddling into it: the inner device's error as is.
+    auto bad = cache->read(5 * 512, 512);
+    REQUIRE_FALSE(bad);
+    CHECK(bad.error().category() == ErrorCategory::Io);
+    CHECK_FALSE(cache->read(4 * 512 + 100, 1024));
+    CHECK(cache->stats().chunks == 0);
+    // A read running from the bad chunk into the next one: both halves right, the next chunk cached.
+    r = cache->read(6 * 512, 4096);
+    REQUIRE(r);
+    CHECK(matches(*r, 6 * 512));
+    CHECK(cache->stats().chunks == 1);
+    // Every other chunk behaves as always.
+    r = cache->read(8192, 100);
+    REQUIRE(r);
+    CHECK(matches(*r, 8192));
+    CHECK(cache->stats().chunks == 2);
+    REQUIRE(cache->read(8192, 100));
+    CHECK(cache->stats().hits == 1);
+}
+
+TEST_CASE("SparseFile::parse: a run length near 2^64 is an InvalidFormat error, not a wrapped range") {
+    // A run header saying "len = 2^64 - 16" wraps pos + len below data.size() and offset + len below
+    // totalSize, and assign() then gets a reversed range (std::length_error, which nothing catches:
+    // every read-only command on such a file aborted). The checks must be overflow-free.
+    auto piece = [](ByteCount offset, std::uint64_t len, std::size_t payload) {
+        std::vector<std::byte> buf(24 + 16 + payload);
+        std::memcpy(buf.data(), SparseFile::kMagic, 12);
+        storeLe64(buf.data() + 12, 1 * MiB);
+        storeLe32(buf.data() + 20, 512);
+        storeLe64(buf.data() + 24, offset);
+        storeLe64(buf.data() + 32, len);
+        return buf;
+    };
+    const auto huge = piece(16, ~std::uint64_t{0} - 15, 16);   // 40 + len wraps to 24; 16 + len wraps to 0
+    auto r = SparseFile::parse(huge, "crafted");
+    REQUIRE_FALSE(r);
+    CHECK(r.error().category() == ErrorCategory::InvalidFormat);
+    // offset + len wraps to 8, below totalSize, while the 16 payload bytes satisfy the length check.
+    r = SparseFile::parse(piece(~std::uint64_t{0} - 7, 16, 16), "crafted");
+    REQUIRE_FALSE(r);
+    CHECK(r.error().category() == ErrorCategory::InvalidFormat);
+    // A run merely reaching past the buffer or the piece is the same error; a well-formed one parses.
+    CHECK(SparseFile::parse(piece(0, 17, 16), "crafted").error().category() == ErrorCategory::InvalidFormat);
+    CHECK(SparseFile::parse(piece(1 * MiB - 8, 16, 16), "crafted").error().category() == ErrorCategory::InvalidFormat);
+    auto ok = SparseFile::parse(piece(512, 16, 16), "crafted");
+    REQUIRE(ok);
+    CHECK(ok->runs.size() == 1);
+    CHECK(ok->runs[0].offset == 512);
+    CHECK(ok->runs[0].bytes.size() == 16);
+    // The same crafted piece on disk, opened the way the CLI opens one.
+    auto dir = std::filesystem::temp_directory_path() / "stein_test_sparse_overflow";
+    std::filesystem::create_directories(dir);
+    const auto path = dir / "huge.sparse";
+    {
+        std::ofstream out(path, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(huge.data()), static_cast<std::streamsize>(huge.size()));
+    }
+    auto dev = SparseFile::openAsDevice(path);
+    REQUIRE_FALSE(dev);
+    CHECK(dev.error().category() == ErrorCategory::InvalidFormat);
+    CHECK(SparseFile::read(path).error().category() == ErrorCategory::InvalidFormat);
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
 }

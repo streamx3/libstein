@@ -185,6 +185,35 @@ TEST_CASE("LUKS and LVM details") {
     CHECK((*md)->info().extra.find("raid1") != std::string::npos);
 }
 
+// A LUKS2 disk whose first 4 KiB were wiped still has its secondary header copy, which the
+// container layer opens from; before the fix the probe needed the primary magic and showed such a
+// disk as unknown data.
+TEST_CASE("LUKS2 with its first 4 KiB wiped is detected from the secondary header copy, with a diagnostic saying where it is") {
+    auto dev = loadSparseFixture("fs/luks2.sparse");
+    REQUIRE(dev);
+    REQUIRE(dev->writeAt(0, std::vector<std::byte>(4096)));
+    auto fs = probe(dev);
+    REQUIRE((fs && *fs));
+    CHECK((*fs)->type() == FsType::Luks2);
+    CHECK((*fs)->info().usage == Usage::Crypto);
+    CHECK((*fs)->info().label == "STEIN_LUKS2");
+    CHECK((*fs)->info().uuid == "f363f151-c64d-49e3-9bf9-c6d14619445d");
+    const FsDiagnostic* missing = nullptr;
+    for (const auto& d : (*fs)->diagnostics())
+        if (d.code == "luks2.primary_missing") missing = &d;
+    REQUIRE(missing);
+    CHECK(missing->message == "primary header missing; secondary copy at 16384");
+    CHECK(missing->severity == layout::Validity::Warning);
+    CHECK((*fs)->describe().child("secondary binary header") != nullptr);
+    CHECK((*fs)->describe().child("primary binary header") == nullptr);
+    REQUIRE((*fs)->metadataRegions().size() == 1);
+    CHECK((*fs)->metadataRegions()[0].length == 2 * 16384);
+    // The copy must vouch for itself: with its hdr_size field zeroed the SKUL magic alone is not a header.
+    REQUIRE(dev->writeAt(16384 + 8, std::vector<std::byte>(8)));
+    auto gone = probe(dev);
+    CHECK((!gone || !*gone || (*gone)->type() != FsType::Luks2));
+}
+
 TEST_CASE("nothing on a blank or random device") {
     auto blank = std::make_shared<MemoryDevice>(8 * MiB, 512);
     auto r = probe(blank);

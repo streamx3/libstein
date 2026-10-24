@@ -2,6 +2,7 @@
 #include "stein_fixture.hpp"
 #include "stein_test.hpp"
 
+#include "stein/core/endian.hpp"
 #include "stein/core/hash.hpp"
 #include "stein/fs/filesystem.hpp"
 #include "stein/image/operations.hpp"
@@ -1054,5 +1055,76 @@ TEST_CASE("image devices: four threads reading one stein image and one compresse
     steinDev->reset();
     qcowDev->reset();
     mem->reset();
+    stein::test::removeTree(dir);
+}
+
+TEST_CASE("vdisk: a compressed cluster that fails to decompress does not poison the one-unit cache; the previous unit reads back intact") {
+    // The compressed qcow2 twice: a reference, and a copy with one cluster's deflate stream
+    // overwritten so inflating it fails. Reading a good cluster, then the broken one (an error),
+    // then the good one again must give the reference bytes, not the zeroed buffer the failed
+    // decompression left behind under the good cluster's tag.
+    auto dir = tmpDir("stein_test_vdisk_corrupt");
+    auto mem = SparseFile::loadIntoMemory(std::string(STEIN_FIXTURE_DIR) + "/vdisk/qcow2_compressed.sparse");
+    REQUIRE(mem);
+    std::vector<std::byte> file((*mem)->bytes().begin(), (*mem)->bytes().end());
+    mem->reset();
+    // Walk the L1/L2 tables for compressed clusters (bit 62) and where their streams lie in the file.
+    const std::uint32_t clusterBits = loadBe32(file.data() + 20);
+    const std::uint32_t l1Size = loadBe32(file.data() + 36);
+    const std::uint64_t l1Offset = loadBe64(file.data() + 40);
+    const std::uint64_t clusterSize = 1ull << clusterBits, l2Entries = clusterSize / 8;
+    struct Compressed { ByteCount guest, host, length; };
+    std::vector<Compressed> comp;
+    for (std::uint32_t i = 0; i < l1Size; ++i) {
+        const std::uint64_t l2Off = loadBe64(file.data() + l1Offset + i * 8) & 0x00FFFFFFFFFFFE00ull;
+        if (!l2Off) continue;
+        for (std::uint64_t j = 0; j < l2Entries; ++j) {
+            const std::uint64_t e = loadBe64(file.data() + l2Off + j * 8);
+            if (!(e & (1ull << 62))) continue;
+            const unsigned x = 62 - (clusterBits - 8);
+            const std::uint64_t host = e & ((1ull << x) - 1);
+            const std::uint64_t sectors = ((e >> x) & ((1ull << (clusterBits - 8)) - 1)) + 1;
+            comp.push_back({(std::uint64_t{i} * l2Entries + j) * clusterSize, host, sectors * 512 - (host & 511)});
+        }
+    }
+    REQUIRE(comp.size() >= 2);
+    auto writeFile = [&](const std::filesystem::path& path, const std::vector<std::byte>& bytes) {
+        std::ofstream out(path, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    };
+    writeFile(dir / "ref.qcow2", file);
+    auto ref = image::openVdisk(dir / "ref.qcow2");
+    REQUIRE_MESSAGE(ref, (ref ? std::string() : ref.error().toString()));
+    // The good cluster: the first compressed one whose plaintext is not all zero, so a zeroed cache shows.
+    const Compressed* good = nullptr;
+    std::vector<std::byte> expect;
+    for (const auto& c : comp) {
+        auto bytes = (*ref)->read(c.guest, clusterSize);
+        REQUIRE(bytes);
+        if (std::any_of(bytes->begin(), bytes->end(), [](std::byte b) { return b != std::byte{0}; })) {
+            good = &c;
+            expect = std::move(*bytes);
+            break;
+        }
+    }
+    REQUIRE(good);
+    const Compressed& bad = good == &comp[0] ? comp[1] : comp[0];
+    // 0xFF as the first byte of a raw deflate stream is a final block of the reserved type 3.
+    std::fill_n(file.begin() + static_cast<std::ptrdiff_t>(bad.host), static_cast<std::ptrdiff_t>(bad.length), std::byte{0xFF});
+    writeFile(dir / "bad.qcow2", file);
+    auto dev = image::openVdisk(dir / "bad.qcow2");
+    REQUIRE_MESSAGE(dev, (dev ? std::string() : dev.error().toString()));
+    auto first = (*dev)->read(good->guest, clusterSize);
+    REQUIRE(first);
+    CHECK(*first == expect);
+    auto broken = (*dev)->read(bad.guest, clusterSize);
+    REQUIRE_FALSE(broken);
+    auto again = (*dev)->read(good->guest, clusterSize);
+    REQUIRE(again);
+    CHECK(*again == expect);
+    // And the broken cluster stays an error rather than turning into zeros on a retry.
+    CHECK_FALSE((*dev)->read(bad.guest, 512));
+    ref->reset();
+    dev->reset();
     stein::test::removeTree(dir);
 }

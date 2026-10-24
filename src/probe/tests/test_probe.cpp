@@ -147,6 +147,34 @@ TEST_CASE("probe: a LUKS container opens with a passphrase and shows its plainte
     CHECK(noted);
 }
 
+// What a disk with its first sectors wiped looks like: the LUKS2 secondary copy at 16 KiB is all
+// that is left of the header. The detector finds it, the container opens from it, the passphrase
+// opens the payload; before the fix the probe showed unknown data.
+TEST_CASE("probe: a LUKS2 disk whose first 4 KiB were wiped is recognised from the secondary header copy and still opens with the passphrase") {
+    auto disk = loadSparseFixture("luks/luks2.sparse");
+    REQUIRE(disk);
+    REQUIRE(disk->writeAt(0, std::vector<std::byte>(4096)));
+    probe::Options o;
+    auto locked = probe::probe(disk, o);
+    REQUIRE(locked);
+    REQUIRE(locked->content);
+    CHECK(locked->content->type() == fs::FsType::Luks2);
+    CHECK(locked->children.empty());
+    bool noted = false;
+    for (const auto& n : locked->notes) noted = noted || (n.code == "luks2.primary_missing" && n.message.find("secondary copy at 16384") != std::string::npos);
+    CHECK(noted);
+    o.passphrases = {"luks test passphrase"};
+    auto open = probe::probe(disk, o);
+    REQUIRE(open);
+    REQUIRE(open->children.size() == 1);
+    const auto& d = open->children[0];
+    CHECK(d.kind == probe::NodeKind::Decrypted);
+    REQUIRE(d.content);
+    CHECK(d.content->type() == fs::FsType::Ext2);
+    CHECK(d.content->info().label == "inside_luks");
+    CHECK(d.region.offset == 1 * MiB);
+}
+
 TEST_CASE("probe: an LVM physical volume lists its logical volumes and probes the ones it can map") {
     auto pv0 = loadSparseFixture("lvm/pv0.sparse");
     auto tree = probe::probe(pv0);

@@ -28,7 +28,10 @@ struct LuksSlotInfo {
     std::string kdfDetail;       // "sha256 1000 iterations" / "t=4 m=64KiB p=1"
     std::vector<std::string> tokens;   // LUKS2 token types bound to this slot: "systemd-tpm2", "systemd-fido2", "systemd-recovery", "clevis"...
     // Non-empty when unlock() cannot try this slot: a KDF, AF hash or area cipher we lack, Argon2
-    // memory above the machine's cap, a key size that is not the volume key's, no digest binding.
+    // parameters outside RFC 9106's bounds or memory above the machine's cap, a key size that is not
+    // the volume key's or not one XTS takes (64 bytes, or 32 with aes), implausible key material
+    // (stripes * key size), a key material area inside the header or beyond the device, no digest
+    // binding. Settled when the header is parsed, so a slot that cannot open the volume costs no KDF.
     std::string unsupportedWhy;
 };
 
@@ -38,18 +41,24 @@ struct LuksInfo {
     std::string mode;            // "xts-plain64"
     std::string hash;            // LUKS1 header hash / LUKS2 digest hash
     std::uint32_t keyBytes = 0;  // volume (master) key size: 64 for aes-xts-512. LUKS2: the key_size of the segment digest's first slot
-    ByteCount payloadOffset = 0; // on the data device (see Luks::open(header, data))
-    ByteCount payloadSize = 0;
+    ByteCount payloadOffset = 0; // on the data device (see Luks::open(header, data)); a multiple of 512, past the header and key material when they share the device
+    ByteCount payloadSize = 0;   // whole sectors of sectorSize; 0 when headerOnly
+    // The payload offset is 0 and the header was opened by itself: what cryptsetup writes for a detached
+    // header (luksFormat --header), so this is a header file or backup, not a volume. info() and unlock()
+    // work (the digest vouches for a key); openPayload() is OutOfRange, since decrypting the header's own
+    // bytes would only produce garbage. Open it with Luks::open(header, data) to reach the payload.
+    bool headerOnly = false;
     std::uint32_t sectorSize = 512;
-    std::uint64_t ivTweak = 0;
+    std::uint64_t ivTweak = 0;   // LUKS2 segment iv_tweak as stored: dm-crypt's iv_offset, in 512-byte sectors (a multiple of sectorSize / 512)
     std::string uuid, label;
     std::vector<LuksSlotInfo> slots;
     std::vector<std::string> flags;          // LUKS2 config.flags as stored ("allow-discards", "no-journal"...)
     std::vector<std::string> requirements;   // LUKS2 config.requirements.mandatory ("online-reencrypt"...): any entry makes the volume unsupported
     // LUKS2 keeps two copies of the binary header + JSON area, the second at hdr_size. Each copy is
     // checked (csum_alg over the binary header with the csum field zeroed, then the JSON area) and
-    // the valid copy with the highest seqid is used, so a damaged primary opens from the secondary.
-    // LUKS1 has one header: headerCopyUsed 0 and both flags true.
+    // the valid copy with the highest seqid is used, so a damaged primary opens from the secondary;
+    // when the first 4 KiB are zeroed, overwritten or unreadable, the secondary is looked for at
+    // every metadata size cryptsetup writes (16 KiB .. 4 MiB). LUKS1 has one header: headerCopyUsed 0 and both flags true.
     int headerCopyUsed = 0;      // 0 = primary, 1 = secondary
     bool primaryValid = true;
     bool secondaryValid = true;
@@ -79,6 +88,8 @@ public:
 
     // Try every usable slot, priority 2 first and 0 last. Integrity when every usable slot was tried and
     // none opens; Unsupported when no slot is usable (the message lists why); Cancelled from the hook.
+    // Every intermediate (the derived area key, the decrypted key material, a rejected candidate key)
+    // is wiped before its buffer is freed; the returned key is the caller's to wipe (stein/core/secure.hpp).
     Expected<std::vector<std::uint8_t>> unlock(const std::string& passphrase, const UnlockOptions& options = {}) const;
     // The payload as a device decrypting on read (and encrypting on write unless readOnly).
     Expected<std::shared_ptr<BlockDevice>> openPayload(std::span<const std::uint8_t> masterKey, bool readOnly = true) const;

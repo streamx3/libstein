@@ -14,8 +14,10 @@ namespace stein {
 // walk or a file read that touches the same sectors twice decrypts them once. Fixed-size chunks
 // (the last one ragged when the device size is not a multiple) in a bounded LRU. Writes pass
 // through to the inner device and drop the chunks they touch, so a reader never sees bytes the
-// inner device no longer holds. Safe to share between threads: the NFS server and the UI both
-// read through the same payload. Everything else forwards to the inner device.
+// inner device no longer holds. A chunk the inner device cannot read whole (a bad sector in it)
+// is not cached; the bytes asked for are read on their own, so only reads touching the bad sector
+// fail. Safe to share between threads: the NFS server and the UI both read through the same
+// payload. Everything else forwards to the inner device.
 class CachedDevice final : public BlockDevice {
 public:
     struct Options {

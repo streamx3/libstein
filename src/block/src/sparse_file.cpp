@@ -23,7 +23,10 @@ Expected<SparseFile::Contents> SparseFile::parse(std::span<const std::byte> data
         r.offset = loadLe64(data.data() + pos);
         const std::uint64_t len = loadLe64(data.data() + pos + 8);
         pos += 16;
-        if (pos + len > data.size() || r.offset + len > c.totalSize) return fail(ErrorCategory::InvalidFormat, "truncated or out-of-range run in " + what);
+        // Subtractions, not sums: a len near 2^64 wraps "pos + len" and "offset + len" below the
+        // limits, and assign() would get a reversed range (std::length_error, caught by nothing).
+        if (len > data.size() - pos || r.offset > c.totalSize || len > c.totalSize - r.offset)
+            return fail(ErrorCategory::InvalidFormat, "truncated or out-of-range run in " + what);
         r.bytes.assign(data.begin() + static_cast<std::ptrdiff_t>(pos), data.begin() + static_cast<std::ptrdiff_t>(pos + len));
         pos += static_cast<std::size_t>(len);
         c.runs.push_back(std::move(r));

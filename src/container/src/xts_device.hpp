@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 // Decrypting/encrypting view over an XTS payload (LUKS aes-xts-plain64,
 // VeraCrypt/TrueCrypt ciphers and cascades): one tweak per sector, starting at ivTweak.
+// ivTweak counts sectors of `sectorSize`, the unit the tweaks themselves are in. dm-crypt's
+// iv_offset (LUKS2 iv_tweak) is in 512-byte sectors whatever the sector size; the LUKS layer
+// divides it by sectorSize / 512 before building this device.
 #pragma once
 
 #include "stein/block/block_device.hpp"

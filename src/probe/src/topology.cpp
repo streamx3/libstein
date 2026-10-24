@@ -6,6 +6,7 @@
 #include "stein/volume/lvm.hpp"
 
 #include "stein/block/slice_device.hpp"
+#include "stein/core/secure.hpp"
 #include "stein/core/strings.hpp"
 #include "stein/pt/apm_table.hpp"
 #include "stein/pt/gpt_table.hpp"
@@ -168,13 +169,15 @@ void probeLuks(Node& node, const Options& options, int depth) {
             if (category != ErrorCategory::Integrity) node.notes.push_back(Note{Validity::Warning, "luks.unlock", key.error().message()});
             continue;
         }
+        // The key is wiped on every path (the payload device holds its own schedule): a plain fill
+        // before the vector dies is a dead store the optimiser may drop.
+        WipeOnExit wipeKey(*key);
         auto payload = luks->openPayload(*key, true);
         if (!payload) {
             node.notes.push_back(Note{Validity::Warning, "luks.unlock", payload.error().message()});
             continue;
         }
         if (options.onUnlocked) options.onUnlocked(info.uuid, *key);
-        std::fill(key->begin(), key->end(), std::uint8_t{0});   // the payload device holds its own schedule
         addDecryptedChild(node, options, depth, "decrypted", *payload, info.payloadOffset);
         return;
     }

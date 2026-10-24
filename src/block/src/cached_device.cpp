@@ -47,7 +47,12 @@ Expected<void> CachedDevice::readWithinChunk(ByteCount index, ByteCount within, 
     const ByteCount start = index * m_options.chunkSize;
     const auto length = static_cast<std::size_t>(std::min<ByteCount>(m_options.chunkSize, m_size - start));
     std::vector<std::byte> bytes(length);
-    if (auto r = m_inner->readAt(start, bytes); !r) return r;
+    if (auto r = m_inner->readAt(start, bytes); !r) {
+        // One bad sector fails the whole chunk read, but the window asked for may lie nowhere near
+        // it: a disk with a single unreadable sector must not lose the 256 KiB around it. Read just
+        // that window, uncached (the chunk is incomplete), and let only its own error through.
+        return m_inner->readAt(start + within, dst);
+    }
     std::memcpy(dst.data(), bytes.data() + within, dst.size());
     std::lock_guard lock(m_mutex);
     if (generation != m_generation || m_index.contains(index)) return {};

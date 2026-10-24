@@ -3,6 +3,7 @@
 
 #include "stein/core/endian.hpp"
 #include "stein/core/hash.hpp"
+#include "stein/core/secure.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -239,6 +240,7 @@ Expected<void> aeadDecrypt(const Key256& key, const Nonce96& nonce, std::span<co
 
 std::array<std::uint8_t, 32> hmacSha256(std::span<const std::byte> key, std::span<const std::byte> message) {
     std::array<std::uint8_t, 64> k{};
+    WipeOnExit wipeK(k);   // the key, padded
     if (key.size() > 64) {
         auto d = Hasher::digest(HashAlgorithm::Sha256, key);
         std::copy(d.begin(), d.end(), k.begin());
@@ -246,6 +248,7 @@ std::array<std::uint8_t, 32> hmacSha256(std::span<const std::byte> key, std::spa
         std::memcpy(k.data(), key.data(), key.size());
     }
     std::array<std::byte, 64> ipad{}, opad{};
+    WipeOnExit wipeIpad(ipad), wipeOpad(opad);
     for (int i = 0; i < 64; ++i) {
         ipad[static_cast<std::size_t>(i)] = std::byte(k[static_cast<std::size_t>(i)] ^ 0x36);
         opad[static_cast<std::size_t>(i)] = std::byte(k[static_cast<std::size_t>(i)] ^ 0x5c);
@@ -264,8 +267,10 @@ std::array<std::uint8_t, 32> hmacSha256(std::span<const std::byte> key, std::spa
 }
 
 void pbkdf2Sha256(std::span<const std::byte> password, std::span<const std::byte> salt, std::uint32_t iterations, std::span<std::uint8_t> out) {
-    // Precompute the keyed inner/outer states once; each iteration is two compressions.
+    // Precompute the keyed inner/outer states once; each iteration is two compressions. The padded
+    // password and the running U/T blocks are wiped when the derivation ends.
     std::array<std::uint8_t, 64> k{};
+    WipeOnExit wipeK(k);
     if (password.size() > 64) {
         auto d = Hasher::digest(HashAlgorithm::Sha256, password);
         std::copy(d.begin(), d.end(), k.begin());
@@ -273,6 +278,7 @@ void pbkdf2Sha256(std::span<const std::byte> password, std::span<const std::byte
         std::memcpy(k.data(), password.data(), password.size());
     }
     std::array<std::byte, 64> ipad{}, opad{};
+    WipeOnExit wipeIpad(ipad), wipeOpad(opad);
     for (std::size_t i = 0; i < 64; ++i) {
         ipad[i] = std::byte(k[i] ^ 0x36);
         opad[i] = std::byte(k[i] ^ 0x5c);
@@ -293,9 +299,10 @@ void pbkdf2Sha256(std::span<const std::byte> password, std::span<const std::byte
     std::size_t done = 0;
     std::vector<std::byte> first(salt.begin(), salt.end());
     first.resize(salt.size() + 4);
+    std::array<std::uint8_t, 32> u{}, t{};
+    WipeOnExit wipeU(u), wipeT(t);
     while (done < out.size()) {
         storeBe32(first.data() + salt.size(), block);
-        std::array<std::uint8_t, 32> u{}, t{};
         prf(first, u);
         t = u;
         for (std::uint32_t i = 1; i < iterations; ++i) {
@@ -401,9 +408,11 @@ struct Blake2bState {
 
 void blake2b(std::span<std::uint8_t> out, std::span<const std::byte> message, std::span<const std::byte> key) {
     const std::size_t outLen = std::min<std::size_t>(out.size(), 64);
-    Blake2bState st(outLen, key.size());
+    Blake2bState st(outLen, key.size());   // plain data (no vtable): wiped whole, its buffer holds the message's tail
+    WipeBytesOnExit wipeState(&st, sizeof st);
     if (!key.empty()) {
         std::uint8_t block[128] = {};
+        WipeOnExit wipeBlock(block);
         std::memcpy(block, key.data(), std::min<std::size_t>(key.size(), 64));
         st.update(block, 128);
     }
@@ -459,7 +468,9 @@ void argonG(const ArgonBlock& x, const ArgonBlock& y, ArgonBlock& out) {
 // Variable-length hash H'(X) of RFC 9106 §3.3.
 void argonHPrime(std::span<std::uint8_t> out, std::span<const std::byte> input) {
     const std::uint32_t t = static_cast<std::uint32_t>(out.size());
+    // The input is H0 (which hashes the password) or the final block; the V_i are the output itself.
     std::vector<std::byte> buf(4 + input.size());
+    WipeOnExit wipeBuf(buf);
     storeLe32(buf.data(), t);
     std::memcpy(buf.data() + 4, input.data(), input.size());
     if (t <= 64) {
@@ -467,20 +478,19 @@ void argonHPrime(std::span<std::uint8_t> out, std::span<const std::byte> input) 
         return;
     }
     const std::size_t r = (t + 31) / 32 - 2;
-    std::array<std::uint8_t, 64> v{};
+    std::array<std::uint8_t, 64> v{}, next{}, last{};
+    WipeOnExit wipeV(v), wipeNext(next), wipeLast(last);
     blake2b(v, buf);
     std::size_t pos = 0;
     for (std::size_t i = 0; i < r; ++i) {
         std::memcpy(out.data() + pos, v.data(), 32);
         pos += 32;
         if (i + 1 < r) {   // V_{r+1} below is derived from V_r itself
-            std::array<std::uint8_t, 64> next{};
             blake2b(next, std::span<const std::byte>(reinterpret_cast<const std::byte*>(v.data()), 64));
             v = next;
         }
     }
     const std::size_t rest = t - 32 * r;
-    std::array<std::uint8_t, 64> last{};
     blake2b(std::span<std::uint8_t>(last).first(rest), std::span<const std::byte>(reinterpret_cast<const std::byte*>(v.data()), 64));
     std::memcpy(out.data() + pos, last.data(), rest);
 }
@@ -532,8 +542,12 @@ Expected<void> argon2(Argon2Type type, std::span<const std::byte> password, std:
         return fail(ErrorCategory::Unsupported, "argon2: " + std::to_string(memoryKiB / 1024) + " MiB of memory requested, above this machine's cap of " + std::to_string(cap / 1024) + " MiB");
     constexpr std::uint32_t kVersion = 0x13;
     const std::uint32_t kTypeId = static_cast<std::uint32_t>(type);
-    // H0
+    // H0. The pre-hash buffer holds the password itself; it, H0, the working memory, the per-lane
+    // seeds and the final block are all wiped on the way out, cancellation included (RFC 9106 §3.1
+    // says to clear the memory; the reference implementation does).
     std::vector<std::byte> h0in;
+    h0in.reserve(10 * 4 + password.size() + salt.size() + secret.size() + ad.size());   // no reallocation once the password is in
+    WipeOnExit wipeH0in(h0in);
     le32push(h0in, parallelism);
     le32push(h0in, static_cast<std::uint32_t>(out.size()));
     le32push(h0in, memoryKiB);
@@ -549,6 +563,7 @@ Expected<void> argon2(Argon2Type type, std::span<const std::byte> password, std:
     le32push(h0in, static_cast<std::uint32_t>(ad.size()));
     h0in.insert(h0in.end(), ad.begin(), ad.end());
     std::array<std::uint8_t, 64> h0{};
+    WipeOnExit wipeH0(h0);
     blake2b(h0, h0in);
 
     const std::uint32_t lanes = parallelism;
@@ -558,18 +573,23 @@ Expected<void> argon2(Argon2Type type, std::span<const std::byte> password, std:
     // The cap above keeps this within the machine; nothrow so that a header can never turn into std::bad_alloc.
     std::unique_ptr<ArgonBlock[]> memory(new (std::nothrow) ArgonBlock[mPrime]);
     if (!memory) return fail(ErrorCategory::Unsupported, "argon2: cannot allocate " + std::to_string(memoryKiB / 1024) + " MiB of memory");
+    WipeBytesOnExit wipeMemory(memory.get(), sizeof(ArgonBlock) * mPrime);
     auto block = [&](std::uint32_t lane, std::uint32_t index) -> ArgonBlock& { return memory[static_cast<std::size_t>(lane) * q + index]; };
 
     // First two blocks of every lane.
-    for (std::uint32_t l = 0; l < lanes; ++l) {
-        for (std::uint32_t j = 0; j < 2; ++j) {
-            std::vector<std::byte> in(h0.size() + 8);
-            std::memcpy(in.data(), h0.data(), h0.size());
-            storeLe32(in.data() + 64, j);
-            storeLe32(in.data() + 68, l);
-            std::array<std::uint8_t, 1024> raw{};
-            argonHPrime(raw, in);
-            for (std::size_t w = 0; w < kArgonBlockWords; ++w) block(l, j).v[w] = loadLe64(reinterpret_cast<const std::byte*>(raw.data()) + 8 * w);
+    {
+        std::vector<std::byte> in(h0.size() + 8);
+        std::array<std::uint8_t, 1024> raw{};
+        WipeOnExit wipeIn(in);
+        WipeOnExit wipeRaw(raw);
+        for (std::uint32_t l = 0; l < lanes; ++l) {
+            for (std::uint32_t j = 0; j < 2; ++j) {
+                std::memcpy(in.data(), h0.data(), h0.size());
+                storeLe32(in.data() + 64, j);
+                storeLe32(in.data() + 68, l);
+                argonHPrime(raw, in);
+                for (std::size_t w = 0; w < kArgonBlockWords; ++w) block(l, j).v[w] = loadLe64(reinterpret_cast<const std::byte*>(raw.data()) + 8 * w);
+            }
         }
     }
 
@@ -597,6 +617,9 @@ Expected<void> argon2(Argon2Type type, std::span<const std::byte> password, std:
             argonG(zero, inputBlock, tmp);
             argonG(zero, tmp, addr);
         }
+        // One scratch block for the whole segment (argonG writes every word of it), wiped once at the end.
+        ArgonBlock fresh;
+        WipeBytesOnExit wipeFresh(fresh.v, sizeof fresh.v);
         for (std::uint32_t index = start; index < segLen; ++index) {
             std::uint32_t j1, j2;
             if (independent) {
@@ -634,7 +657,6 @@ Expected<void> argon2(Argon2Type type, std::span<const std::byte> password, std:
             const std::uint32_t refIndex = static_cast<std::uint32_t>((startPos + rel) % q);
             const std::uint32_t cur = slice * segLen + index;
             const std::uint32_t prev = cur == 0 ? q - 1 : cur - 1;
-            ArgonBlock fresh;
             argonG(block(lane, prev), block(refLane, refIndex), fresh);
             if (pass == 0) block(lane, cur) = fresh;
             else argonXor(block(lane, cur), block(lane, cur), fresh);
@@ -669,8 +691,10 @@ Expected<void> argon2(Argon2Type type, std::span<const std::byte> password, std:
     }
     // Final block: XOR of the last block of every lane.
     ArgonBlock c = block(0, q - 1);
+    WipeBytesOnExit wipeC(c.v, sizeof c.v);
     for (std::uint32_t l = 1; l < lanes; ++l) argonXor(c, c, block(l, q - 1));
     std::array<std::byte, 1024> cbytes{};
+    WipeOnExit wipeCbytes(cbytes);
     for (std::size_t w = 0; w < kArgonBlockWords; ++w) storeLe64(cbytes.data() + 8 * w, c.v[w]);
     argonHPrime(out, cbytes);
     return {};
@@ -734,16 +758,19 @@ struct HmacState {
     H inner, outer;
     explicit HmacState(std::span<const std::byte> key) {
         const std::size_t blockSize = H().blockSize();
-        std::vector<std::uint8_t> k(blockSize, 0);
+        std::vector<std::uint8_t> k(blockSize, 0);   // the key, padded: wiped with both pads
+        WipeOnExit wipeK(k);
         if (key.size() > blockSize) {
             H h;
             h.update(key);
             auto d = h.finish();
             std::copy(d.begin(), d.end(), k.begin());
+            secureZero(d.data(), d.size());
         } else if (!key.empty()) {
             std::memcpy(k.data(), key.data(), key.size());
         }
         std::vector<std::byte> ipad(blockSize), opad(blockSize);
+        WipeOnExit wipeIpad(ipad), wipeOpad(opad);
         for (std::size_t i = 0; i < blockSize; ++i) {
             ipad[i] = std::byte(k[i] ^ 0x36);
             opad[i] = std::byte(k[i] ^ 0x5c);
@@ -777,6 +804,7 @@ void pbkdf2With(std::span<const std::byte> password, std::span<const std::byte> 
         first[salt.size() + 3] = std::byte(block);
         auto u = prf.mac(first);
         auto t = u;
+        WipeOnExit wipeU(u), wipeT(t);   // the block's final U and T; mac() returns each U_i in a fresh vector
         for (std::uint32_t i = 1; i < iterations; ++i) {
             u = prf.mac(std::span<const std::byte>(reinterpret_cast<const std::byte*>(u.data()), u.size()));
             for (std::size_t j = 0; j < hLen; ++j) t[j] ^= u[j];

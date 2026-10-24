@@ -147,16 +147,23 @@ bool isValidUtf8(std::string_view s) {
 std::string asciiField(std::span<const std::byte> bytes) {
     std::size_t end = bytes.size();
     while (end > 0 && (bytes[end - 1] == std::byte{0} || bytes[end - 1] == std::byte{' '})) --end;
+    for (std::size_t i = 0; i < end; ++i)
+        if (bytes[i] == std::byte{0}) {   // an embedded NUL ends the field
+            end = i;
+            break;
+        }
+    const std::string_view raw(reinterpret_cast<const char*>(bytes.data()), end);
+    // ext/xfs/btrfs/f2fs store the label's bytes as typed, UTF-8 on any current system; read as
+    // Latin-1 "Données" became mojibake in the probe, the mount directory and the volume name.
+    // Latin-1 stays the reading for bytes that are not UTF-8 (DOS-era FAT labels, a label cut
+    // mid-sequence by the field's end), so nothing is dropped.
+    if (isValidUtf8(raw)) return std::string(raw);
     std::string out;
     out.reserve(end);
-    for (std::size_t i = 0; i < end; ++i) {
-        auto c = std::to_integer<unsigned char>(bytes[i]);
-        if (c == 0) break;
-        if (c < 0x80) {
-            out.push_back(static_cast<char>(c));
-        } else {
-            appendUtf8(out, c);   // treat as Latin-1
-        }
+    for (char ch : raw) {
+        const auto c = static_cast<unsigned char>(ch);
+        if (c < 0x80) out.push_back(ch);
+        else appendUtf8(out, c);
     }
     return out;
 }

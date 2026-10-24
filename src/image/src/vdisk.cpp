@@ -95,6 +95,9 @@ public:
                 break;
             case MappedDevice::Kind::Compressed: {
                 if (m_cachedUnit != m->unit || m_cache.size() != m_unitSize) {
+                    // Untag first: a failed decompression leaves the buffer zeroed, and tagged
+                    // with the previous unit it would serve zeros for that unit from then on.
+                    m_cachedUnit = ~0ull;
                     m_cache.assign(m_unitSize, std::byte{0});
                     if (auto d = m_decompress(m->unit, m_cache); !d) return d;
                     m_cachedUnit = m->unit;

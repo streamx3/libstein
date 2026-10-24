@@ -164,6 +164,26 @@ TEST_CASE("strings: fields and helpers") {
     CHECK(dump.find("|EFI PART|") != std::string::npos);
 }
 
+TEST_CASE("strings: asciiField keeps a UTF-8 label verbatim and reads anything else as Latin-1") {
+    // ext4/xfs/btrfs/f2fs store the label's bytes as typed, UTF-8 on any current system: read as
+    // Latin-1 they came out as mojibake, in the probe, the mount directory and the volume name.
+    const std::uint8_t utf8[16] = {'D', 'o', 'n', 'n', 0xC3, 0xA9, 'e', 's', 0, 0, 0, 0, 0, 0, 0, 0};
+    CHECK(asciiField(std::as_bytes(std::span(utf8))) == "Donn\xC3\xA9" "es");   // split: "\xA9e" would read as one escape
+    const std::uint8_t emoji[8] = {0xF0, 0x9F, 0x98, 0x80, 0, 0, 0, 0};
+    CHECK(asciiField(std::as_bytes(std::span(emoji))) == "\xF0\x9F\x98\x80");
+    // Bytes with no valid UTF-8 reading (a DOS-era FAT label, or a label cut off mid-sequence by
+    // the field's end) still decode as Latin-1, so nothing is dropped.
+    const std::uint8_t latin1[11] = {'C', 'A', 'F', 0xC9, ' ', ' ', ' ', ' ', ' ', ' ', ' '};
+    CHECK(asciiField(std::as_bytes(std::span(latin1))) == "CAF\xC3\x89");
+    const std::uint8_t cut[4] = {'a', 'b', 'c', 0xC3};
+    CHECK(asciiField(std::as_bytes(std::span(cut))) == "abc\xC3\x83");
+    // Plain ASCII is unchanged, and an embedded NUL still ends the field.
+    const std::uint8_t ascii[8] = {'D', 'A', 'T', 'A', 0, 'x', 'y', 'z'};
+    CHECK(asciiField(std::as_bytes(std::span(ascii))) == "DATA");
+    const std::uint8_t twoNuls[6] = {'D', 'A', 0, 'T', 0, 'x'};   // the first one, not the last
+    CHECK(asciiField(std::as_bytes(std::span(twoNuls))) == "DA");
+}
+
 TEST_CASE("progress and report") {
     struct Sink : ProgressSink {
         int updates = 0;

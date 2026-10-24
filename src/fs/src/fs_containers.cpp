@@ -20,8 +20,30 @@ Result detectLuks(Dev dev) {
     auto raw = readOrNotFound(*dev, 0, 4096);
     if (!raw) return fail(raw.error());
     static constexpr std::uint8_t kMagic[6] = {'L', 'U', 'K', 'S', 0xBA, 0xBE};
-    for (int i = 0; i < 6; ++i)
-        if (std::to_integer<std::uint8_t>((*raw)[i]) != kMagic[i]) return notMine("no LUKS magic");
+    static constexpr std::uint8_t kMagicSecondary[6] = {'S', 'K', 'U', 'L', 0xBA, 0xBE};
+    auto hasMagic = [](const std::vector<std::byte>& bytes, const std::uint8_t (&magic)[6]) {
+        for (int i = 0; i < 6; ++i)
+            if (std::to_integer<std::uint8_t>(bytes[static_cast<std::size_t>(i)]) != magic[i]) return false;
+        return true;
+    };
+    // A LUKS2 disk whose first 4 KiB were wiped or overwritten still has its secondary header copy,
+    // at one of the nine metadata sizes cryptsetup writes (--luks2-metadata-size); Luks::open opens it
+    // from there, so the probe must find it too instead of showing unknown data. The copy records its
+    // own size and position, which rules out a stray "SKUL" in someone's payload.
+    ByteCount secondaryAt = 0;
+    if (!hasMagic(*raw, kMagic)) {
+        for (ByteCount at : {16 * KiB, 32 * KiB, 64 * KiB, 128 * KiB, 256 * KiB, 512 * KiB, 1 * MiB, 2 * MiB, 4 * MiB}) {
+            if (at + 4096 > dev->size()) break;
+            auto sec = dev->read(at, 4096);
+            if (!sec || !hasMagic(*sec, kMagicSecondary)) continue;
+            gen::Luks2Hdr h2(*sec);
+            if (h2.version() != 2 || h2.hdrSize() != at || h2.hdrOffset() != at) continue;
+            raw = std::move(*sec);
+            secondaryAt = at;
+            break;
+        }
+        if (secondaryAt == 0) return notMine("no LUKS magic");
+    }
     const std::uint16_t version = loadBe16(raw->data() + 6);
     auto fs = std::make_unique<SimpleFileSystem>(dev);
     auto& info = fs->mutableInfo();
@@ -60,10 +82,20 @@ Result detectLuks(Dev dev) {
         info.blockSize = 512;
         info.totalBytes = dev->size();
         fs->setTreeName("LUKS2 encrypted volume");
+        const ByteCount hdrSize = h.hdrSize();
+        if (secondaryAt != 0) {
+            // Only the secondary copy is there (its size and position were checked above); the volume
+            // still opens from it, which the probe's LUKS step does.
+            auto t = h.describe(secondaryAt);
+            t.name = "secondary binary header";
+            fs->addNode(std::move(t));
+            fs->diag(Validity::Warning, "luks2.primary_missing", "primary header missing; secondary copy at " + std::to_string(secondaryAt));
+            fs->addRegion(Region{0, std::min<ByteCount>(2 * hdrSize, dev->size())});
+            return std::unique_ptr<FileSystem>(std::move(fs));
+        }
         auto t = h.describe(0);
         t.name = "primary binary header";
         fs->addNode(std::move(t));
-        const ByteCount hdrSize = h.hdrSize();
         if (hdrSize >= 16 * KiB && hdrSize <= 4 * MiB) {
             auto sec = readOrNotFound(*dev, hdrSize, 4096);
             if (sec) {

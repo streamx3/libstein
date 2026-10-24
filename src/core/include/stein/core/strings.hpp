@@ -26,7 +26,9 @@ bool utf8ToUtf16le(std::string_view text, std::span<std::byte> out);
 std::size_t utf16Length(std::string_view utf8);
 bool isValidUtf8(std::string_view s);
 
-// Latin-1 / ASCII fixed-width fields (MBR/APM/FAT labels): trim trailing spaces/NULs.
+// Fixed-width label fields (ext/xfs/btrfs/f2fs, APM, FAT, ...): trailing spaces/NULs trimmed, an
+// embedded NUL ends the field; the bytes are kept as they are when they form valid UTF-8, read as
+// Latin-1 otherwise.
 std::string asciiField(std::span<const std::byte> bytes);
 // Fill a fixed-width field with ASCII text padded with `pad` (space for FAT, NUL for APM).
 void setAsciiField(std::span<std::byte> field, std::string_view text, std::byte pad);
